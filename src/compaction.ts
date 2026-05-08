@@ -499,6 +499,7 @@ export class CompactionEngine {
     force?: boolean;
     previousSummaryContent?: string;
     summaryModel?: string;
+    allowCondensedPasses?: boolean;
   }): Promise<CompactionResult> {
     const { conversationId, tokenBudget, summarize, force } = input;
 
