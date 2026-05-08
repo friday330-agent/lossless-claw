@@ -26,7 +26,11 @@ import {
   CompactionMaintenanceStore,
   type ConversationCompactionMaintenanceRecord,
 } from "../store/compaction-maintenance-store.js";
-import { CompactionTelemetryStore } from "../store/compaction-telemetry-store.js";
+import {
+  CompactionTelemetryStore,
+  emptyAssemblyTelemetryCounters,
+  type AssemblyTelemetryCounters,
+} from "../store/compaction-telemetry-store.js";
 import type { ConversationStore } from "../store/conversation-store.js";
 import type { SummaryStore } from "../store/summary-store.js";
 import { describeSummaryDiagnostic, type SummaryDiagnosticReport } from "../summary-diagnostics.js";
@@ -90,6 +94,7 @@ type LcmCommandEngine = SummaryDiagnosticsEngine & {
     sessionFile: string;
     lockTimeoutMs: number;
   }): Promise<RotateSessionStorageWithBackupResult>;
+  getLastAssemblyObservation?(conversationId: number): AssemblyTelemetryCounters | null;
 };
 
 const DOCTOR_CLEANER_IDS = new Set<DoctorCleanerId>(getDoctorCleanerFilterIds());
@@ -623,6 +628,7 @@ async function buildStatusText(params: {
   ctx: PluginCommandContext;
   db: DatabaseSync;
   config: LcmConfig;
+  getLcm?: () => Promise<LcmCommandEngine>;
 }): Promise<string> {
   const status = getLcmStatusStats(params.db);
   const doctor = getDoctorSummaryStats(params.db);
@@ -673,6 +679,10 @@ async function buildStatusText(params: {
       params.db,
       current.stats.conversationId,
     );
+    const assemblyTelemetry = params.getLcm
+      ? (await params.getLcm()).getLastAssemblyObservation?.(current.stats.conversationId)
+        ?? emptyAssemblyTelemetryCounters()
+      : emptyAssemblyTelemetryCounters();
     const formatMaintenanceTime = (value: Date | null): string =>
       value ? formatTimestamp(value, params.config.timezone) : "never";
     lines.push(
@@ -731,6 +741,20 @@ async function buildStatusText(params: {
         buildStatLine("cache retention", telemetry?.retention ?? "unknown"),
         buildStatLine("cache state", telemetry?.cacheState ?? "unknown"),
         buildStatLine("provider/model", [telemetry?.provider, telemetry?.model].filter(Boolean).join(" / ") || "unknown"),
+      ]),
+    );
+    lines.push(
+      "",
+      buildSection("📚 Assembly sources", [
+        buildStatLine("reads", formatNumber(assemblyTelemetry.assemblyReadCount)),
+        buildStatLine("last selected source", assemblyTelemetry.assemblyLastSelectedSource ?? "unknown"),
+        buildStatLine("fallback count", formatNumber(assemblyTelemetry.assemblyFallbackCount)),
+        buildStatLine("last fallback reason", assemblyTelemetry.assemblyLastFallbackReason ?? "none"),
+        buildStatLine(
+          "source counts",
+          `raw_only=${formatNumber(assemblyTelemetry.assemblyRawOnlyCount)}, dag_summary=${formatNumber(assemblyTelemetry.assemblyDagSummaryCount)}, working_summary=${formatNumber(assemblyTelemetry.assemblyWorkingSummaryCount)}, injection_summary=${formatNumber(assemblyTelemetry.assemblyInjectionSummaryCount)}`,
+        ),
+        buildStatLine("last read", formatMaintenanceTime(assemblyTelemetry.assemblyLastReadAt)),
       ]),
     );
   } else {
@@ -1524,7 +1548,7 @@ export function createLcmCommand(params: {
       const parsed = parseLcmCommand(ctx.args);
       switch (parsed.kind) {
         case "status":
-          return { text: await buildStatusText({ ctx, db: await getDb(), config: params.config }) };
+          return { text: await buildStatusText({ ctx, db: await getDb(), config: params.config, getLcm: params.getLcm }) };
         case "backup":
           return {
             text: await buildBackupText({

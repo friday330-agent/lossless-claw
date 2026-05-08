@@ -85,6 +85,12 @@ export type LcmConfig = {
   databasePath: string;
   /** Directory for persisting large-file text payloads. */
   largeFilesDir: string;
+  /** When true, inject a working-summary candidate ahead of DAG summaries during assembly. */
+  workingSummaryEnabled: boolean;
+  /** Optional path to a working-summary markdown file injected during assembly. */
+  workingSummaryPath: string;
+  /** Optional token cap applied to the injected working summary candidate. */
+  workingSummaryMaxTokens?: number;
   /** Glob patterns for session keys to exclude from LCM storage entirely. */
   ignoreSessionPatterns: string[];
   /** Glob patterns for session keys that may read from LCM but never write to it. */
@@ -424,6 +430,18 @@ export function resolveLcmConfigWithDiagnostics(
         env.LCM_LARGE_FILES_DIR?.trim()
         ?? toStr(pc.largeFilesDir)
         ?? join(resolveOpenclawStateDir(env), "lcm-files"),
+      workingSummaryEnabled:
+        env.LCM_WORKING_SUMMARY_ENABLED !== undefined
+          ? env.LCM_WORKING_SUMMARY_ENABLED === "true"
+          : toBool(pc.workingSummaryEnabled) ?? false,
+      workingSummaryPath:
+        env.LCM_WORKING_SUMMARY_PATH?.trim()
+        ?? toStr(pc.workingSummaryPath)
+        ?? "",
+      workingSummaryMaxTokens:
+        parseFiniteInt(env.LCM_WORKING_SUMMARY_MAX_TOKENS)
+          ?? toNumber(pc.workingSummaryMaxTokens)
+          ?? 1200,
       ignoreSessionPatterns: ignoreSessionPatterns.patterns,
       statelessSessionPatterns: statelessSessionPatterns.patterns,
       skipStatelessSessions:
