@@ -24,6 +24,9 @@ describe("resolveLcmConfig", () => {
     expect(config.enabled).toBe(true);
     expect(config.databasePath).toBe(join(homedir(), ".openclaw", "lcm.db"));
     expect(config.largeFilesDir).toBe(join(homedir(), ".openclaw", "lcm-files"));
+    expect(config.workingSummaryEnabled).toBe(false);
+    expect(config.workingSummaryPath).toBe("");
+    expect(config.workingSummaryMaxTokens).toBe(1200);
     expect(config.ignoreSessionPatterns).toEqual([]);
     expect(config.statelessSessionPatterns).toEqual([]);
     expect(config.skipStatelessSessions).toBe(true);
@@ -72,6 +75,9 @@ describe("resolveLcmConfig", () => {
       contextThreshold: 0.5,
       freshTailCount: 16,
       freshTailMaxTokens: 12000,
+      workingSummaryEnabled: true,
+      workingSummaryPath: "/tmp/working-summary.md",
+      workingSummaryMaxTokens: 900,
       promptAwareEviction: false,
       leafChunkTokens: 80000,
       sweepMaxDepth: 2,
@@ -117,6 +123,9 @@ describe("resolveLcmConfig", () => {
     expect(config.contextThreshold).toBe(0.5);
     expect(config.freshTailCount).toBe(16);
     expect(config.freshTailMaxTokens).toBe(12000);
+    expect(config.workingSummaryEnabled).toBe(true);
+    expect(config.workingSummaryPath).toBe("/tmp/working-summary.md");
+    expect(config.workingSummaryMaxTokens).toBe(900);
     expect(config.promptAwareEviction).toBe(false);
     expect(config.newSessionRetainDepth).toBe(3);
     expect(config.leafChunkTokens).toBe(80000);
@@ -155,6 +164,9 @@ describe("resolveLcmConfig", () => {
       LCM_CONTEXT_THRESHOLD: "0.9",
       LCM_FRESH_TAIL_COUNT: "64",
       LCM_FRESH_TAIL_MAX_TOKENS: "32000",
+      LCM_WORKING_SUMMARY_ENABLED: "true",
+      LCM_WORKING_SUMMARY_PATH: "/env/working-summary.md",
+      LCM_WORKING_SUMMARY_MAX_TOKENS: "1500",
       LCM_PROMPT_AWARE_EVICTION_ENABLED: "false",
       LCM_NEW_SESSION_RETAIN_DEPTH: "5",
       LCM_ENABLED: "false",
@@ -184,6 +196,9 @@ describe("resolveLcmConfig", () => {
       contextThreshold: 0.5,
       freshTailCount: 16,
       freshTailMaxTokens: 12000,
+      workingSummaryEnabled: false,
+      workingSummaryPath: "/plugin/working-summary.md",
+      workingSummaryMaxTokens: 900,
       promptAwareEviction: true,
       sweepMaxDepth: 2,
       incrementalMaxDepth: -1,
@@ -237,6 +252,9 @@ describe("resolveLcmConfig", () => {
     expect(config.contextThreshold).toBe(0.9); // env wins
     expect(config.freshTailCount).toBe(64); // env wins
     expect(config.freshTailMaxTokens).toBe(32000); // env wins
+    expect(config.workingSummaryEnabled).toBe(true); // env wins
+    expect(config.workingSummaryPath).toBe("/env/working-summary.md"); // env wins
+    expect(config.workingSummaryMaxTokens).toBe(1500); // env wins
     expect(config.promptAwareEviction).toBe(false); // env wins
     expect(config.newSessionRetainDepth).toBe(5); // env wins
     expect(config.sweepMaxDepth).toBe(4); // new env wins deprecated env/config
@@ -666,6 +684,19 @@ describe("resolveLcmConfig", () => {
   it("ships a manifest with promptAwareEviction in schema", () => {
     expect(manifest.configSchema.properties.promptAwareEviction).toEqual({
       type: "boolean",
+    });
+  });
+
+  it("ships a manifest with working summary config in schema", () => {
+    expect(manifest.configSchema.properties.workingSummaryEnabled).toMatchObject({
+      type: "boolean",
+    });
+    expect(manifest.configSchema.properties.workingSummaryPath).toMatchObject({
+      type: "string",
+    });
+    expect(manifest.configSchema.properties.workingSummaryMaxTokens).toMatchObject({
+      type: "integer",
+      minimum: 1,
     });
   });
 

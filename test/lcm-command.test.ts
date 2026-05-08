@@ -7,6 +7,7 @@ import { getLcmDbFeatures } from "../src/db/features.js";
 import { createLcmDatabaseConnection, closeLcmConnection } from "../src/db/connection.js";
 import { resolveLcmConfig } from "../src/db/config.js";
 import { ConversationStore } from "../src/store/conversation-store.js";
+import { AssemblyTelemetryStore } from "../src/store/compaction-telemetry-store.js";
 import { SummaryStore } from "../src/store/summary-store.js";
 import { createLcmCommand, __testing } from "../src/plugin/lcm-command.js";
 import type { LcmSummarizeFn } from "../src/summarize.js";
@@ -24,6 +25,7 @@ function createCommandFixture(options?: {
   runLcmMigrations(db, { fts5Available });
   const conversationStore = new ConversationStore(db, { fts5Available });
   const summaryStore = new SummaryStore(db, { fts5Available });
+  const assemblyTelemetryStore = new AssemblyTelemetryStore();
   const config = resolveLcmConfig({}, { dbPath });
   const command = createLcmCommand({
     db,
@@ -38,9 +40,10 @@ function createCommandFixture(options?: {
         },
         getConversationStore: () => conversationStore,
         getSummaryStore: () => summaryStore,
+        getLastAssemblyObservation: (conversationId: number) => assemblyTelemetryStore.get(conversationId),
       })),
   });
-  return { tempDir, dbPath, db, command, conversationStore, summaryStore };
+  return { tempDir, dbPath, db, command, conversationStore, summaryStore, assemblyTelemetryStore };
 }
 
 function createRotateOnlyLcmFixture(rotateSessionStorageWithBackup: (...args: unknown[]) => Promise<unknown>) {
@@ -225,6 +228,15 @@ describe("lcm command", () => {
       endOrdinal: 1,
       summaryId: "current_parent",
     });
+    fixture.assemblyTelemetryStore.recordObservation({
+      conversationId: conversation.conversationId,
+      selectedSource: "dag_summary",
+    });
+    fixture.assemblyTelemetryStore.recordObservation({
+      conversationId: conversation.conversationId,
+      selectedSource: "raw_only",
+      fallbackReason: "incomplete_raw_bootstrap",
+    });
 
     const result = await fixture.command.handler(
       createCommandContext(undefined, {
@@ -244,6 +256,12 @@ describe("lcm command", () => {
     expect(result.text).toContain("tokens in context: 5");
     expect(result.text).toContain("compression ratio: 1:6");
     expect(result.text).toContain("doctor: 1 issue(s) in this conversation");
+    expect(result.text).toContain("**📚 Assembly sources**");
+    expect(result.text).toContain("reads: 2");
+    expect(result.text).toContain("last selected source: raw_only");
+    expect(result.text).toContain("fallback count: 1");
+    expect(result.text).toContain("last fallback reason: incomplete_raw_bootstrap");
+    expect(result.text).toContain("source counts: raw_only=1, dag_summary=1, working_summary=0, injection_summary=0");
   });
 
   it("reports summary raw span diagnostics and local rebuild boundary", async () => {
