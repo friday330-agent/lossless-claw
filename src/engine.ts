@@ -22,6 +22,7 @@ import {
   contentFromParts,
   ContextAssembler,
   pickToolCallId,
+  produceWorkingSummaryInjectionCandidate,
   pickToolIsError,
   pickToolName,
   type AssemblyOverflowDiagnostics,
@@ -51,10 +52,13 @@ import { RetrievalEngine } from "./retrieval.js";
 import { compileSessionPatterns, matchesSessionPattern } from "./session-patterns.js";
 import { logStartupBannerOnce } from "./startup-banner-log.js";
 import {
+  AssemblyTelemetryStore,
   CompactionTelemetryStore,
   type ConversationCompactionTelemetryRecord,
   type CacheState,
   type ActivityBand,
+  type AssemblyTelemetryCounters,
+  type AssemblySelectedSource,
 } from "./store/compaction-telemetry-store.js";
 import {
   CompactionMaintenanceStore,
@@ -1665,6 +1669,7 @@ export class LcmContextEngine implements ContextEngine {
   private recentBootstrapImportsByConversation = new Map<number, BootstrapImportObservation>();
   private largeFileTextSummarizerResolved = false;
   private largeFileTextSummarizer?: (prompt: string) => Promise<string | null>;
+  private assemblyTelemetryStore = new AssemblyTelemetryStore();
   private deps: LcmDependencies;
 
   /**
@@ -1769,6 +1774,11 @@ export class LcmContextEngine implements ContextEngine {
       this.summaryStore,
       this.config.timezone,
     );
+    if (this.config.workingSummaryEnabled) {
+      this.deps.log.info(
+        `[lcm] Working summary injection enabled path=${this.config.workingSummaryPath || "(unset)"} maxTokens=${this.config.workingSummaryMaxTokens ?? "unset"}`,
+      );
+    }
 
     const compactionConfig: CompactionConfig = {
       contextThreshold: this.config.contextThreshold,
@@ -6042,6 +6052,11 @@ export class LcmContextEngine implements ContextEngine {
 
       const contextItems = await this.summaryStore.getContextItems(conversation.conversationId);
       if (contextItems.length === 0) {
+        await this.recordAssemblyObservation({
+          conversationId: conversation.conversationId,
+          selectedSource: "raw_only",
+          fallbackReason: "no_context_items",
+        });
         this.deps.log.info(
           `[lcm] assemble: no context items conversation=${conversation.conversationId} ${sessionLabel} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
@@ -6053,15 +6068,30 @@ export class LcmContextEngine implements ContextEngine {
       // the live path to avoid dropping prompt context.
       const hasSummaryItems = contextItems.some((item) => item.itemType === "summary");
       if (!hasSummaryItems && contextItems.length < params.messages.length) {
+        await this.recordAssemblyObservation({
+          conversationId: conversation.conversationId,
+          selectedSource: "raw_only",
+          fallbackReason: "incomplete_raw_bootstrap",
+        });
         this.deps.log.info(
           `[lcm] assemble: falling back to live context conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} liveMessages=${params.messages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
         return safeFallback();
       }
 
+      const workingSummary = this.config.workingSummaryEnabled
+        ? {
+            path: this.config.workingSummaryPath,
+            maxTokens: this.config.workingSummaryMaxTokens,
+          }
+        : undefined;
+      const workingSummaryInjection = produceWorkingSummaryInjectionCandidate(workingSummary);
+
       const assembled = await this.assembler.assemble({
         conversationId: conversation.conversationId,
         tokenBudget,
+        injectionSummaries: workingSummary ? workingSummaryInjection.candidates : undefined,
+        workingSummary,
         freshTailCount: this.config.freshTailCount,
         freshTailMaxTokens: this.config.freshTailMaxTokens,
         promptAwareEviction: this.config.promptAwareEviction,
@@ -6075,9 +6105,17 @@ export class LcmContextEngine implements ContextEngine {
         );
       }
 
+      const selectedSource = this.normalizeAssemblySelectedSource(
+        assembled.sourceCounters?.selectedSource,
+      );
       // If assembly produced no messages for a non-empty live session,
       // fail safe to the live context.
       if (assembled.messages.length === 0 && params.messages.length > 0) {
+        await this.recordAssemblyObservation({
+          conversationId: conversation.conversationId,
+          selectedSource,
+          fallbackReason: "empty_assembled_output",
+        });
         this.deps.log.info(
           `[lcm] assemble: empty assembled output, using live context conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} tokenBudget=${tokenBudget} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
@@ -6091,6 +6129,11 @@ export class LcmContextEngine implements ContextEngine {
       // every stored message is role "assistant" or "toolResult".
       const assembledHasUserTurn = assembled.messages.some((m) => m.role === "user");
       if (!assembledHasUserTurn && params.messages.length > 0) {
+        await this.recordAssemblyObservation({
+          conversationId: conversation.conversationId,
+          selectedSource,
+          fallbackReason: "no_user_turns",
+        });
         this.deps.log.info(
           `[lcm] assemble: assembled context has no user turns, falling back to live context to prevent prefill errors conversation=${conversation.conversationId} ${sessionLabel} assembledMessages=${assembled.messages.length} duration=${formatDurationMs(Date.now() - startedAt)}`,
         );
@@ -6099,6 +6142,11 @@ export class LcmContextEngine implements ContextEngine {
           estimatedTokens: 0,
         };
       }
+
+      const assemblyObservation = await this.recordAssemblyObservation({
+        conversationId: conversation.conversationId,
+        selectedSource,
+      });
 
       this.deps.log.info(
         `[lcm] assemble: done conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} hasSummaryItems=${hasSummaryItems} inputMessages=${params.messages.length} outputMessages=${assembled.messages.length} tokenBudget=${tokenBudget} estimatedTokens=${assembled.estimatedTokens} duration=${formatDurationMs(Date.now() - startedAt)}`,
@@ -6129,7 +6177,7 @@ export class LcmContextEngine implements ContextEngine {
             })}`
           : "";
         this.deps.log.info(
-          `[lcm] assemble-debug conversation=${conversation.conversationId} ${sessionLabel} cacheAwareState=${cacheAwareState} messagesHash=${assembled.debug.finalMessagesHash} preSanitizeHash=${assembled.debug.preSanitizeMessagesHash} previousAssembledCount=${prefixChange.previousCount} commonPrefixCount=${prefixChange.commonPrefixCount} commonPrefixHash=${prefixChange.commonPrefixHash} previousWasPrefix=${prefixChange.previousWasPrefix} firstDivergenceIndex=${prefixChange.firstDivergenceIndex} previousDivergenceMessage=${prefixChange.previousDivergenceMessage} currentDivergenceMessage=${prefixChange.currentDivergenceMessage} evictableCount=${assembled.debug.preSanitizeEvictableCount} evictableHash=${assembled.debug.preSanitizeEvictableHash} freshTailSegmentCount=${assembled.debug.preSanitizeFreshTailCount} freshTailSegmentHash=${assembled.debug.preSanitizeFreshTailHash} selectionMode=${assembled.debug.selectionMode} freshTailOrdinal=${assembled.debug.freshTailOrdinal} orphanStrippingOrdinal=${assembled.debug.orphanStrippingOrdinal} baseFreshTailCount=${assembled.debug.baseFreshTailCount} freshTailCount=${assembled.debug.freshTailCount} tailTokens=${assembled.debug.tailTokens} remainingBudget=${assembled.debug.remainingBudget} evictableTotalTokens=${assembled.debug.evictableTotalTokens} promotedToolResults=${assembled.debug.promotedToolResultCount} promotedOrdinals=${promotedOrdinals} removedToolUseBlocks=${assembled.debug.removedToolUseBlockCount} touchedAssistantMessages=${assembled.debug.touchedAssistantMessageCount}${overflowDiagnostics}`,
+          `[lcm] assemble-debug conversation=${conversation.conversationId} ${sessionLabel} cacheAwareState=${cacheAwareState} messagesHash=${assembled.debug.finalMessagesHash} preSanitizeHash=${assembled.debug.preSanitizeMessagesHash} previousAssembledCount=${prefixChange.previousCount} commonPrefixCount=${prefixChange.commonPrefixCount} commonPrefixHash=${prefixChange.commonPrefixHash} previousWasPrefix=${prefixChange.previousWasPrefix} firstDivergenceIndex=${prefixChange.firstDivergenceIndex} previousDivergenceMessage=${prefixChange.previousDivergenceMessage} currentDivergenceMessage=${prefixChange.currentDivergenceMessage} evictableCount=${assembled.debug.preSanitizeEvictableCount} evictableHash=${assembled.debug.preSanitizeEvictableHash} freshTailSegmentCount=${assembled.debug.preSanitizeFreshTailCount} freshTailSegmentHash=${assembled.debug.preSanitizeFreshTailHash} selectionMode=${assembled.debug.selectionMode} freshTailOrdinal=${assembled.debug.freshTailOrdinal} orphanStrippingOrdinal=${assembled.debug.orphanStrippingOrdinal} baseFreshTailCount=${assembled.debug.baseFreshTailCount} freshTailCount=${assembled.debug.freshTailCount} tailTokens=${assembled.debug.tailTokens} remainingBudget=${assembled.debug.remainingBudget} evictableTotalTokens=${assembled.debug.evictableTotalTokens} promotedToolResults=${assembled.debug.promotedToolResultCount} promotedOrdinals=${promotedOrdinals} removedToolUseBlocks=${assembled.debug.removedToolUseBlockCount} touchedAssistantMessages=${assembled.debug.touchedAssistantMessageCount} injectionSummaryInjected=${assembled.sourceCounters?.injectionSummaryInjected ?? false} injectionSummarySkippedReason=${assembled.sourceCounters?.injectionSummarySkippedReason ?? "none"} injectionSummarySource=${assembled.sourceCounters?.injectionSummarySource ?? "none"} injectionSummarySourceId=${assembled.sourceCounters?.injectionSummarySourceId ?? "none"} workingSummaryInjected=${assembled.sourceCounters?.workingSummaryInjected ?? false} workingSummarySkippedReason=${assembled.sourceCounters?.workingSummarySkippedReason ?? "none"} selectedSource=${assembled.sourceCounters?.selectedSource ?? "dag_summary"} assemblyReads=${assemblyObservation.assemblyReadCount} assemblyFallbacks=${assemblyObservation.assemblyFallbackCount} assemblyLastFallbackReason=${assemblyObservation.assemblyLastFallbackReason ?? "none"}${overflowDiagnostics}`,
         );
       }
 
@@ -6144,6 +6192,27 @@ export class LcmContextEngine implements ContextEngine {
       );
       return safeFallback();
     }
+  }
+
+  private normalizeAssemblySelectedSource(value: unknown): AssemblySelectedSource {
+    return value === "raw_only"
+      || value === "dag_summary"
+      || value === "working_summary"
+      || value === "compaction_injection_summary"
+      ? value
+      : "dag_summary";
+  }
+
+  private async recordAssemblyObservation(params: {
+    conversationId: number;
+    selectedSource: AssemblySelectedSource;
+    fallbackReason?: string | null;
+  }): Promise<AssemblyTelemetryCounters> {
+    const observation = this.assemblyTelemetryStore.recordObservation(params);
+    this.deps.log.debug(
+      `[lcm] assembly source telemetry: conversation=${params.conversationId} selectedSource=${observation.assemblyLastSelectedSource ?? "unknown"} fallbackReason=${observation.assemblyLastFallbackReason ?? "none"} reads=${observation.assemblyReadCount} rawOnly=${observation.assemblyRawOnlyCount} dagSummary=${observation.assemblyDagSummaryCount} workingSummary=${observation.assemblyWorkingSummaryCount} injectionSummary=${observation.assemblyInjectionSummaryCount} fallbacks=${observation.assemblyFallbackCount}`,
+    );
+    return observation;
   }
 
   /** Evaluate whether incremental leaf compaction should run for a session. */
@@ -7120,6 +7189,10 @@ export class LcmContextEngine implements ContextEngine {
 
   getCompactionTelemetryStore(): CompactionTelemetryStore {
     return this.compactionTelemetryStore;
+  }
+
+  getLastAssemblyObservation(conversationId: number): AssemblyTelemetryCounters | null {
+    return this.assemblyTelemetryStore.get(conversationId);
   }
 
   getCompactionMaintenanceStore(): CompactionMaintenanceStore {

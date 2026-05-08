@@ -17,6 +17,9 @@ Most installations only need to override a handful of keys. If you want a comple
   "enabled": true,
   "databasePath": "/Users/alice/.openclaw/lcm.db",
   "largeFilesDir": "/Users/alice/.openclaw/lcm-files",
+  "workingSummaryEnabled": false,
+  "workingSummaryPath": "/Users/alice/.openclaw/memory/summary/session-memory/main-current.md",
+  "workingSummaryMaxTokens": 1200,
   "ignoreSessionPatterns": [],
   "statelessSessionPatterns": [],
   "skipStatelessSessions": true,
@@ -106,6 +109,9 @@ openclaw plugins install --link /path/to/lossless-claw
 | `databasePath` | `string` | `${OPENCLAW_STATE_DIR}/lcm.db` | `LCM_DATABASE_PATH` | Preferred path for the SQLite database. |
 | `dbPath` | `string` | alias of `databasePath` | `LCM_DATABASE_PATH` | Legacy alias for `databasePath`. Prefer `databasePath` in new config. |
 | `largeFilesDir` | `string` | `${OPENCLAW_STATE_DIR}/lcm-files` | `LCM_LARGE_FILES_DIR` | Directory where externalized large files and inline images are persisted. Automatically follows the active state directory. |
+| `workingSummaryEnabled` | `boolean` | `false` | `LCM_WORKING_SUMMARY_ENABLED` | Enables v1 working-summary candidate injection ahead of DAG summaries during assembly. |
+| `workingSummaryPath` | `string` | `""` | `LCM_WORKING_SUMMARY_PATH` | Path to the working-summary markdown sidecar to inject when enabled. |
+| `workingSummaryMaxTokens` | `integer` | `1200` | `LCM_WORKING_SUMMARY_MAX_TOKENS` | Token cap for the injected working-summary candidate. Oversized candidates are skipped and logged. |
 | `ignoreSessionPatterns` | `string[]` | `[]` | `LCM_IGNORE_SESSION_PATTERNS` | Session-key glob patterns that skip LCM entirely. |
 | `statelessSessionPatterns` | `string[]` | `[]` | `LCM_STATELESS_SESSION_PATTERNS` | Session-key glob patterns that may read from LCM but never write to it. |
 | `skipStatelessSessions` | `boolean` | `true` | `LCM_SKIP_STATELESS_SESSIONS` | Enforces `statelessSessionPatterns` when enabled. |
@@ -191,6 +197,18 @@ When cache-aware compaction is enabled:
 - cold cache still allows bounded catch-up passes via `cacheAwareCompaction.maxColdCacheCatchupPasses`
 
 When incremental leaf compaction still runs on a hot cache, follow-on condensed passes are suppressed so the maintenance cycle only pays for the leaf pass that was explicitly justified.
+
+### Working-summary injection
+
+When `workingSummaryEnabled` is enabled:
+
+- lossless-claw reads the configured `workingSummaryPath` during assembly
+- if the file is present and uses recognized fields (`Current topic`, `User goal`, `Must remember`, `Current stop point`, `Current risk`, `Next step`), lossless-claw normalizes those fields into a `compaction_injection_summary` candidate
+- if the file is present but unstructured, lossless-claw keeps the legacy adapter behavior and wraps the full sidecar text as the candidate
+- if the file is missing, empty, unreadable, or over budget, assembly continues and logs the skip reason
+- `assemble-debug` logs whether an injection/working summary was injected, which producer won (`working_summary_field_mapping` or `working_summary_adapter`), and which source layer won (`compaction_injection_summary`, `working_summary`, `dag_summary`, or `raw_only`)
+
+This is intended as the v1 bridge for `session-memory` style sidecars without merging them into the internal summary DAG or starting DB schema/store migration.
 
 ### Prompt-aware eviction
 

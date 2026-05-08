@@ -75,11 +75,19 @@
     },
     "largeFilesDir": {
       "label": "Large Files Directory",
-      "help": "Directory for persisting large-file text payloads (default: <stateDir>/lcm-files). Uses OPENCLAW_STATE_DIR when set."
+      "help": "Directory for externalized large files and inline-image payloads (default: <OPENCLAW_STATE_DIR>/lcm-files)"
     },
-    "largeFilesDir": {
-      "label": "Large Files Directory",
-      "help": "Directory for externalized large files and inline-image payloads (default: ~/.openclaw/lcm-files)"
+    "workingSummaryEnabled": {
+      "label": "Working Summary Injection",
+      "help": "Enable v1 working-summary sidecar injection ahead of DAG summaries during assembly"
+    },
+    "workingSummaryPath": {
+      "label": "Working Summary Path",
+      "help": "Path to the working-summary markdown sidecar injected during assembly when enabled"
+    },
+    "workingSummaryMaxTokens": {
+      "label": "Working Summary Max Tokens",
+      "help": "Token cap for the injected working-summary candidate; oversized files are skipped"
     },
     "ignoreSessionPatterns": {
       "label": "Ignored Sessions",
@@ -275,6 +283,16 @@
       "largeFilesDir": {
         "type": "string"
       },
+      "workingSummaryEnabled": {
+        "type": "boolean"
+      },
+      "workingSummaryPath": {
+        "type": "string"
+      },
+      "workingSummaryMaxTokens": {
+        "type": "integer",
+        "minimum": 1
+      },
       "ignoreSessionPatterns": {
         "type": "array",
         "items": {
@@ -409,6 +427,19 @@
       "largeFilesDir": {
         "description": "Directory for persisting large-file text payloads (default: <OPENCLAW_STATE_DIR>/lcm-files)",
         "type": "string"
+      },
+      "workingSummaryEnabled": {
+        "description": "Enable v1 working-summary sidecar injection ahead of DAG summaries during assembly",
+        "type": "boolean"
+      },
+      "workingSummaryPath": {
+        "description": "Path to the working-summary markdown sidecar injected during assembly when enabled",
+        "type": "string"
+      },
+      "workingSummaryMaxTokens": {
+        "description": "Token cap for the injected working-summary candidate; oversized files are skipped",
+        "type": "integer",
+        "minimum": 1
       },
       "fallbackProviders": {
         "type": "array",

@@ -5137,6 +5137,166 @@ describe("LcmContextEngine.assemble canonical path", () => {
     ]);
   });
 
+  it("logs field-mapped injection metadata when structured working-summary is configured", async () => {
+    const infoLog = vi.fn();
+    const dir = mkdtempSync(join(tmpdir(), "lcm-working-summary-adapter-engine-"));
+    tempDirs.push(dir);
+    const workingSummaryPath = join(dir, "main-current.md");
+    writeFileSync(
+      workingSummaryPath,
+      [
+        "Current stop point: keep field-mapping fixture visible",
+        "Current risk: do not enter DB migration",
+        "Next step: verify assemble debug source metadata",
+      ].join("\n"),
+      "utf8",
+    );
+    const engine = createEngineWithDeps(
+      {
+        workingSummaryEnabled: true,
+        workingSummaryPath,
+        workingSummaryMaxTokens: 1200,
+      },
+      {
+        log: {
+          info: infoLog,
+          warn: vi.fn(),
+          error: vi.fn(),
+          debug: vi.fn(),
+        },
+      },
+    );
+    const sessionId = "session-working-summary-adapter-engine";
+
+    await engine.ingest({
+      sessionId,
+      message: { role: "user", content: "persisted message" } as AgentMessage,
+    });
+
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+
+    await engine.assemble({
+      sessionId,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+
+    const assembleDebugLog = infoLog.mock.calls
+      .map((call: unknown[]) => call[0])
+      .find(
+        (entry: unknown) =>
+          typeof entry === "string" &&
+          entry.includes("[lcm] assemble-debug") &&
+          entry.includes(`conversation=${conversation!.conversationId}`),
+      );
+
+    expect(assembleDebugLog).toEqual(expect.any(String));
+    expect(assembleDebugLog).toContain("injectionSummaryInjected=true");
+    expect(assembleDebugLog).toContain("injectionSummarySource=working_summary_field_mapping");
+    expect(assembleDebugLog).toContain("injectionSummarySourceId=working_summary_sidecar");
+    expect(assembleDebugLog).toContain("workingSummaryInjected=false");
+    expect(assembleDebugLog).toContain("selectedSource=compaction_injection_summary");
+  });
+
+  it("logs raw-only working-summary fallback metadata when the configured file cannot be read", async () => {
+    const infoLog = vi.fn();
+    const dir = mkdtempSync(join(tmpdir(), "lcm-working-summary-missing-"));
+    tempDirs.push(dir);
+    const engine = createEngineWithDeps(
+      {
+        workingSummaryEnabled: true,
+        workingSummaryPath: join(dir, "missing-current.md"),
+        workingSummaryMaxTokens: 1200,
+      },
+      {
+        log: {
+          info: infoLog,
+          warn: vi.fn(),
+          error: vi.fn(),
+          debug: vi.fn(),
+        },
+      },
+    );
+    const sessionId = "session-working-summary-missing";
+
+    await engine.ingest({
+      sessionId,
+      message: { role: "user", content: "persisted message" } as AgentMessage,
+    });
+
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+
+    await engine.assemble({
+      sessionId,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+
+    const assembleDebugLog = infoLog.mock.calls
+      .map((call: unknown[]) => call[0])
+      .find(
+        (entry: unknown) =>
+          typeof entry === "string" &&
+          entry.includes("[lcm] assemble-debug") &&
+          entry.includes(`conversation=${conversation!.conversationId}`),
+      );
+
+    expect(assembleDebugLog).toEqual(expect.any(String));
+    expect(assembleDebugLog).toContain("workingSummaryInjected=false");
+    expect(assembleDebugLog).toContain("workingSummarySkippedReason=read_error");
+    expect(assembleDebugLog).toContain("selectedSource=raw_only");
+  });
+
+  it("logs raw-only working-summary fallback metadata when enabled without a configured path", async () => {
+    const infoLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {
+        workingSummaryEnabled: true,
+        workingSummaryPath: "",
+        workingSummaryMaxTokens: 1200,
+      },
+      {
+        log: {
+          info: infoLog,
+          warn: vi.fn(),
+          error: vi.fn(),
+          debug: vi.fn(),
+        },
+      },
+    );
+    const sessionId = "session-working-summary-no-path";
+
+    await engine.ingest({
+      sessionId,
+      message: { role: "user", content: "persisted message" } as AgentMessage,
+    });
+
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+
+    await engine.assemble({
+      sessionId,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+
+    const assembleDebugLog = infoLog.mock.calls
+      .map((call: unknown[]) => call[0])
+      .find(
+        (entry: unknown) =>
+          typeof entry === "string" &&
+          entry.includes("[lcm] assemble-debug") &&
+          entry.includes(`conversation=${conversation!.conversationId}`),
+      );
+
+    expect(assembleDebugLog).toEqual(expect.any(String));
+    expect(assembleDebugLog).toContain("workingSummaryInjected=false");
+    expect(assembleDebugLog).toContain("workingSummarySkippedReason=missing");
+    expect(assembleDebugLog).toContain("selectedSource=raw_only");
+  });
+
   it("repairs OpenAI function_call transcripts without dropping reasoning blocks", async () => {
     const engine = createEngine();
     const sessionId = "session-openai-function-call";
@@ -9454,6 +9614,79 @@ describe("LcmContextEngine compaction telemetry", () => {
     );
     expect(infoLog).toHaveBeenCalledWith(
       expect.stringContaining("activityBand=medium"),
+    );
+  });
+
+  it("afterTurn triggers real inline leaf compaction and records assembly source counters", async () => {
+    const debugLog = vi.fn();
+    const engine = createEngineWithDeps(
+      {
+        proactiveThresholdCompactionMode: "inline",
+        freshTailCount: 1,
+        leafChunkTokens: 20,
+        leafTargetTokens: 20,
+        contextThreshold: 0.5,
+      },
+      {
+        log: {
+          info: vi.fn(),
+          warn: vi.fn(),
+          error: vi.fn(),
+          debug: debugLog,
+        },
+      },
+    );
+    const sessionId = "after-turn-real-inline-leaf-compaction-observation";
+
+    await engine.afterTurn({
+      sessionId,
+      sessionFile: createSessionFilePath("after-turn-real-inline-leaf-compaction-observation"),
+      messages: [
+        makeMessage({ role: "user", content: "older source alpha ".repeat(20) }),
+        makeMessage({ role: "assistant", content: "newer protected beta" }),
+      ],
+      prePromptMessageCount: 0,
+      tokenBudget: 100,
+      runtimeContext: {
+        summarize: async (text: string) => `summary from ${text.length} chars`,
+        currentTokenCount: 80,
+      },
+    });
+
+    await vi.waitFor(async () => {
+      const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+      expect(conversation).not.toBeNull();
+      const summaries = await engine.getSummaryStore().getSummariesByConversation(conversation!.conversationId);
+      expect(summaries.length).toBeGreaterThan(0);
+    });
+
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+    const summaries = await engine.getSummaryStore().getSummariesByConversation(conversation!.conversationId);
+    expect(summaries[0]).toMatchObject({
+      kind: "leaf",
+      content: expect.stringContaining("summary from"),
+    });
+
+    const assembled = await engine.assemble({
+      sessionId,
+      messages: [
+        makeMessage({ role: "user", content: "older source alpha ".repeat(20) }),
+        makeMessage({ role: "assistant", content: "newer protected beta" }),
+      ],
+      tokenBudget: 200,
+    });
+
+    expect(assembled.messages.length).toBeGreaterThan(0);
+    const assemblyTelemetry = engine.getLastAssemblyObservation(conversation!.conversationId);
+    expect(assemblyTelemetry).toMatchObject({
+      assemblyReadCount: 1,
+      assemblyDagSummaryCount: 1,
+      assemblyFallbackCount: 0,
+      assemblyLastSelectedSource: "dag_summary",
+    });
+    expect(debugLog).toHaveBeenCalledWith(
+      expect.stringContaining("[lcm] assembly source telemetry:"),
     );
   });
 

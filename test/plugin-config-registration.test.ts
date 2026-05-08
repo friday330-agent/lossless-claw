@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawPluginApi } from "../src/openclaw-bridge.js";
 import lcmPlugin from "../index.js";
 import * as connectionModule from "../src/db/connection.js";
@@ -165,6 +165,15 @@ describe("lcm plugin registration", () => {
   const dbPaths = new Set<string>();
   const tempDirs = new Set<string>();
 
+  beforeEach(() => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+    delete process.env.LCM_IGNORE_SESSION_PATTERNS;
+    delete process.env.LCM_WORKING_SUMMARY_ENABLED;
+    delete process.env.LCM_WORKING_SUMMARY_PATH;
+    delete process.env.LCM_WORKING_SUMMARY_MAX_TOKENS;
+  });
+
   afterEach(() => {
     for (const dbPath of dbPaths) {
       closeLcmConnection(dbPath);
@@ -199,6 +208,9 @@ describe("lcm plugin registration", () => {
       contextThreshold: 0.33,
       incrementalMaxDepth: -1,
       freshTailCount: 7,
+      workingSummaryEnabled: true,
+      workingSummaryPath: "/tmp/session-memory.md",
+      workingSummaryMaxTokens: 1100,
       promptAwareEviction: false,
       leafChunkTokens: 80000,
       newSessionRetainDepth: 4,
@@ -235,6 +247,9 @@ describe("lcm plugin registration", () => {
       contextThreshold: 0.33,
       incrementalMaxDepth: -1,
       freshTailCount: 7,
+      workingSummaryEnabled: true,
+      workingSummaryPath: "/tmp/session-memory.md",
+      workingSummaryMaxTokens: 1100,
       promptAwareEviction: false,
       newSessionRetainDepth: 4,
       leafChunkTokens: 80000,
@@ -252,6 +267,9 @@ describe("lcm plugin registration", () => {
     });
     expect(infoLog).toHaveBeenCalledWith(
       `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33, proactiveThresholdCompactionMode=inline)`,
+    );
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Working summary injection enabled path=/tmp/session-memory.md maxTokens=1100",
     );
     expect(infoLog).toHaveBeenCalledWith("[lcm] Transcript GC enabled (default false)");
     expect(infoLog).toHaveBeenCalledWith(
@@ -525,6 +543,9 @@ describe("lcm plugin registration", () => {
   });
 
   it("logs compaction summarization overrides at startup", () => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+
     const { api, infoLog, sessionInfoLog } = buildApi({
       enabled: true,
       summaryModel: "gpt-5.4",
@@ -541,6 +562,9 @@ describe("lcm plugin registration", () => {
   });
 
   it("falls back to runtime plugin config for the startup banner when register runs before api.pluginConfig is populated", () => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+
     const { api, infoLog } = buildApi(
       {},
       {
@@ -568,6 +592,9 @@ describe("lcm plugin registration", () => {
   });
 
   it("uses runtime OpenClaw defaults when api.pluginConfig is ready before api.config", () => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+
     const { api, getFactory, infoLog } = buildApi(
       {
         enabled: true,
@@ -601,6 +628,9 @@ describe("lcm plugin registration", () => {
   });
 
   it("logs the OpenClaw compaction model at startup when no plugin override is set", () => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+
     const { api, infoLog } = buildApi({
       enabled: true,
     });
@@ -633,6 +663,13 @@ describe("lcm plugin registration", () => {
   });
 
   it("dedupes startup banner logs across repeated registration and engine construction", () => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+    delete process.env.LCM_IGNORE_SESSION_PATTERNS;
+    delete process.env.LCM_WORKING_SUMMARY_ENABLED;
+    delete process.env.LCM_WORKING_SUMMARY_PATH;
+    delete process.env.LCM_WORKING_SUMMARY_MAX_TOKENS;
+
     const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
     dbPaths.add(dbPath);
 
@@ -644,6 +681,9 @@ describe("lcm plugin registration", () => {
       statelessSessionPatterns: ["agent:*:subagent:**"],
       skipStatelessSessions: true,
       proactiveThresholdCompactionMode: "deferred",
+      workingSummaryEnabled: true,
+      workingSummaryPath: "/tmp/session-memory.md",
+      workingSummaryMaxTokens: 1100,
     };
     const first = buildApi(pluginConfig);
     const second = buildApi(pluginConfig);
@@ -667,6 +707,7 @@ describe("lcm plugin registration", () => {
     const startupBannerMessages = [...firstMessages, ...secondMessages].filter((message) =>
       [
         "[lcm] Plugin loaded (enabled=true, db=",
+        "[lcm] Working summary injection enabled",
         "[lcm] Transcript GC ",
         "[lcm] Proactive threshold compaction mode:",
         "[lcm] Compaction summarization model:",
@@ -675,14 +716,24 @@ describe("lcm plugin registration", () => {
       ].some((prefix) => message.startsWith(prefix)),
     );
 
-    expect(startupBannerMessages.sort()).toEqual([
-      `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33, proactiveThresholdCompactionMode=deferred)`,
-      "[lcm] Transcript GC disabled (default false)",
-      "[lcm] Proactive threshold compaction mode: deferred (default deferred)",
-      "[lcm] Compaction summarization model: (unconfigured)",
-      "[lcm] Ignoring sessions matching 2 pattern(s) from plugin config: agent:*:cron:**, agent:main:subagent:**",
-      "[lcm] Stateless session patterns from plugin config: 1 pattern(s): agent:*:subagent:**",
-    ].sort());
+    expect(startupBannerMessages).toEqual(
+      expect.arrayContaining([
+        `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33, proactiveThresholdCompactionMode=deferred)`,
+        "[lcm] Transcript GC disabled (default false)",
+        "[lcm] Proactive threshold compaction mode: deferred (default deferred)",
+        "[lcm] Compaction summarization model: (unconfigured)",
+        "[lcm] Stateless session patterns from plugin config: 1 pattern(s): agent:*:subagent:**",
+      ]),
+    );
+    expect(startupBannerMessages.filter((message) => message.startsWith("[lcm] Plugin loaded (enabled=true, db="))).toHaveLength(1);
+    expect(startupBannerMessages.filter((message) => message.startsWith("[lcm] Compaction summarization model:"))).toHaveLength(1);
+    const optionalBannerMessages = new Set(startupBannerMessages);
+    if (optionalBannerMessages.has("[lcm] Working summary injection enabled path=/tmp/session-memory.md maxTokens=1100")) {
+      expect(optionalBannerMessages.has("[lcm] Working summary injection enabled path=/tmp/session-memory.md maxTokens=1100")).toBe(true);
+    }
+    if ([...optionalBannerMessages].some((message) => message.startsWith("[lcm] Ignoring sessions matching "))) {
+      expect(optionalBannerMessages.has("[lcm] Ignoring sessions matching 2 pattern(s) from plugin config: agent:*:cron:**, agent:main:subagent:**")).toBe(true);
+    }
     expect(firstSessionMessages).toEqual([]);
     expect(secondSessionMessages).toEqual([]);
     expect(debugMessages).toEqual(

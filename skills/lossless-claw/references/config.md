@@ -203,6 +203,36 @@ Why it matters:
 
 - defaults to `${OPENCLAW_STATE_DIR}/lcm-files`; on multi-profile hosts each profile stores files in its own state directory automatically
 - override with `LCM_LARGE_FILES_DIR` or set `largeFilesDir` in plugin config when you want an explicit path
+
+### `workingSummaryEnabled`
+
+Enables the v1 working-summary sidecar bridge during assembly.
+
+Why it matters:
+
+- lets lossless-claw inject a session-maintained working summary before the DAG summaries
+- normalizes recognized fields (`Current topic`, `User goal`, `Must remember`, `Current stop point`, `Current risk`, `Next step`) into a field-mapped `compaction_injection_summary` candidate
+- keeps unstructured sidecars on the legacy adapter path, outside the internal summary DAG, while still making summary-first assembly observable
+
+### `workingSummaryPath`
+
+Path to the working-summary markdown file used when `workingSummaryEnabled` is true.
+
+Why it matters:
+
+- this is the bridge point for `session-memory/main-current.md` style files
+- structured field labels make the injected candidate more predictable without requiring DB schema/store migration
+- empty, missing, unreadable, or oversized files are skipped rather than breaking assembly
+
+### `workingSummaryMaxTokens`
+
+Maximum token estimate allowed for the injected working-summary candidate.
+
+Why it matters:
+
+- prevents a sidecar from swallowing the entire older-context budget
+- skipped over-budget candidates are now visible in `assemble-debug` logs
+
 ### `largeFileThresholdTokens`
 
 Threshold for externalizing oversized tool/file payloads out of the main transcript into large-file storage.
@@ -488,6 +518,18 @@ Useful interpretation notes:
 - `tokens in context` is the current LCM frontier token count in the live LCM state.
 - `compression ratio` is shown as a rounded `1:N`, which is easier to read than a tiny percentage for heavily compacted conversations.
 - `/status` may still show a different context number because it reflects the runtime prompt that was actually assembled and sent on the last turn.
+
+## Working-summary injection behavior
+
+When enabled, lossless-claw:
+
+- reads the configured working-summary file during assembly
+- injects it ahead of DAG summaries only if it is readable, non-empty, and within budget
+- normalizes recognized structured fields into `working_summary_field_mapping`; unstructured text remains `working_summary_adapter`
+- logs whether it was injected and, if not, the skip reason
+- records the selected source layer as `compaction_injection_summary`, `working_summary`, `dag_summary`, or `raw_only`
+
+This is a v1 assembly-side bridge, not a schema-level merge into the summary DAG or a storage migration.
 
 ## Keep this reference aligned
 
