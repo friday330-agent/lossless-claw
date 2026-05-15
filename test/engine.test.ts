@@ -10113,46 +10113,81 @@ describe("LcmContextEngine compaction telemetry", () => {
   });
 
 
-  it("compactLeafAsync can perform multiple bounded catch-up passes", async () => {
+  it("compact runs threshold full-sweep compaction through the new public seam", async () => {
+    const engine = createEngineWithConfig({
+      freshTailCount: 1,
+      leafChunkTokens: 1,
+      leafTargetTokens: 20,
+      contextThreshold: 0.75,
+    });
+    const privateEngine = engine as unknown as {
+      compaction: {
+        compact: (input: unknown) => Promise<unknown>;
+      };
+    };
+    const sessionId = "threshold-full-sweep-public-seam";
+
+    await engine.ingestBatch({
+      sessionId,
+      messages: [
+        makeMessage({ role: "user", content: "old raw context alpha ".repeat(30) }),
+        makeMessage({ role: "assistant", content: "old raw context beta ".repeat(30) }),
+        makeMessage({ role: "user", content: "fresh protected tail" }),
+      ],
+    });
+
+    const compactSpy = vi.spyOn(privateEngine.compaction, "compact");
+    const result = await engine.compact({
+      sessionId,
+      sessionFile: createSessionFilePath("threshold-full-sweep-public-seam"),
+      tokenBudget: 100,
+      compactionTarget: "threshold",
+      legacyParams: {
+        summarize: async (text: string) => `short summary from ${text.length} chars`,
+      },
+    });
+
+    expect(result.compacted).toBe(true);
+    expect(result.result?.details).toEqual(
+      expect.objectContaining({
+        rounds: 1,
+        targetTokens: 75,
+      }),
+    );
+    expect(compactSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenBudget: 100,
+        force: false,
+        hardTrigger: false,
+      }),
+    );
+  });
+
+  it("forced compact uses compactUntilUnder for budget recovery without threshold sweep", async () => {
     const engine = createEngine();
     const privateEngine = engine as unknown as {
       compaction: {
-        compactLeaf: (input: unknown) => Promise<unknown>;
+        compact: (input: unknown) => Promise<unknown>;
+        compactUntilUnder: (input: unknown) => Promise<unknown>;
       };
     };
-    const sessionId = "compact-leaf-catchup";
+    const sessionId = "forced-budget-recovery-public-seam";
 
     await engine.ingest({
       sessionId,
       message: makeMessage({ role: "user", content: "seed" }),
     });
 
-    const compactLeafSpy = vi
-      .spyOn(privateEngine.compaction, "compactLeaf")
-      .mockResolvedValueOnce({
-        actionTaken: true,
-        tokensBefore: 900,
-        tokensAfter: 700,
-        condensed: false,
-      })
-      .mockResolvedValueOnce({
-        actionTaken: true,
-        tokensBefore: 700,
-        tokensAfter: 520,
-        condensed: false,
-      })
-      .mockResolvedValueOnce({
-        actionTaken: false,
-        tokensBefore: 520,
-        tokensAfter: 520,
-        condensed: false,
-      });
+    const sweepSpy = vi.spyOn(privateEngine.compaction, "compact");
+    const compactUntilUnderSpy = vi
+      .spyOn(privateEngine.compaction, "compactUntilUnder")
+      .mockResolvedValue({ success: true, rounds: 2, finalTokens: 520 });
 
-    const result = await engine.compactLeafAsync({
+    const result = await engine.compact({
       sessionId,
-      sessionFile: createSessionFilePath("compact-leaf-catchup"),
+      sessionFile: createSessionFilePath("forced-budget-recovery-public-seam"),
       tokenBudget: 4096,
-      maxPasses: 2,
+      force: true,
       legacyParams: {
         summarize: async () => "short summary",
       },
@@ -10162,71 +10197,17 @@ describe("LcmContextEngine compaction telemetry", () => {
     expect(result.result?.details).toEqual(
       expect.objectContaining({
         rounds: 2,
-        maxPasses: 2,
+        targetTokens: 4096,
       }),
     );
-    expect(compactLeafSpy).toHaveBeenCalledTimes(2);
-  });
-
-  it("compactLeafAsync logs cache-aware start details at debug", async () => {
-    const infoLog = vi.fn();
-    const debugLog = vi.fn();
-    const engine = createEngineWithDeps(
-      {},
-      {
-        log: {
-          info: infoLog,
-          warn: vi.fn(),
-          error: vi.fn(),
-          debug: debugLog,
-        },
-      },
+    expect(compactUntilUnderSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenBudget: 4096,
+        targetTokens: 4096,
+        currentTokens: 4096,
+      }),
     );
-    const privateEngine = engine as unknown as {
-      compaction: {
-        compactLeaf: (input: { leafChunkTokens?: number }) => Promise<unknown>;
-      };
-    };
-    const sessionId = "compact-leaf-start-log-info";
-
-    await engine.ingest({
-      sessionId,
-      message: makeMessage({ role: "user", content: "seed" }),
-    });
-
-    vi.spyOn(privateEngine.compaction, "compactLeaf").mockResolvedValue({
-      actionTaken: true,
-      tokensBefore: 900,
-      tokensAfter: 520,
-      condensed: false,
-    });
-
-    const result = await engine.compactLeafAsync({
-      sessionId,
-      sessionFile: createSessionFilePath("compact-leaf-start-log-info"),
-      tokenBudget: 4096,
-      maxPasses: 2,
-      leafChunkTokens: 40_000,
-      fallbackLeafChunkTokens: [40_000, 30_000, 20_000],
-      activityBand: "medium",
-      legacyParams: {
-        summarize: async () => "short summary",
-      },
-    });
-
-    expect(result.compacted).toBe(true);
-    expect(debugLog).toHaveBeenCalledWith(
-      expect.stringContaining("[lcm] compactLeafAsync start:"),
-    );
-    expect(debugLog).toHaveBeenCalledWith(
-      expect.stringContaining("leafChunkTokens=40000"),
-    );
-    expect(debugLog).toHaveBeenCalledWith(
-      expect.stringContaining("fallbackLeafChunkTokens=40000,30000,20000"),
-    );
-    expect(debugLog).toHaveBeenCalledWith(
-      expect.stringContaining("activityBand=medium"),
-    );
+    expect(sweepSpy).not.toHaveBeenCalled();
   });
 
   it("afterTurn triggers real inline leaf compaction and records assembly source counters", async () => {
@@ -10302,50 +10283,43 @@ describe("LcmContextEngine compaction telemetry", () => {
     );
   });
 
-  it("compactLeafAsync retries with a smaller leaf chunk target after a provider token-limit error", async () => {
-    const engine = createEngine();
-    const privateEngine = engine as unknown as {
-      compaction: {
-        compactLeaf: (input: { leafChunkTokens?: number }) => Promise<unknown>;
-      };
-    };
-    const sessionId = "compact-leaf-retry-smaller-chunk";
+  it("threshold full sweep propagates provider token-limit failures without mutating context", async () => {
+    const engine = createEngineWithConfig({
+      freshTailCount: 1,
+      leafChunkTokens: 1,
+      contextThreshold: 0.75,
+    });
+    const sessionId = "threshold-full-sweep-token-limit-failure";
 
-    await engine.ingest({
+    await engine.ingestBatch({
       sessionId,
-      message: makeMessage({ role: "user", content: "seed" }),
+      messages: [
+        makeMessage({ role: "user", content: "old raw context alpha ".repeat(30) }),
+        makeMessage({ role: "assistant", content: "fresh protected tail" }),
+      ],
     });
 
-    const compactLeafSpy = vi
-      .spyOn(privateEngine.compaction, "compactLeaf")
-      .mockRejectedValueOnce(new Error("context window exceeded for this request"))
-      .mockResolvedValueOnce({
-        actionTaken: true,
-        tokensBefore: 900,
-        tokensAfter: 520,
-        condensed: false,
-      });
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+    const before = await engine.getSummaryStore().getContextItems(conversation!.conversationId);
 
-    const result = await engine.compactLeafAsync({
-      sessionId,
-      sessionFile: createSessionFilePath("compact-leaf-retry-smaller-chunk"),
-      tokenBudget: 4096,
-      leafChunkTokens: 40_000,
-      fallbackLeafChunkTokens: [40_000, 30_000, 20_000],
-      legacyParams: {
-        summarize: async () => "short summary",
-      },
-    });
+    await expect(
+      engine.compact({
+        sessionId,
+        sessionFile: createSessionFilePath("threshold-full-sweep-token-limit-failure"),
+        tokenBudget: 100,
+        compactionTarget: "threshold",
+        legacyParams: {
+          summarize: async () => {
+            throw new Error("context window exceeded for this request");
+          },
+        },
+      }),
+    ).rejects.toThrow("context window exceeded");
 
-    expect(result.compacted).toBe(true);
-    expect(compactLeafSpy).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ leafChunkTokens: 40_000 }),
-    );
-    expect(compactLeafSpy).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ leafChunkTokens: 30_000 }),
-    );
+    const after = await engine.getSummaryStore().getContextItems(conversation!.conversationId);
+    expect(after.map((item) => item.itemType)).toEqual(before.map((item) => item.itemType));
+    expect(await engine.getSummaryStore().getSummariesByConversation(conversation!.conversationId)).toHaveLength(0);
   });
 });
 
