@@ -54,6 +54,7 @@ function makeDeps(overrides?: Partial<LcmDependencies>): LcmDependencies {
       proactiveThresholdCompactionMode: "deferred",
       autoRotateSessionFiles: {
         enabled: true,
+        createBackups: false,
         sizeBytes: 2 * 1024 * 1024,
         startup: "rotate",
         runtime: "rotate",
@@ -63,8 +64,6 @@ function makeDeps(overrides?: Partial<LcmDependencies>): LcmDependencies {
     complete: vi.fn(),
     callGateway: vi.fn(async () => ({})),
     resolveModel: () => ({ provider: "anthropic", model: "claude-opus-4-5" }),
-    getApiKey: async () => undefined,
-    requireApiKey: async () => "",
     parseAgentSessionKey,
     isSubagentSessionKey: (sessionKey: string) => sessionKey.includes(":subagent:"),
     normalizeAgentId: (id?: string) => (id?.trim() ? id : "main"),
@@ -158,6 +157,75 @@ describe("LCM tools session scoping", () => {
     ).properties.pattern?.description;
     expect(patternDescription).toContain("FTS5 defaults to AND matching");
     expect(patternDescription).toContain("prefer 1-3 distinctive terms or one quoted multi-word phrase");
+    expect(patternDescription).toContain("Regex syntax such as alternation (`A|B`) requires regex mode");
+  });
+
+  it("lcm_grep rejects regex alternation in full-text mode before searching", async () => {
+    const retrieval = {
+      grep: vi.fn(async () => ({
+        messages: [],
+        summaries: [],
+        totalMatches: 0,
+      })),
+      expand: vi.fn(),
+      describe: vi.fn(),
+    };
+
+    const tool = createLcmGrepTool({
+      deps: makeDeps(),
+      lcm: buildLcmEngine({ retrieval, conversationId: 42 }) as never,
+      sessionId: "session-1",
+    });
+    const result = await tool.execute("call-regex-syntax", {
+      pattern: "apple|banana|cherry",
+      mode: "full_text",
+    });
+
+    expect(retrieval.grep).not.toHaveBeenCalled();
+    expect((result.details as { error?: string }).error).toContain(
+      "full_text mode does not support regex syntax",
+    );
+    expect((result.details as { error?: string }).error).toContain('mode: "regex"');
+  });
+
+  it("lcm_grep still forwards regex alternation in regex mode", async () => {
+    const retrieval = {
+      grep: vi.fn(async () => ({
+        messages: [
+          {
+            messageId: 101,
+            conversationId: 42,
+            role: "assistant",
+            snippet: "apple",
+            createdAt: new Date("2026-01-02T00:00:00.000Z"),
+            rank: 0,
+          },
+        ],
+        summaries: [],
+        totalMatches: 1,
+      })),
+      expand: vi.fn(),
+      describe: vi.fn(),
+    };
+
+    const tool = createLcmGrepTool({
+      deps: makeDeps(),
+      lcm: buildLcmEngine({ retrieval, conversationId: 42 }) as never,
+      sessionId: "session-1",
+    });
+    const result = await tool.execute("call-regex-mode", {
+      pattern: "apple|banana|cherry",
+      mode: "regex",
+    });
+
+    expect(retrieval.grep).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: "apple|banana|cherry",
+        mode: "regex",
+      }),
+    );
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("apple");
   });
 
   it("lcm_expand query mode infers conversationId from delegated grant", async () => {
@@ -408,5 +476,18 @@ describe("LCM tools session scoping", () => {
     expect((cross.content[0] as { text: string }).text).toContain(
       formatTimestamp(new Date("2026-01-01T00:00:00.000Z"), timezone),
     );
+    expect(cross.details).toMatchObject({
+      id: "sum_foreign",
+      type: "summary",
+      summary: {
+        conversationId: 99,
+        tokenCount: 12,
+      },
+      manifest: {
+        tokenCap: 120,
+      },
+    });
+    expect(JSON.stringify(cross.details)).not.toContain("foreign summary");
+    expect(JSON.stringify(cross.details)).not.toContain("subtree");
   });
 });

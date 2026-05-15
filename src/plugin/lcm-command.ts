@@ -26,7 +26,14 @@ import {
   CompactionMaintenanceStore,
   type ConversationCompactionMaintenanceRecord,
 } from "../store/compaction-maintenance-store.js";
-import { CompactionTelemetryStore } from "../store/compaction-telemetry-store.js";
+import {
+  CompactionTelemetryStore,
+  emptyAssemblyTelemetryCounters,
+  type AssemblyTelemetryCounters,
+} from "../store/compaction-telemetry-store.js";
+import type { ConversationStore } from "../store/conversation-store.js";
+import type { SummaryStore } from "../store/summary-store.js";
+import { describeSummaryDiagnostic, type SummaryDiagnosticReport } from "../summary-diagnostics.js";
 
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
@@ -72,15 +79,22 @@ type ParsedLcmCommand =
   | { kind: "rotate" }
   | { kind: "doctor"; apply: boolean }
   | { kind: "doctor_cleaners"; apply: boolean; filterId?: DoctorCleanerId; vacuum: boolean }
+  | { kind: "summary_diagnostics"; summaryId: string }
   | { kind: "help"; error?: string };
 
-type RotateCommandEngine = {
+type SummaryDiagnosticsEngine = {
+  getConversationStore(): ConversationStore;
+  getSummaryStore(): SummaryStore;
+};
+
+type LcmCommandEngine = SummaryDiagnosticsEngine & {
   rotateSessionStorageWithBackup(params: {
     sessionId?: string;
     sessionKey?: string;
     sessionFile: string;
     lockTimeoutMs: number;
   }): Promise<RotateSessionStorageWithBackupResult>;
+  getLastAssemblyObservation?(conversationId: number): AssemblyTelemetryCounters | null;
 };
 
 const DOCTOR_CLEANER_IDS = new Set<DoctorCleanerId>(getDoctorCleanerFilterIds());
@@ -246,12 +260,20 @@ function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
         error:
           `\`${VISIBLE_COMMAND} doctor\` accepts no arguments, \`clean\` for global high-confidence junk diagnostics, \`clean apply [filter-id] [vacuum]\` for cleanup, or \`apply\` for the scoped summary repair path.`,
       };
+    case "summary":
+      if (rest.length === 2 && rest[0]?.toLowerCase() === "diagnose" && rest[1]?.trim()) {
+        return { kind: "summary_diagnostics", summaryId: rest[1] };
+      }
+      return {
+        kind: "help",
+        error: `\`${VISIBLE_COMMAND} summary\` accepts \`diagnose <sum_id>\` only.`,
+      };
     case "help":
       return { kind: "help" };
     default:
       return {
         kind: "help",
-        error: `Unknown subcommand \`${head}\`. Supported: status, backup, rotate, doctor, doctor clean, doctor apply, help.`,
+        error: `Unknown subcommand \`${head}\`. Supported: status, backup, rotate, doctor, doctor clean, doctor apply, summary diagnose, help.`,
       };
   }
 }
@@ -574,6 +596,10 @@ function buildHelpText(error?: string): string {
         "Delete approved high-confidence cleaner matches after creating a DB backup.",
       ),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor apply`), "Repair broken summaries in the current conversation."),
+      buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} summary diagnose <sum_id>`),
+        "Inspect one summary's raw span, lineage, suspected issues, and local rebuild boundary.",
+      ),
     ]),
     "",
     buildSection("🧭 Notes", [
@@ -602,6 +628,7 @@ async function buildStatusText(params: {
   ctx: PluginCommandContext;
   db: DatabaseSync;
   config: LcmConfig;
+  getLcm?: () => Promise<LcmCommandEngine>;
 }): Promise<string> {
   const status = getLcmStatusStats(params.db);
   const doctor = getDoctorSummaryStats(params.db);
@@ -652,6 +679,10 @@ async function buildStatusText(params: {
       params.db,
       current.stats.conversationId,
     );
+    const assemblyTelemetry = params.getLcm
+      ? (await params.getLcm()).getLastAssemblyObservation?.(current.stats.conversationId)
+        ?? emptyAssemblyTelemetryCounters()
+      : emptyAssemblyTelemetryCounters();
     const formatMaintenanceTime = (value: Date | null): string =>
       value ? formatTimestamp(value, params.config.timezone) : "never";
     lines.push(
@@ -710,6 +741,20 @@ async function buildStatusText(params: {
         buildStatLine("cache retention", telemetry?.retention ?? "unknown"),
         buildStatLine("cache state", telemetry?.cacheState ?? "unknown"),
         buildStatLine("provider/model", [telemetry?.provider, telemetry?.model].filter(Boolean).join(" / ") || "unknown"),
+      ]),
+    );
+    lines.push(
+      "",
+      buildSection("📚 Assembly sources", [
+        buildStatLine("reads", formatNumber(assemblyTelemetry.assemblyReadCount)),
+        buildStatLine("last selected source", assemblyTelemetry.assemblyLastSelectedSource ?? "unknown"),
+        buildStatLine("fallback count", formatNumber(assemblyTelemetry.assemblyFallbackCount)),
+        buildStatLine("last fallback reason", assemblyTelemetry.assemblyLastFallbackReason ?? "none"),
+        buildStatLine(
+          "source counts",
+          `raw_only=${formatNumber(assemblyTelemetry.assemblyRawOnlyCount)}, dag_summary=${formatNumber(assemblyTelemetry.assemblyDagSummaryCount)}, working_summary=${formatNumber(assemblyTelemetry.assemblyWorkingSummaryCount)}, injection_summary=${formatNumber(assemblyTelemetry.assemblyInjectionSummaryCount)}`,
+        ),
+        buildStatLine("last read", formatMaintenanceTime(assemblyTelemetry.assemblyLastReadAt)),
       ]),
     );
   } else {
@@ -786,6 +831,110 @@ async function buildDoctorText(params: {
   }
 
   return lines.join("\n");
+}
+
+function formatNullableDiagnosticTime(value: Date | null | undefined, timezone: string): string {
+  return value ? formatTimestamp(value, timezone) : "unknown";
+}
+
+function formatIdList(ids: Array<string | number>): string {
+  return ids.length > 0 ? ids.join(", ") : "none";
+}
+
+function buildSummaryDiagnosticsTextFromReport(params: {
+  report: SummaryDiagnosticReport;
+  timezone: string;
+}): string {
+  const lines = [
+    ...buildHeaderLines(),
+    "",
+    "🧭 Lossless Claw Summary Diagnostics",
+    "",
+  ];
+
+  if (!params.report.found || !params.report.node || !params.report.rebuildBoundary) {
+    lines.push(
+      buildSection("🔎 Lookup", [
+        buildStatLine("summary id", params.report.summaryId),
+        buildStatLine("result", "not found"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const node = params.report.node;
+  const rawSpan = node.rawSpan;
+  const boundary = params.report.rebuildBoundary;
+  lines.push(
+    buildSection("🔎 Summary", [
+      buildStatLine("summary id", node.summaryId),
+      buildStatLine("conversation id", formatNumber(params.report.conversationId ?? 0)),
+      buildStatLine("kind/depth", `${node.kind} / ${formatNumber(node.depth)}`),
+      buildStatLine("summary tokens", formatNumber(node.tokenCount)),
+      buildStatLine("descendant tokens", formatNumber(node.descendantTokenCount)),
+      buildStatLine("source message tokens", formatNumber(node.sourceMessageTokenCount)),
+      buildStatLine(
+        "summary time span",
+        `${formatNullableDiagnosticTime(node.earliestAt, params.timezone)} .. ${formatNullableDiagnosticTime(node.latestAt, params.timezone)}`,
+      ),
+    ]),
+    "",
+    buildSection("🧷 Raw span", [
+      buildStatLine("message count", formatNumber(rawSpan.messageCount)),
+      buildStatLine("message ids", `${rawSpan.firstMessageId ?? "unknown"} .. ${rawSpan.lastMessageId ?? "unknown"}`),
+      buildStatLine("seq range", `${rawSpan.firstSeq ?? "unknown"} .. ${rawSpan.lastSeq ?? "unknown"}`),
+      buildStatLine("raw tokens", formatNumber(rawSpan.tokenCount)),
+      buildStatLine(
+        "raw time span",
+        `${formatNullableDiagnosticTime(rawSpan.earliestAt, params.timezone)} .. ${formatNullableDiagnosticTime(rawSpan.latestAt, params.timezone)}`,
+      ),
+      buildStatLine("missing message ids", formatIdList(rawSpan.missingMessageIds)),
+    ]),
+    "",
+    buildSection("🕸️ Lineage", [
+      buildStatLine("parent summaries", formatIdList(node.parentSummaryIds)),
+      buildStatLine("dependent summaries", formatIdList(node.childSummaryIds)),
+      buildStatLine("suspected issues", formatIdList(node.suspectedIssues)),
+    ]),
+    "",
+    buildSection("🛠️ Local rebuild boundary", [
+      buildStatLine("rebuild root", boundary.rebuildRootSummaryId),
+      buildStatLine("source messages", formatIdList(boundary.sourceMessageIds)),
+      buildStatLine("parent summaries", formatIdList(boundary.parentSummaryIds)),
+      buildStatLine("dependent summaries", formatIdList(boundary.dependentSummaryIds)),
+      buildStatLine("reason", boundary.reason),
+    ]),
+  );
+
+  return lines.join("\n");
+}
+
+async function buildSummaryDiagnosticsText(params: {
+  config: LcmConfig;
+  summaryId: string;
+  getLcm?: () => Promise<SummaryDiagnosticsEngine>;
+}): Promise<string> {
+  if (!params.getLcm) {
+    return [
+      ...buildHeaderLines(),
+      "",
+      "🧭 Lossless Claw Summary Diagnostics",
+      "",
+      buildSection("🔎 Lookup", [
+        buildStatLine("summary id", params.summaryId),
+        buildStatLine("result", "unavailable"),
+        buildStatLine("reason", "LCM engine access is not available in this command context."),
+      ]),
+    ].join("\n");
+  }
+
+  const lcm = await params.getLcm();
+  const report = await describeSummaryDiagnostic({
+    summaryId: params.summaryId,
+    conversationStore: lcm.getConversationStore(),
+    summaryStore: lcm.getSummaryStore(),
+  });
+  return buildSummaryDiagnosticsTextFromReport({ report, timezone: params.config.timezone });
 }
 
 async function buildDoctorCleanersText(params: {
@@ -937,7 +1086,7 @@ async function buildRotateText(params: {
   db: DatabaseSync;
   config: LcmConfig;
   deps?: LcmDependencies;
-  getLcm?: () => Promise<RotateCommandEngine>;
+  getLcm?: () => Promise<LcmCommandEngine>;
 }): Promise<string> {
   const lines = [
     ...buildHeaderLines(),
@@ -1379,7 +1528,7 @@ export function createLcmCommand(params: {
   config: LcmConfig;
   deps?: LcmDependencies;
   summarize?: LcmSummarizeFn;
-  getLcm?: () => Promise<RotateCommandEngine>;
+  getLcm?: () => Promise<LcmCommandEngine>;
 }): OpenClawPluginCommandDefinition {
   const getDb = async (): Promise<DatabaseSync> =>
     typeof params.db === "function" ? await params.db() : params.db;
@@ -1395,11 +1544,11 @@ export function createLcmCommand(params: {
     description:
       "Show Lossless Claw health, create DB backups, compact the current session transcript while preserving LCM context, inspect high-confidence junk candidates, and run scoped doctor actions.",
     acceptsArgs: true,
-    handler: async (ctx) => {
+    handler: async (ctx: PluginCommandContext) => {
       const parsed = parseLcmCommand(ctx.args);
       switch (parsed.kind) {
         case "status":
-          return { text: await buildStatusText({ ctx, db: await getDb(), config: params.config }) };
+          return { text: await buildStatusText({ ctx, db: await getDb(), config: params.config, getLcm: params.getLcm }) };
         case "backup":
           return {
             text: await buildBackupText({
@@ -1440,6 +1589,14 @@ export function createLcmCommand(params: {
                 }),
               }
             : { text: await buildDoctorCleanersText({ db: await getDb() }) };
+        case "summary_diagnostics":
+          return {
+            text: await buildSummaryDiagnosticsText({
+              config: params.config,
+              summaryId: parsed.summaryId,
+              getLcm: params.getLcm,
+            }),
+          };
         case "help":
           return { text: buildHelpText(parsed.error) };
       }
@@ -1454,6 +1611,7 @@ export const __testing = {
   getLcmStatusStats,
   getConversationStatusStats,
   scanDoctorCleaners,
+  buildSummaryDiagnosticsTextFromReport,
   resolveCurrentConversation,
   resolveContextEngineSlot,
   resolvePluginEnabled,

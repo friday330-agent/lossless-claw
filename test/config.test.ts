@@ -24,6 +24,9 @@ describe("resolveLcmConfig", () => {
     expect(config.enabled).toBe(true);
     expect(config.databasePath).toBe(join(homedir(), ".openclaw", "lcm.db"));
     expect(config.largeFilesDir).toBe(join(homedir(), ".openclaw", "lcm-files"));
+    expect(config.workingSummaryEnabled).toBe(false);
+    expect(config.workingSummaryPath).toBe("");
+    expect(config.workingSummaryMaxTokens).toBe(1200);
     expect(config.ignoreSessionPatterns).toEqual([]);
     expect(config.statelessSessionPatterns).toEqual([]);
     expect(config.skipStatelessSessions).toBe(true);
@@ -32,8 +35,10 @@ describe("resolveLcmConfig", () => {
     expect(config.freshTailMaxTokens).toBeUndefined();
     expect(config.promptAwareEviction).toBe(false);
     expect(config.newSessionRetainDepth).toBe(2);
+    expect(config.sweepMaxDepth).toBe(1);
     expect(config.incrementalMaxDepth).toBe(1);
     expect(config.leafChunkTokens).toBe(20000);
+    expect(config.summaryPrefixTargetTokens).toBeUndefined();
     expect(config.leafMinFanout).toBe(8);
     expect(config.condensedMinFanout).toBe(4);
     expect(config.condensedMinFanoutHard).toBe(2);
@@ -45,6 +50,7 @@ describe("resolveLcmConfig", () => {
     expect(config.proactiveThresholdCompactionMode).toBe("deferred");
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: true,
+      createBackups: false,
       sizeBytes: DEFAULT_AUTO_ROTATE_SESSION_FILE_SIZE_BYTES,
       startup: "rotate",
       runtime: "rotate",
@@ -69,10 +75,15 @@ describe("resolveLcmConfig", () => {
       contextThreshold: 0.5,
       freshTailCount: 16,
       freshTailMaxTokens: 12000,
+      workingSummaryEnabled: true,
+      workingSummaryPath: "/tmp/working-summary.md",
+      workingSummaryMaxTokens: 900,
       promptAwareEviction: false,
       leafChunkTokens: 80000,
+      sweepMaxDepth: 2,
       newSessionRetainDepth: 3,
       incrementalMaxDepth: -1,
+      summaryPrefixTargetTokens: 48000,
       ignoreSessionPatterns: ["agent:*:cron:*", "agent:main:subagent:**"],
       statelessSessionPatterns: ["agent:*:ephemeral:**"],
       skipStatelessSessions: false,
@@ -83,6 +94,7 @@ describe("resolveLcmConfig", () => {
       proactiveThresholdCompactionMode: "inline",
       autoRotateSessionFiles: {
         enabled: false,
+        createBackups: true,
         sizeBytes: 123456,
         startup: "warn",
         runtime: "off",
@@ -111,10 +123,15 @@ describe("resolveLcmConfig", () => {
     expect(config.contextThreshold).toBe(0.5);
     expect(config.freshTailCount).toBe(16);
     expect(config.freshTailMaxTokens).toBe(12000);
+    expect(config.workingSummaryEnabled).toBe(true);
+    expect(config.workingSummaryPath).toBe("/tmp/working-summary.md");
+    expect(config.workingSummaryMaxTokens).toBe(900);
     expect(config.promptAwareEviction).toBe(false);
     expect(config.newSessionRetainDepth).toBe(3);
     expect(config.leafChunkTokens).toBe(80000);
-    expect(config.incrementalMaxDepth).toBe(-1);
+    expect(config.sweepMaxDepth).toBe(2);
+    expect(config.incrementalMaxDepth).toBe(2);
+    expect(config.summaryPrefixTargetTokens).toBe(48000);
     expect(config.leafMinFanout).toBe(4);
     expect(config.condensedMinFanout).toBe(2);
     expect(config.pruneHeartbeatOk).toBe(true);
@@ -122,6 +139,7 @@ describe("resolveLcmConfig", () => {
     expect(config.proactiveThresholdCompactionMode).toBe("inline");
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
+      createBackups: true,
       sizeBytes: 123456,
       startup: "warn",
       runtime: "off",
@@ -146,15 +164,18 @@ describe("resolveLcmConfig", () => {
       LCM_CONTEXT_THRESHOLD: "0.9",
       LCM_FRESH_TAIL_COUNT: "64",
       LCM_FRESH_TAIL_MAX_TOKENS: "32000",
+      LCM_WORKING_SUMMARY_ENABLED: "true",
+      LCM_WORKING_SUMMARY_PATH: "/env/working-summary.md",
+      LCM_WORKING_SUMMARY_MAX_TOKENS: "1500",
       LCM_PROMPT_AWARE_EVICTION_ENABLED: "false",
       LCM_NEW_SESSION_RETAIN_DEPTH: "5",
-      LCM_INCREMENTAL_MAX_DEPTH: "3",
       LCM_ENABLED: "false",
       LCM_IGNORE_SESSION_PATTERNS: "agent:*:cron:*, agent:main:subagent:**",
       LCM_STATELESS_SESSION_PATTERNS: "agent:*:ephemeral:**, agent:main:preview:*",
       LCM_SKIP_STATELESS_SESSIONS: "false",
       LCM_TRANSCRIPT_GC_ENABLED: "true",
       LCM_AUTO_ROTATE_SESSION_FILES_ENABLED: "false",
+      LCM_AUTO_ROTATE_SESSION_FILES_CREATE_BACKUPS: "true",
       LCM_AUTO_ROTATE_SESSION_FILES_SIZE_BYTES: "987654",
       LCM_AUTO_ROTATE_SESSION_FILES_STARTUP: "warn",
       LCM_AUTO_ROTATE_SESSION_FILES_RUNTIME: "off",
@@ -167,13 +188,21 @@ describe("resolveLcmConfig", () => {
       LCM_DYNAMIC_LEAF_CHUNK_TOKENS_ENABLED: "true",
       LCM_DYNAMIC_LEAF_CHUNK_TOKENS_MAX: "60000",
       LCM_PROACTIVE_THRESHOLD_COMPACTION_MODE: "inline",
+      LCM_SWEEP_MAX_DEPTH: "4",
+      LCM_INCREMENTAL_MAX_DEPTH: "3",
+      LCM_SUMMARY_PREFIX_TARGET_TOKENS: "45000",
     } as NodeJS.ProcessEnv;
     const pluginConfig = {
       contextThreshold: 0.5,
       freshTailCount: 16,
       freshTailMaxTokens: 12000,
+      workingSummaryEnabled: false,
+      workingSummaryPath: "/plugin/working-summary.md",
+      workingSummaryMaxTokens: 900,
       promptAwareEviction: true,
+      sweepMaxDepth: 2,
       incrementalMaxDepth: -1,
+      summaryPrefixTargetTokens: 32000,
       ignoreSessionPatterns: ["agent:*:test:*"],
       statelessSessionPatterns: ["agent:*:preview:*"],
       skipStatelessSessions: true,
@@ -181,6 +210,7 @@ describe("resolveLcmConfig", () => {
       proactiveThresholdCompactionMode: "deferred",
       autoRotateSessionFiles: {
         enabled: true,
+        createBackups: false,
         sizeBytes: 123456,
         startup: "rotate",
         runtime: "rotate",
@@ -214,6 +244,7 @@ describe("resolveLcmConfig", () => {
     expect(config.proactiveThresholdCompactionMode).toBe("inline");
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
+      createBackups: true,
       sizeBytes: 987654,
       startup: "warn",
       runtime: "off",
@@ -221,9 +252,14 @@ describe("resolveLcmConfig", () => {
     expect(config.contextThreshold).toBe(0.9); // env wins
     expect(config.freshTailCount).toBe(64); // env wins
     expect(config.freshTailMaxTokens).toBe(32000); // env wins
+    expect(config.workingSummaryEnabled).toBe(true); // env wins
+    expect(config.workingSummaryPath).toBe("/env/working-summary.md"); // env wins
+    expect(config.workingSummaryMaxTokens).toBe(1500); // env wins
     expect(config.promptAwareEviction).toBe(false); // env wins
     expect(config.newSessionRetainDepth).toBe(5); // env wins
-    expect(config.incrementalMaxDepth).toBe(3); // env wins
+    expect(config.sweepMaxDepth).toBe(4); // new env wins deprecated env/config
+    expect(config.incrementalMaxDepth).toBe(4); // alias mirrors sweepMaxDepth
+    expect(config.summaryPrefixTargetTokens).toBe(45000); // env wins
     expect(config.cacheAwareCompaction).toEqual({
       enabled: false,
       cacheTTLSeconds: 600,
@@ -278,8 +314,35 @@ describe("resolveLcmConfig", () => {
     expect(config.contextThreshold).toBe(0.9); // env wins
     expect(config.freshTailCount).toBe(16); // plugin config
     expect(config.newSessionRetainDepth).toBe(4); // plugin config
+    expect(config.sweepMaxDepth).toBe(-1); // deprecated plugin config alias
     expect(config.incrementalMaxDepth).toBe(-1); // plugin config
     expect(config.leafMinFanout).toBe(8); // hardcoded default
+  });
+
+  it("resolves sweep depth aliases by source precedence", () => {
+    const config = resolveLcmConfig({
+      LCM_INCREMENTAL_MAX_DEPTH: "2",
+    } as NodeJS.ProcessEnv, {
+      sweepMaxDepth: 5,
+      incrementalMaxDepth: 4,
+    });
+
+    expect(config.sweepMaxDepth).toBe(2);
+    expect(config.incrementalMaxDepth).toBe(2);
+
+    const envWithBoth = resolveLcmConfig({
+      LCM_SWEEP_MAX_DEPTH: "6",
+      LCM_INCREMENTAL_MAX_DEPTH: "2",
+    } as NodeJS.ProcessEnv, {});
+    expect(envWithBoth.sweepMaxDepth).toBe(6);
+    expect(envWithBoth.incrementalMaxDepth).toBe(6);
+
+    const pluginOnly = resolveLcmConfig({}, {
+      sweepMaxDepth: 5,
+      incrementalMaxDepth: 4,
+    });
+    expect(pluginOnly.sweepMaxDepth).toBe(5);
+    expect(pluginOnly.incrementalMaxDepth).toBe(5);
   });
 
   it("handles string values in plugin config (from JSON)", () => {
@@ -295,6 +358,7 @@ describe("resolveLcmConfig", () => {
       skipStatelessSessions: "false",
       autoRotateSessionFiles: {
         enabled: "false",
+        createBackups: "true",
         sizeBytes: "4096",
         startup: "warn",
         runtime: "off",
@@ -317,6 +381,7 @@ describe("resolveLcmConfig", () => {
     expect(config.skipStatelessSessions).toBe(false);
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
+      createBackups: true,
       sizeBytes: 4096,
       startup: "warn",
       runtime: "off",
@@ -333,6 +398,7 @@ describe("resolveLcmConfig", () => {
       enabled: "maybe",
       autoRotateSessionFiles: {
         enabled: "maybe",
+        createBackups: "maybe",
         sizeBytes: "not-a-number",
         startup: "notify",
         runtime: "compact",
@@ -346,6 +412,7 @@ describe("resolveLcmConfig", () => {
     expect(config.enabled).toBe(true); // falls through to default
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: true,
+      createBackups: false,
       sizeBytes: DEFAULT_AUTO_ROTATE_SESSION_FILE_SIZE_BYTES,
       startup: "rotate",
       runtime: "rotate",
@@ -585,8 +652,16 @@ describe("resolveLcmConfig", () => {
     expect(config.summaryModel).toBe("");
   });
 
-  it("ships a manifest that accepts unlimited incremental depth", () => {
+  it("ships a manifest that accepts sweep depth and deprecated incremental depth", () => {
+    expect(manifest.configSchema.properties.sweepMaxDepth).toEqual({
+      type: "integer",
+      minimum: -1,
+    });
     expect(manifest.configSchema.properties.incrementalMaxDepth.minimum).toBe(-1);
+    expect(manifest.configSchema.properties.summaryPrefixTargetTokens).toEqual({
+      type: "integer",
+      minimum: 1,
+    });
     expect(manifest.configSchema.properties.newSessionRetainDepth.minimum).toBe(-1);
   });
 
@@ -609,6 +684,19 @@ describe("resolveLcmConfig", () => {
   it("ships a manifest with promptAwareEviction in schema", () => {
     expect(manifest.configSchema.properties.promptAwareEviction).toEqual({
       type: "boolean",
+    });
+  });
+
+  it("ships a manifest with working summary config in schema", () => {
+    expect(manifest.configSchema.properties.workingSummaryEnabled).toMatchObject({
+      type: "boolean",
+    });
+    expect(manifest.configSchema.properties.workingSummaryPath).toMatchObject({
+      type: "string",
+    });
+    expect(manifest.configSchema.properties.workingSummaryMaxTokens).toMatchObject({
+      type: "integer",
+      minimum: 1,
     });
   });
 
@@ -647,6 +735,7 @@ describe("resolveLcmConfig", () => {
       additionalProperties: false,
       properties: {
         enabled: { type: "boolean" },
+        createBackups: { type: "boolean" },
         sizeBytes: { type: "integer", minimum: 1 },
         startup: { type: "string", enum: ["rotate", "warn", "off"] },
         runtime: { type: "string", enum: ["rotate", "warn", "off"] },

@@ -89,6 +89,7 @@ function makeDeps(overrides?: Partial<LcmDependencies>): LcmDependencies {
       proactiveThresholdCompactionMode: "deferred",
       autoRotateSessionFiles: {
         enabled: true,
+        createBackups: false,
         sizeBytes: 2 * 1024 * 1024,
         startup: "rotate",
         runtime: "rotate",
@@ -99,8 +100,6 @@ function makeDeps(overrides?: Partial<LcmDependencies>): LcmDependencies {
     callGateway: (params: { method: string; params?: Record<string, unknown> }) =>
       callGatewayMock(params),
     resolveModel: () => ({ provider: "anthropic", model: "claude-opus-4-5" }),
-    getApiKey: async () => undefined,
-    requireApiKey: async () => "",
     parseAgentSessionKey,
     isSubagentSessionKey: (sessionKey: string) => sessionKey.includes(":subagent:"),
     normalizeAgentId: (id?: string) => (id?.trim() ? id : "main"),

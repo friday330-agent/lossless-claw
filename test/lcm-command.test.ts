@@ -7,6 +7,7 @@ import { getLcmDbFeatures } from "../src/db/features.js";
 import { createLcmDatabaseConnection, closeLcmConnection } from "../src/db/connection.js";
 import { resolveLcmConfig } from "../src/db/config.js";
 import { ConversationStore } from "../src/store/conversation-store.js";
+import { AssemblyTelemetryStore } from "../src/store/compaction-telemetry-store.js";
 import { SummaryStore } from "../src/store/summary-store.js";
 import { createLcmCommand, __testing } from "../src/plugin/lcm-command.js";
 import type { LcmSummarizeFn } from "../src/summarize.js";
@@ -15,9 +16,7 @@ import type { LcmDependencies } from "../src/types.js";
 function createCommandFixture(options?: {
   summarize?: LcmSummarizeFn;
   deps?: LcmDependencies;
-  getLcm?: () => Promise<{
-    rotateSessionStorageWithBackup: (...args: unknown[]) => Promise<unknown>;
-  }>;
+  getLcm?: () => Promise<any>;
 }) {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-command-"));
   const dbPath = join(tempDir, "lcm.db");
@@ -26,15 +25,37 @@ function createCommandFixture(options?: {
   runLcmMigrations(db, { fts5Available });
   const conversationStore = new ConversationStore(db, { fts5Available });
   const summaryStore = new SummaryStore(db, { fts5Available });
+  const assemblyTelemetryStore = new AssemblyTelemetryStore();
   const config = resolveLcmConfig({}, { dbPath });
   const command = createLcmCommand({
     db,
     config,
     summarize: options?.summarize,
     deps: options?.deps,
-    getLcm: options?.getLcm,
+    getLcm:
+      options?.getLcm ??
+      (async () => ({
+        rotateSessionStorageWithBackup: async () => {
+          throw new Error("rotate not available in this fixture");
+        },
+        getConversationStore: () => conversationStore,
+        getSummaryStore: () => summaryStore,
+        getLastAssemblyObservation: (conversationId: number) => assemblyTelemetryStore.get(conversationId),
+      })),
   });
-  return { tempDir, dbPath, db, command, conversationStore, summaryStore };
+  return { tempDir, dbPath, db, command, conversationStore, summaryStore, assemblyTelemetryStore };
+}
+
+function createRotateOnlyLcmFixture(rotateSessionStorageWithBackup: (...args: unknown[]) => Promise<unknown>) {
+  return {
+    rotateSessionStorageWithBackup,
+    getConversationStore: () => {
+      throw new Error("conversation store not available in this fixture");
+    },
+    getSummaryStore: () => {
+      throw new Error("summary store not available in this fixture");
+    },
+  };
 }
 
 function createCommandContext(
@@ -207,6 +228,15 @@ describe("lcm command", () => {
       endOrdinal: 1,
       summaryId: "current_parent",
     });
+    fixture.assemblyTelemetryStore.recordObservation({
+      conversationId: conversation.conversationId,
+      selectedSource: "dag_summary",
+    });
+    fixture.assemblyTelemetryStore.recordObservation({
+      conversationId: conversation.conversationId,
+      selectedSource: "raw_only",
+      fallbackReason: "incomplete_raw_bootstrap",
+    });
 
     const result = await fixture.command.handler(
       createCommandContext(undefined, {
@@ -226,6 +256,113 @@ describe("lcm command", () => {
     expect(result.text).toContain("tokens in context: 5");
     expect(result.text).toContain("compression ratio: 1:6");
     expect(result.text).toContain("doctor: 1 issue(s) in this conversation");
+    expect(result.text).toContain("**📚 Assembly sources**");
+    expect(result.text).toContain("reads: 2");
+    expect(result.text).toContain("last selected source: raw_only");
+    expect(result.text).toContain("fallback count: 1");
+    expect(result.text).toContain("last fallback reason: incomplete_raw_bootstrap");
+    expect(result.text).toContain("source counts: raw_only=1, dag_summary=1, working_summary=0, injection_summary=0");
+  });
+
+  it("reports summary raw span diagnostics and local rebuild boundary", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "summary-diagnostics-session",
+      sessionKey: "agent:main:telegram:direct:summary-diagnostics",
+      title: "Summary diagnostics fixture",
+    });
+    const [firstMessage, secondMessage] = await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "diagnostic command source one",
+        tokenCount: 9,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 1,
+        role: "assistant",
+        content: "diagnostic command source two",
+        tokenCount: 11,
+      },
+    ]);
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_command_leaf",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      depth: 0,
+      content: "command leaf summary",
+      tokenCount: 6,
+      sourceMessageTokenCount: 20,
+      earliestAt: firstMessage.createdAt,
+      latestAt: secondMessage.createdAt,
+    });
+    await fixture.summaryStore.linkSummaryToMessages("sum_command_leaf", [
+      firstMessage.messageId,
+      secondMessage.messageId,
+    ]);
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_command_parent",
+      conversationId: conversation.conversationId,
+      kind: "condensed",
+      depth: 1,
+      content: "command parent summary",
+      tokenCount: 5,
+    });
+    await fixture.summaryStore.linkSummaryToParents("sum_command_parent", ["sum_command_leaf"]);
+
+    const result = await fixture.command.handler(
+      createCommandContext("summary diagnose sum_command_leaf"),
+    );
+
+    expect(result.text).toContain("🧭 Lossless Claw Summary Diagnostics");
+    expect(result.text).toContain("summary id: sum_command_leaf");
+    expect(result.text).toContain(`conversation id: ${conversation.conversationId}`);
+    expect(result.text).toContain("kind/depth: leaf / 0");
+    expect(result.text).toContain("message count: 2");
+    expect(result.text).toContain(`message ids: ${firstMessage.messageId} .. ${secondMessage.messageId}`);
+    expect(result.text).toContain("seq range: 0 .. 1");
+    expect(result.text).toContain("raw tokens: 20");
+    expect(result.text).toContain("dependent summaries: sum_command_parent");
+    expect(result.text).toContain("rebuild root: sum_command_leaf");
+    expect(result.text).toContain(`source messages: ${firstMessage.messageId}, ${secondMessage.messageId}`);
+  });
+
+  it("reports blocked local rebuild boundary for a broken condensed summary", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "summary-diagnostics-broken-session",
+      sessionKey: "agent:main:telegram:direct:summary-diagnostics-broken",
+      title: "Broken summary diagnostics fixture",
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_broken_condensed",
+      conversationId: conversation.conversationId,
+      kind: "condensed",
+      depth: 1,
+      content: "Broken condensed summary without lineage.",
+      tokenCount: 10,
+    });
+
+    const result = await fixture.command.handler(
+      createCommandContext("summary diagnose sum_broken_condensed"),
+    );
+
+    expect(result.text).toContain("summary id: sum_broken_condensed");
+    expect(result.text).toContain("kind/depth: condensed / 1");
+    expect(result.text).toContain("parent summaries: none");
+    expect(result.text).toContain("source messages: none");
+    expect(result.text).toContain("condensed_summary_has_no_parent_summaries");
+    expect(result.text).toContain("summary_missing_time_span_metadata");
+    expect(result.text).toContain("condensed_summary_has_no_dependents");
+    expect(result.text).toContain("blocked");
   });
 
   it("reports deferred compaction maintenance state in status output", async () => {
@@ -1030,8 +1167,6 @@ describe("lcm command", () => {
         const [provider, model] = String(modelRef ?? "anthropic/claude-haiku-4-5").split("/", 2);
         return { provider, model };
       }) as LcmDependencies["resolveModel"],
-      getApiKey: vi.fn(async () => "test-api-key") as LcmDependencies["getApiKey"],
-      requireApiKey: vi.fn(async () => "test-api-key") as LcmDependencies["requireApiKey"],
       parseAgentSessionKey: vi.fn(() => ({ agentId: "main", suffix: "test" })) as LcmDependencies["parseAgentSessionKey"],
       isSubagentSessionKey: vi.fn(() => false) as LcmDependencies["isSubagentSessionKey"],
       normalizeAgentId: vi.fn((id?: string) => id?.trim() || "main") as LcmDependencies["normalizeAgentId"],
@@ -1161,9 +1296,7 @@ describe("lcm command", () => {
     } as unknown as LcmDependencies;
     const fixture = createCommandFixture({
       deps,
-      getLcm: async () => ({
-        rotateSessionStorageWithBackup,
-      }),
+      getLcm: async () => createRotateOnlyLcmFixture(rotateSessionStorageWithBackup),
     });
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
@@ -1244,9 +1377,7 @@ describe("lcm command", () => {
     } as unknown as LcmDependencies;
     const fixture = createCommandFixture({
       deps,
-      getLcm: async () => ({
-        rotateSessionStorageWithBackup,
-      }),
+      getLcm: async () => createRotateOnlyLcmFixture(rotateSessionStorageWithBackup),
     });
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
@@ -1311,9 +1442,7 @@ describe("lcm command", () => {
     } as unknown as LcmDependencies;
     const fixture = createCommandFixture({
       deps,
-      getLcm: async () => ({
-        rotateSessionStorageWithBackup,
-      }),
+      getLcm: async () => createRotateOnlyLcmFixture(rotateSessionStorageWithBackup),
     });
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
@@ -1379,9 +1508,7 @@ describe("lcm command", () => {
     } as unknown as LcmDependencies;
     const fixture = createCommandFixture({
       deps,
-      getLcm: async () => ({
-        rotateSessionStorageWithBackup,
-      }),
+      getLcm: async () => createRotateOnlyLcmFixture(rotateSessionStorageWithBackup),
     });
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
@@ -1441,9 +1568,7 @@ describe("lcm command", () => {
     } as unknown as LcmDependencies;
     const fixture = createCommandFixture({
       deps,
-      getLcm: async () => ({
-        rotateSessionStorageWithBackup,
-      }),
+      getLcm: async () => createRotateOnlyLcmFixture(rotateSessionStorageWithBackup),
     });
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
@@ -1485,9 +1610,7 @@ describe("lcm command", () => {
     } as unknown as LcmDependencies;
     const fixture = createCommandFixture({
       deps,
-      getLcm: async () => ({
-        rotateSessionStorageWithBackup,
-      }),
+      getLcm: async () => createRotateOnlyLcmFixture(rotateSessionStorageWithBackup),
     });
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
@@ -1540,9 +1663,7 @@ describe("lcm command", () => {
     } as unknown as LcmDependencies;
     const fixture = createCommandFixture({
       deps,
-      getLcm: async () => ({
-        rotateSessionStorageWithBackup,
-      }),
+      getLcm: async () => createRotateOnlyLcmFixture(rotateSessionStorageWithBackup),
     });
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);

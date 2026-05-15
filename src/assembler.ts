@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { ContextEngine } from "./openclaw-bridge.js";
 import { sanitizeToolUseResultPairing } from "./transcript-repair.js";
 import type {
@@ -8,6 +9,7 @@ import type {
 } from "./store/conversation-store.js";
 import type { SummaryStore, ContextItemRecord, SummaryRecord } from "./store/summary-store.js";
 import { estimateTokens } from "./estimate-tokens.js";
+import { formatToolOutputReference } from "./large-files.js";
 
 type AgentMessage = Parameters<ContextEngine["ingest"]>[0]["message"];
 type AssemblySegment = "evictable" | "freshTail";
@@ -123,11 +125,61 @@ function isBlankContent(content: unknown[]): boolean {
   return content.every(isBlankTextBlock);
 }
 
+/** Returns true when a message's `content` is an empty/blank shape that the
+ *  Bedrock Converse API (and other strict providers) will reject.
+ *
+ *  Specifically guards against:
+ *  - `content === undefined` or `content === null`
+ *  - `content === ""` or whitespace-only string
+ *  - `content === []` (empty array) for **any** role
+ *  - For `assistant`: arrays that are thinking-only or blank-text-only,
+ *    since the provider layer strips reasoning blocks and forwards a
+ *    `[{type:"text", text:""}]` shape, both of which Bedrock rejects.
+ *
+ *  Bedrock Converse rejects empty `user` and `toolResult` content arrays
+ *  with the literal wording:
+ *    `The content field in the Message object at messages.N is empty.
+ *     Add a ContentBlock object to the content field and try again.`
+ *  This wording is reproducible only when `content === []`; bare strings or
+ *  non-empty arrays produce different validation errors. The pre-existing
+ *  filter only protected the assistant role, leaving an asymmetric gap when
+ *  an empty user/toolResult shape is momentarily produced upstream.
+ *
+ * @internal Exported for testing only.
+ */
+export function isEmptyMessageContent(message: {
+  role?: unknown;
+  content?: unknown;
+}): boolean {
+  if (!message) return true;
+  const content = message.content;
+  if (content === undefined || content === null) return true;
+  if (Array.isArray(content)) {
+    if (content.length === 0) return true;
+    if (message.role === "assistant") {
+      if (isThinkingOnlyContent(content)) return true;
+      if (isBlankContent(content)) return true;
+    }
+    return false;
+  }
+  if (typeof content === "string") {
+    return content.trim() === "";
+  }
+  return false;
+}
+
 // ── Public types ─────────────────────────────────────────────────────────────
 
 export interface AssembleContextInput {
   conversationId: number;
   tokenBudget: number;
+  /** Ordered internal summary-layer candidates; the first valid candidate wins before sidecar/DAG fallback. */
+  injectionSummaries?: InjectionSummaryCandidate[];
+  /** Optional working-summary candidate injected ahead of DAG summaries during assembly. */
+  workingSummary?: {
+    path: string;
+    maxTokens?: number;
+  };
   /** Number of most recent raw turns to always include (default: 8) */
   freshTailCount?: number;
   /** Optional token cap for the protected fresh tail; newest message is always preserved. */
@@ -136,13 +188,28 @@ export interface AssembleContextInput {
   prompt?: string;
   /** When false, evictable items are always retained chronologically even if a searchable prompt is present. */
   promptAwareEviction?: boolean;
-  /** Optional stable boundary for orphan tool-call stripping during hot-cache epochs. */
-  orphanStrippingOrdinal?: number;
+  /**
+   * v4.2 §B — when true, evictable tool messages whose row carries a
+   * non-null `large_content` sidecar are replaced with a compact stub
+   * before the budget pass. Fresh-tail messages are never stubbed.
+   * Default: false (full v4.1 behavior).
+   */
+  stubLargeToolPayloads?: boolean;
 }
 
 export interface AssembleContextResult {
   /** Ordered messages ready for the model */
   messages: AgentMessage[];
+  /** Source/fallback counters for summary-first assembly analysis. */
+  sourceCounters?: {
+    injectionSummaryInjected: boolean;
+    injectionSummarySkippedReason?: "missing" | "empty" | "over_budget";
+    injectionSummarySource?: InjectionSummarySource;
+    injectionSummarySourceId?: string;
+    workingSummaryInjected: boolean;
+    workingSummarySkippedReason?: "missing" | "empty" | "over_budget" | "read_error";
+    selectedSource: "compaction_injection_summary" | "working_summary" | "dag_summary" | "raw_only";
+  };
   /** Total estimated tokens */
   estimatedTokens: number;
   /** Stats about what was assembled */
@@ -151,7 +218,7 @@ export interface AssembleContextResult {
     summaryCount: number;
     totalContextItems: number;
   };
-  /** Optional local diagnostics for cache-stability debugging. */
+  /** Optional local diagnostics for assembly debugging. */
   debug?: {
     freshTailOrdinal: number;
     orphanStrippingOrdinal: number;
@@ -172,7 +239,42 @@ export interface AssembleContextResult {
     preSanitizeMessagesHash: string;
     finalMessagesHash: string;
     overflowDiagnostics: AssemblyOverflowDiagnostics;
+    /** v4.2 §B — number of evictable items rewritten to stubs. */
+    stubStats?: { stubbedCount: number; tokensSaved: number };
   };
+}
+
+export type InjectionSummarySource =
+  | "direct_input"
+  | "working_summary_adapter"
+  | "working_summary_field_mapping";
+
+export interface InjectionSummaryCandidate {
+  /** v1 internal summary-layer object used for model-token injection, not a raw/DAG replacement. */
+  kind: "compaction_injection_summary";
+  /** Identifies which producer created this candidate for debug logs and A/B checks. */
+  source?: InjectionSummarySource;
+  /** Optional stable identifier for future storage-backed candidates. */
+  sourceId?: string;
+  /** Summary text that should be injected when it is non-empty and within budget. */
+  content: string;
+  /** Optional precomputed token estimate supplied by the candidate producer. */
+  tokenCount?: number;
+  /** Optional per-candidate cap; over-budget candidates are skipped before sidecar fallback. */
+  maxTokens?: number;
+}
+
+export interface WorkingSummaryInjectionCandidateInput {
+  path: string;
+  maxTokens?: number;
+  sourceId?: string;
+}
+
+export interface WorkingSummaryInjectionCandidateResult {
+  source: "working_summary_adapter" | "working_summary_field_mapping";
+  sourceId: string;
+  candidates: InjectionSummaryCandidate[];
+  skippedReason?: "missing" | "empty" | "read_error";
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -781,6 +883,80 @@ function hashMessages(messages: AgentMessage[]): string {
   return createHash("sha256").update(JSON.stringify(messages)).digest("hex").slice(0, 16);
 }
 
+/**
+ * v4.2 §B (Option C) — render the stub for an evictable tool-result whose
+ * row was externalized to `large_files` (its `messages.large_content`
+ * stores the file_xxx id). Reuses the v4.1 `formatToolOutputReference`
+ * format so the agent sees the same `[LCM Tool Output: …]` shape it has
+ * encountered in production for months — known drilldown path,
+ * `lcm_describe(id="file_xxx")`, with conversation scoping and
+ * suppression filtering already wired up.
+ */
+function buildToolPayloadStub(
+  fileId: string,
+  toolName: string | undefined,
+  byteSize: number,
+  summary?: string,
+): { content: string; tokens: number } {
+  const content = formatToolOutputReference({
+    fileId,
+    toolName,
+    byteSize,
+    summary: summary ?? "",
+  });
+  const tokens = estimateTokens(content);
+  return { content, tokens };
+}
+
+/**
+ * v4.2 §B (Option C) — walk an evictable item list and replace payload-tier
+ * tool-result messages with the v4.1 `[LCM Tool Output: file_xxx …]` reference.
+ *
+ * Skip rules (post-adversarial-review):
+ *  - Item must have a `fileId` (i.e. `messages.large_content` set + lookup hit).
+ *  - Item's `messageId` must be present (defense-in-depth).
+ *  - Item's `message.role` must be `"toolResult"`. Legacy rows that
+ *    `resolveMessageItem` downgrades to `"assistant"` (DB role 'tool' but no
+ *    toolCallId) are NOT stubbed: there's no upstream `tool_use` to pair with,
+ *    so emitting a tool-output reference would create a phantom drilldown.
+ *  - Multi-block tool_result content (`Array<{type, ...}>`) is replaced as a
+ *    1-element text-block array so we preserve the array shape Anthropic
+ *    expects, instead of collapsing to a string. (P1 fix.)
+ */
+function applyStubSubstitution(
+  evictable: ResolvedItem[],
+): { stubbedCount: number; tokensSaved: number } {
+  let stubbedCount = 0;
+  let tokensSaved = 0;
+  for (const item of evictable) {
+    if (!item.fileId) continue;
+    if (item.messageId == null) continue;
+    if (item.message.role !== "toolResult") continue;
+
+    const stub = buildToolPayloadStub(
+      item.fileId,
+      item.stubToolName,
+      item.fileByteSize ?? 0,
+      item.fileSummary,
+    );
+
+    const oldTokens = item.tokens;
+    const wasArray = Array.isArray(item.message.content);
+    const newContent = wasArray
+      ? ([{ type: "text", text: stub.content }] as unknown as typeof item.message.content)
+      : (stub.content as unknown as typeof item.message.content);
+    item.message = {
+      ...(item.message as object),
+      content: newContent,
+    } as AgentMessage;
+    item.tokens = stub.tokens;
+    item.text = stub.content;
+    stubbedCount += 1;
+    tokensSaved += Math.max(0, oldTokens - stub.tokens);
+  }
+  return { stubbedCount, tokensSaved };
+}
+
 function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
@@ -872,6 +1048,21 @@ interface ResolvedItem {
   sourceRole?: MessageRole;
   /** Source summary record when this item resolves a summary. */
   summary?: SummaryRecord;
+  /**
+   * v4.2 §B (Option C) — externalized `file_xxx` id for this row's
+   * tool-result payload, set by the migration tool. Non-null marks the
+   * item as stubbable when stubLargeToolPayloads is enabled and the
+   * item is outside the fresh tail. Drilldown via lcm_describe(id=fileId).
+   */
+  fileId?: string;
+  /** v4.2 §B — byte size of the externalized payload (from `large_files.byte_size`). */
+  fileByteSize?: number;
+  /** v4.2 §B — `tool_name` resolved from message_parts; flows into the stub label. */
+  stubToolName?: string;
+  /** v4.2 §B — toolCallId carried for tool_use ↔ tool_result pairing checks. */
+  stubToolCallId?: string;
+  /** v4.2 §B — optional exploration summary (lazy-generated; null in v4.2.0). */
+  fileSummary?: string;
 }
 
 function topContributors(
@@ -1079,6 +1270,317 @@ function hasSearchablePrompt(prompt?: string): prompt is string {
   return typeof prompt === "string" && tokenizeText(prompt).length > 0;
 }
 
+type WorkingSummaryFieldKey =
+  | "currentTopic"
+  | "userGoal"
+  | "mustRemember"
+  | "stopPoint"
+  | "risk"
+  | "nextStep";
+
+const WORKING_SUMMARY_FIELDS: Array<{
+  key: WorkingSummaryFieldKey;
+  label: string;
+  aliases: string[];
+}> = [
+  {
+    key: "currentTopic",
+    label: "Current topic",
+    aliases: ["current topic", "topic"],
+  },
+  {
+    key: "userGoal",
+    label: "User goal",
+    aliases: ["user goal", "goal"],
+  },
+  {
+    key: "mustRemember",
+    label: "Must-remember decisions",
+    aliases: [
+      "must remember",
+      "must-remember",
+      "must remember decisions",
+      "must-remember decisions",
+      "current must remember decisions",
+      "current must-remember decisions",
+      "current must remember",
+      "current must-remember",
+    ],
+  },
+  {
+    key: "stopPoint",
+    label: "Current stop point",
+    aliases: ["current stop point", "stop point"],
+  },
+  {
+    key: "risk",
+    label: "Current risk",
+    aliases: ["current risk", "risk"],
+  },
+  {
+    key: "nextStep",
+    label: "Next step",
+    aliases: ["next step", "next steps"],
+  },
+];
+
+const FIELD_BY_ALIAS = new Map<string, WorkingSummaryFieldKey>(
+  WORKING_SUMMARY_FIELDS.flatMap((field) =>
+    field.aliases.map((alias) => [alias, field.key] as const),
+  ),
+);
+
+function normalizeWorkingSummaryLabel(label: string): string {
+  return label
+    .trim()
+    .replace(/^#+\s*/, "")
+    .replace(/^\s*[-*+]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .replace(/^\*{1,2}(.+?)\*{1,2}$/, "$1")
+    .replace(/`/g, "")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function stripWorkingSummaryListMarker(value: string): string {
+  return value
+    .trim()
+    .replace(/^\s*[-*+]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .trim();
+}
+
+function matchWorkingSummaryField(label: string): WorkingSummaryFieldKey | undefined {
+  return FIELD_BY_ALIAS.get(normalizeWorkingSummaryLabel(label));
+}
+
+function splitWorkingSummaryFieldLine(line: string): {
+  key: WorkingSummaryFieldKey;
+  value: string;
+} | undefined {
+  const cleaned = line
+    .trim()
+    .replace(/^\s*[-*+]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .trim();
+  const match = cleaned.match(/^(\*{0,2}[^:]+?\*{0,2})\s*:\s*(.*)$/);
+  if (!match) {
+    return undefined;
+  }
+
+  const key = matchWorkingSummaryField(match[1] ?? "");
+  if (!key) {
+    return undefined;
+  }
+
+  return {
+    key,
+    value: stripWorkingSummaryListMarker(match[2] ?? ""),
+  };
+}
+
+function normalizeStructuredWorkingSummary(raw: string): string | undefined {
+  const fields = new Map<WorkingSummaryFieldKey, string[]>();
+  let currentField: WorkingSummaryFieldKey | undefined;
+
+  const addFieldValue = (key: WorkingSummaryFieldKey, value: string) => {
+    const cleaned = stripWorkingSummaryListMarker(value);
+    if (!cleaned) {
+      return;
+    }
+    const values = fields.get(key);
+    if (values) {
+      values.push(cleaned);
+    } else {
+      fields.set(key, [cleaned]);
+    }
+  };
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      currentField = undefined;
+      continue;
+    }
+
+    const heading = trimmed.match(/^#{1,6}\s+(.+?)\s*$/);
+    if (heading) {
+      currentField = matchWorkingSummaryField(heading[1] ?? "");
+      continue;
+    }
+
+    const inline = splitWorkingSummaryFieldLine(trimmed);
+    if (inline) {
+      currentField = inline.key;
+      addFieldValue(inline.key, inline.value);
+      continue;
+    }
+
+    if (currentField) {
+      addFieldValue(currentField, trimmed);
+    }
+  }
+
+  if (fields.size === 0) {
+    return undefined;
+  }
+
+  const normalized = ["Working summary injection candidate"];
+  for (const field of WORKING_SUMMARY_FIELDS) {
+    const values = fields.get(field.key);
+    if (!values || values.length === 0) {
+      continue;
+    }
+    normalized.push(`${field.label}: ${values.join("\n  ")}`);
+  }
+  return normalized.join("\n");
+}
+
+export function produceWorkingSummaryInjectionCandidate(
+  input?: WorkingSummaryInjectionCandidateInput,
+): WorkingSummaryInjectionCandidateResult {
+  const sourceId = input?.sourceId?.trim() || "working_summary_sidecar";
+  if (!input?.path?.trim()) {
+    return { source: "working_summary_adapter", sourceId, candidates: [], skippedReason: "missing" };
+  }
+
+  try {
+    const raw = readFileSync(input.path, "utf8").trim();
+    if (!raw) {
+      return { source: "working_summary_adapter", sourceId, candidates: [], skippedReason: "empty" };
+    }
+    const mappedContent = normalizeStructuredWorkingSummary(raw);
+    const source: "working_summary_adapter" | "working_summary_field_mapping" = mappedContent
+      ? "working_summary_field_mapping"
+      : "working_summary_adapter";
+    const content = mappedContent ?? raw;
+
+    return {
+      source,
+      sourceId,
+      candidates: [
+        {
+          kind: "compaction_injection_summary",
+          source,
+          sourceId,
+          content,
+          tokenCount: estimateTokens(content),
+          maxTokens: input.maxTokens,
+        },
+      ],
+    };
+  } catch {
+    return { source: "working_summary_adapter", sourceId, candidates: [], skippedReason: "read_error" };
+  }
+}
+
+function loadInjectionSummaryCandidate(candidates?: InjectionSummaryCandidate[]): {
+  item?: ResolvedItem;
+  skippedReason?: "missing" | "empty" | "over_budget";
+  source?: InjectionSummarySource;
+  sourceId?: string;
+} {
+  if (candidates === undefined) {
+    return { skippedReason: undefined };
+  }
+  if (candidates.length === 0) {
+    return { skippedReason: "missing" };
+  }
+
+  let skippedReason: "empty" | "over_budget" = "empty";
+  let skippedSource: InjectionSummarySource | undefined;
+  let skippedSourceId: string | undefined;
+  for (const candidate of candidates) {
+    if (candidate.kind !== "compaction_injection_summary") {
+      continue;
+    }
+    const candidateSource = candidate.source ?? "direct_input";
+    const candidateSourceId = candidate.sourceId?.trim();
+    const content = candidate.content.trim();
+    if (!content) {
+      skippedReason = "empty";
+      skippedSource = candidateSource;
+      skippedSourceId = candidateSourceId;
+      continue;
+    }
+    const tokens =
+      typeof candidate.tokenCount === "number" && Number.isFinite(candidate.tokenCount)
+        ? Math.max(0, Math.floor(candidate.tokenCount))
+        : estimateTokens(content);
+    if (
+      typeof candidate.maxTokens === "number"
+      && Number.isFinite(candidate.maxTokens)
+      && tokens > candidate.maxTokens
+    ) {
+      skippedReason = "over_budget";
+      skippedSource = candidateSource;
+      skippedSourceId = candidateSourceId;
+      continue;
+    }
+
+    const sourceId = candidateSourceId;
+    const text = [
+      `<summary kind="compaction_injection_summary"${sourceId ? ` id="${sourceId}"` : ""}>`,
+      "  <content>",
+      content,
+      "  </content>",
+      "</summary>",
+    ].join("\n");
+    return {
+      item: {
+        ordinal: Number.MIN_SAFE_INTEGER,
+        message: { role: "user", content: text } as AgentMessage,
+        tokens: estimateTokens(text),
+        isMessage: false,
+        text,
+      },
+      source: candidateSource,
+      sourceId,
+    };
+  }
+
+  return { skippedReason, source: skippedSource, sourceId: skippedSourceId };
+}
+
+function loadWorkingSummaryCandidate(input?: {
+  path: string;
+  maxTokens?: number;
+}): {
+  item?: ResolvedItem;
+  skippedReason?: "missing" | "empty" | "over_budget" | "read_error";
+} {
+  if (!input?.path?.trim()) {
+    return { skippedReason: "missing" };
+  }
+
+  try {
+    const raw = readFileSync(input.path, "utf8").trim();
+    if (!raw) {
+      return { skippedReason: "empty" };
+    }
+    const tokens = estimateTokens(raw);
+    if (
+      typeof input.maxTokens === "number"
+      && Number.isFinite(input.maxTokens)
+      && tokens > input.maxTokens
+    ) {
+      return { skippedReason: "over_budget" };
+    }
+
+    return {
+      item: {
+        ordinal: Number.MIN_SAFE_INTEGER,
+        message: { role: "user", content: raw } as AgentMessage,
+        tokens,
+        isMessage: false,
+        text: raw,
+      },
+    };
+  } catch {
+    return { skippedReason: "read_error" };
+  }
+}
+
 // ── ContextAssembler ─────────────────────────────────────────────────────────
 
 export class ContextAssembler {
@@ -1109,6 +1611,13 @@ export class ContextAssembler {
     if (contextItems.length === 0) {
       return {
         messages: [],
+        sourceCounters: {
+          injectionSummaryInjected: false,
+          injectionSummarySkippedReason: input.injectionSummaries ? "missing" : undefined,
+          workingSummaryInjected: false,
+          workingSummarySkippedReason: input.workingSummary ? "missing" : undefined,
+          selectedSource: "raw_only",
+        },
         estimatedTokens: 0,
         stats: { rawMessageCount: 0, summaryCount: 0, totalContextItems: 0 },
       };
@@ -1116,11 +1625,19 @@ export class ContextAssembler {
 
     // Step 2: Resolve each context item into a ResolvedItem
     const resolved = await this.resolveItems(contextItems);
+    const injectionSummary = loadInjectionSummaryCandidate(input.injectionSummaries);
+    const workingSummary: ReturnType<typeof loadWorkingSummaryCandidate> = injectionSummary.item
+      ? { skippedReason: undefined }
+      : loadWorkingSummaryCandidate(input.workingSummary);
+    const injectedSummaryItem = injectionSummary.item ?? workingSummary.item;
+    const resolvedWithInjectedSummary = injectedSummaryItem
+      ? [injectedSummaryItem, ...resolved]
+      : resolved;
 
     // Count stats from the full (pre-truncation) set
     let rawMessageCount = 0;
     let summaryCount = 0;
-    for (const item of resolved) {
+    for (const item of resolvedWithInjectedSummary) {
       if (item.isMessage) {
         rawMessageCount++;
       } else {
@@ -1130,18 +1647,13 @@ export class ContextAssembler {
 
     // Step 3: Split into evictable prefix and protected fresh tail
     const freshTailOrdinal = resolveFreshTailOrdinal(
-      resolved,
+      resolvedWithInjectedSummary,
       freshTailCount,
       input.freshTailMaxTokens,
     );
-    const orphanStrippingOrdinal =
-      typeof input.orphanStrippingOrdinal === "number"
-      && Number.isFinite(input.orphanStrippingOrdinal)
-      && input.orphanStrippingOrdinal >= 0
-        ? Math.floor(input.orphanStrippingOrdinal)
-        : freshTailOrdinal;
+    const orphanStrippingOrdinal = freshTailOrdinal;
     const allToolResultOrdinalsById = new Map<string, number[]>();
-    for (const item of resolved) {
+    for (const item of resolvedWithInjectedSummary) {
       const toolResultId = extractToolResultIdFromMessage(item.message);
       if (!toolResultId) {
         continue;
@@ -1153,9 +1665,18 @@ export class ContextAssembler {
         allToolResultOrdinalsById.set(toolResultId, [item.ordinal]);
       }
     }
-    const baseFreshTail = resolved.filter((item) => item.ordinal >= freshTailOrdinal);
-    const evictable = resolved.filter((item) => item.ordinal < freshTailOrdinal);
+    const baseFreshTail = resolvedWithInjectedSummary.filter((item) => item.ordinal >= freshTailOrdinal);
+    const evictable = resolvedWithInjectedSummary.filter((item) => item.ordinal < freshTailOrdinal);
     const freshTail = baseFreshTail;
+
+    // v4.2 §B — stub-tier substitution. Replace evictable tool-result
+    // payloads (rows with `large_content` populated) with compact stubs
+    // BEFORE the budget pass so the budget sees the smaller token
+    // footprint. Fresh-tail items are protected and never substituted.
+    let stubStats = { stubbedCount: 0, tokensSaved: 0 };
+    if (input.stubLargeToolPayloads === true) {
+      stubStats = applyStubSubstitution(evictable);
+    }
 
     // Step 4: Budget-aware selection
     // First, compute the token cost of the fresh tail (always included).
@@ -1184,12 +1705,13 @@ export class ContextAssembler {
       evictableTokens = evictableTotalTokens;
     } else if (input.promptAwareEviction !== false && hasSearchablePrompt(input.prompt)) {
       selectionMode = "prompt-aware";
+      const prompt = input.prompt;
       // Prompt-aware eviction: score each evictable item by relevance to the
       // prompt, then greedily fill budget from highest-scoring items down.
       // Re-sort selected items by ordinal to restore chronological order.
       const scored = evictable.map((item, idx) => ({
         item,
-        score: scoreRelevance(item.text, input.prompt),
+        score: scoreRelevance(item.text, prompt),
         idx, // original index — higher = more recent, used as tiebreaker
       }));
       // Sort: highest relevance first; most recent (higher idx) breaks ties
@@ -1234,7 +1756,7 @@ export class ContextAssembler {
 
     const estimatedTokens = evictableTokens + tailTokens;
     const overflowDiagnostics = buildOverflowDiagnostics({
-      resolved,
+      resolved: resolvedWithInjectedSummary,
       selected,
       tokenBudget,
     });
@@ -1273,23 +1795,22 @@ export class ContextAssembler {
       return entry;
     });
 
-    // Filter out assistant messages with empty, blank, or thinking-only
-    // content — these can occur when tool-use-only turns are stored with
-    // content="" and zero message_parts, when filterNonFreshAssistantToolCalls
-    // strips all tool_use blocks, when a turn contains only thinking/reasoning
-    // blocks that will be stripped by the provider layer, or when the stored
-    // content is a `[{type:"text", text:""}]` blank-text shape. Anthropic and
-    // Bedrock reject any of these as empty.
+    // Filter messages whose content normalises to no content — these can occur
+    // when tool-use-only turns are stored with content="" and zero
+    // message_parts, when filterNonFreshAssistantToolCalls strips all tool_use
+    // blocks, when an assistant turn contains only thinking/reasoning blocks
+    // that will be stripped by the provider layer, when the stored content is
+    // a `[{type:"text", text:""}]` blank-text shape, or when an upstream layer
+    // momentarily produces an empty `user` or `toolResult` content array.
+    // Anthropic and Bedrock reject any of these
+    // as empty; Bedrock's specific wording for `content === []` is
+    // `The content field in the Message object at messages.N is empty.
+    //  Add a ContentBlock object to the content field and try again.`
+    // Dropping a `toolResult` here is safe — sanitizeToolUseResultPairing runs
+    // immediately below and re-pairs missing results with a synthetic
+    // `[lossless-claw] missing tool result …` placeholder.
     const cleanedEntries = normalizedEntries.filter(
-      (entry) =>
-        !(
-          entry.message?.role === "assistant" &&
-          (Array.isArray(entry.message.content)
-            ? entry.message.content.length === 0 ||
-              isThinkingOnlyContent(entry.message.content) ||
-              isBlankContent(entry.message.content)
-            : !entry.message.content || entry.message.content.trim() === "")
-        ),
+      (entry) => !isEmptyMessageContent(entry.message),
     );
     const cleaned = cleanedEntries.map((entry) => entry.message);
     const preSanitizeEvictableMessages = cleanedEntries
@@ -1299,13 +1820,36 @@ export class ContextAssembler {
       .filter((entry) => entry.segment === "freshTail")
       .map((entry) => entry.message);
     const repaired = sanitizeToolUseResultPairing(cleaned) as AgentMessage[];
+    const injectionSummaryInjected = Boolean(
+      injectionSummary.item
+      && repaired.some((message) => message === injectionSummary.item?.message),
+    );
+    const workingSummaryInjected = Boolean(
+      workingSummary.item
+      && repaired.some((message) => message === workingSummary.item?.message),
+    );
     return {
       messages: repaired,
+      sourceCounters: {
+        injectionSummaryInjected,
+        injectionSummarySkippedReason: injectionSummary.skippedReason,
+        ...(injectionSummary.source ? { injectionSummarySource: injectionSummary.source } : {}),
+        ...(injectionSummary.sourceId ? { injectionSummarySourceId: injectionSummary.sourceId } : {}),
+        workingSummaryInjected,
+        workingSummarySkippedReason: workingSummary.skippedReason,
+        selectedSource: injectionSummaryInjected
+          ? "compaction_injection_summary"
+          : workingSummaryInjected
+            ? "working_summary"
+            : rawMessageCount > 0 && summaryCount === 0
+              ? "raw_only"
+              : "dag_summary",
+      },
       estimatedTokens,
       stats: {
         rawMessageCount,
         summaryCount,
-        totalContextItems: resolved.length,
+        totalContextItems: resolvedWithInjectedSummary.length,
       },
       debug: {
         freshTailOrdinal,
@@ -1327,6 +1871,7 @@ export class ContextAssembler {
         preSanitizeMessagesHash: hashMessages(cleaned as AgentMessage[]),
         finalMessagesHash: hashMessages(repaired),
         overflowDiagnostics,
+        stubStats,
       },
     };
   }
@@ -1403,6 +1948,26 @@ export class ContextAssembler {
       typeof content === "string" ? content : (JSON.stringify(content) ?? msg.content);
     const tokenCount = estimateTokens(contentText);
 
+    // v4.2 §B (Option C) — `messages.large_content` now stores the
+    // externalized `file_xxx` id, not a content copy. When present, look
+    // up `large_files` for byteSize / summary so applyStubSubstitution
+    // can build the v4.1 [LCM Tool Output: …] reference.
+    const fileIdFromSidecar =
+      typeof msg.largeContent === "string" && msg.largeContent.startsWith("file_")
+        ? msg.largeContent
+        : null;
+    let fileMeta: { byteSize: number; summary?: string } | null = null;
+    if (fileIdFromSidecar) {
+      const fileRow = await this.summaryStore.getLargeFile(fileIdFromSidecar);
+      if (fileRow) {
+        fileMeta = {
+          byteSize: fileRow.byteSize ?? 0,
+          summary: fileRow.explorationSummary ?? undefined,
+        };
+      }
+    }
+    const stubEligible = fileIdFromSidecar != null && fileMeta != null && role === "toolResult";
+
     // Cast: these are reconstructed from DB storage, not live agent messages,
     // so they won't carry the full AgentMessage metadata (timestamp, usage, etc.)
     return {
@@ -1440,6 +2005,11 @@ export class ContextAssembler {
       messageId: msg.messageId,
       seq: msg.seq,
       sourceRole: msg.role,
+      ...(stubEligible && fileIdFromSidecar ? { fileId: fileIdFromSidecar } : {}),
+      ...(stubEligible && fileMeta ? { fileByteSize: fileMeta.byteSize } : {}),
+      ...(stubEligible && fileMeta?.summary ? { fileSummary: fileMeta.summary } : {}),
+      ...(stubEligible && toolName ? { stubToolName: toolName } : {}),
+      ...(stubEligible && toolCallId ? { stubToolCallId: toolCallId } : {}),
     };
   }
 

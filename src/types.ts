@@ -10,7 +10,10 @@ import type { LcmConfigDiagnostics } from "./db/config.js";
 
 /**
  * Minimal LLM completion interface needed by LCM for summarization.
- * Matches the signature of completeSimple from @mariozechner/pi-ai.
+ *
+ * The production implementation delegates model prep, auth, and dispatch to
+ * OpenClaw's host-owned runtime LLM API. Provider/model fields are retained as
+ * summary-model selection hints and diagnostics, not as direct auth inputs.
  */
 export type CompletionContentBlock = {
   type: string;
@@ -32,15 +35,35 @@ export type CompletionResult = {
   [key: string]: unknown;
 };
 
+export type RuntimeLlmModelOverride = {
+  configField: string;
+  configPath: string;
+  modelRef: string;
+};
+
+export type RuntimeLlmCompleteFn = (params: {
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  model?: string;
+  maxTokens?: number;
+  temperature?: number;
+  systemPrompt?: string;
+  purpose?: string;
+  agentId?: string;
+}) => Promise<{
+  text: string;
+  provider: string;
+  model: string;
+  agentId: string;
+  usage?: Record<string, unknown>;
+  audit?: Record<string, unknown>;
+}>;
+
 export type CompleteFn = (params: {
   provider?: string;
   model: string;
-  apiKey?: string;
-  providerApi?: string;
-  authProfileId?: string;
-  agentDir?: string;
-  runtimeConfig?: unknown;
-  skipModelAuth?: boolean;
+  runtimeModelOverride?: RuntimeLlmModelOverride;
+  runtimeLlmComplete?: RuntimeLlmCompleteFn;
+  agentId?: string;
   messages: Array<{ role: string; content: unknown }>;
   system?: string;
   maxTokens: number;
@@ -66,29 +89,6 @@ export type ResolveModelFn = (modelRef?: string, providerHint?: string) => {
   provider: string;
   model: string;
 };
-
-/**
- * API key resolution function.
- */
-export type ApiKeyLookupOptions = {
-  profileId?: string;
-  preferredProfile?: string;
-  agentDir?: string;
-  runtimeConfig?: unknown;
-  skipModelAuth?: boolean;
-};
-
-export type GetApiKeyFn = (
-  provider: string,
-  model: string,
-  options?: ApiKeyLookupOptions,
-) => Promise<string | undefined>;
-
-export type RequireApiKeyFn = (
-  provider: string,
-  model: string,
-  options?: ApiKeyLookupOptions,
-) => Promise<string>;
 
 /**
  * Session key utilities.
@@ -122,20 +122,11 @@ export interface LcmDependencies {
   /** LLM completion function for summarization */
   complete: CompleteFn;
 
-  /** Whether a provider uses runtime-managed OAuth / auth profiles instead of direct API keys. */
-  isRuntimeManagedAuthProvider?: (provider: string, providerApi?: string) => boolean;
-
   /** Gateway RPC call function (for subagent spawning, session ops) */
   callGateway: CallGatewayFn;
 
   /** Resolve model alias to provider/model pair */
   resolveModel: ResolveModelFn;
-
-  /** Get API key for a provider/model pair */
-  getApiKey: GetApiKeyFn;
-
-  /** Require API key (throws if missing) */
-  requireApiKey: RequireApiKeyFn;
 
   /** Parse agent session key into components */
   parseAgentSessionKey: ParseAgentSessionKeyFn;

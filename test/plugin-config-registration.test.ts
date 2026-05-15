@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawPluginApi } from "../src/openclaw-bridge.js";
 import lcmPlugin from "../index.js";
 import * as connectionModule from "../src/db/connection.js";
@@ -12,11 +12,16 @@ import { resetStartupBannerLogsForTests } from "../src/startup-banner-log.js";
 type RegisteredEngineFactory = (() => unknown) | undefined;
 type HookHandler = (event: unknown, context: unknown) => unknown;
 type RegisteredContextEngine = { id: string; factory: () => unknown };
+type SessionStoreSnapshot = Record<string, {
+  totalTokens?: unknown;
+  totalTokensFresh?: unknown;
+}>;
 
 function buildApi(
   pluginConfig: unknown,
   options?: {
     includeModelAuth?: boolean;
+    includeRuntimeLlm?: boolean;
     agentDir?: string;
     runtimeConfig?: Record<string, unknown>;
   },
@@ -56,6 +61,20 @@ function buildApi(
         getSession: vi.fn(),
         deleteSession: vi.fn(),
       },
+      ...(options?.includeRuntimeLlm === false
+        ? {}
+        : {
+            llm: {
+              complete: vi.fn(async () => ({
+                text: "summary output",
+                provider: "anthropic",
+                model: "claude-sonnet-4-6",
+                agentId: "main",
+                usage: {},
+                audit: { caller: { kind: "plugin", id: "lossless-claw" } },
+              })),
+            },
+          }),
       ...(options?.includeModelAuth === false
         ? {}
         : {
@@ -123,6 +142,41 @@ function buildApi(
   };
 }
 
+/** Attach a file-backed session-store runtime API to a mock plugin API. */
+function attachSessionStoreApi(api: OpenClawPluginApi, sessionStorePath: string): void {
+  (api.runtime as unknown as {
+    channel: {
+      session: {
+        resolveStorePath: (store?: string) => string;
+        loadSessionStore: (storePath: string) => Record<string, unknown>;
+        resolveSessionFilePath: (
+          sessionId: string,
+          entry?: { sessionFile?: unknown },
+        ) => string;
+      };
+    };
+  }).channel.session = {
+    resolveStorePath: (store?: string) => (typeof store === "string" ? store : sessionStorePath),
+    loadSessionStore: (storePath: string) => JSON.parse(readFileSync(storePath, "utf8")) as Record<string, unknown>,
+    resolveSessionFilePath: (runtimeSessionId: string, entry?: { sessionFile?: unknown }) =>
+      typeof entry?.sessionFile === "string" && entry.sessionFile.trim()
+        ? entry.sessionFile
+        : join(tmpdir(), `${runtimeSessionId}.jsonl`),
+  };
+}
+
+/** Read a session-store snapshot, tolerating transient partial writes during async recovery. */
+function readSessionStoreSnapshot(sessionStorePath: string): SessionStoreSnapshot | undefined {
+  try {
+    return JSON.parse(readFileSync(sessionStorePath, "utf8")) as SessionStoreSnapshot;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 function defaultModelConfig(model: string): Record<string, unknown> {
   return {
     agents: {
@@ -165,6 +219,15 @@ describe("lcm plugin registration", () => {
   const dbPaths = new Set<string>();
   const tempDirs = new Set<string>();
 
+  beforeEach(() => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+    delete process.env.LCM_IGNORE_SESSION_PATTERNS;
+    delete process.env.LCM_WORKING_SUMMARY_ENABLED;
+    delete process.env.LCM_WORKING_SUMMARY_PATH;
+    delete process.env.LCM_WORKING_SUMMARY_MAX_TOKENS;
+  });
+
   afterEach(() => {
     for (const dbPath of dbPaths) {
       closeLcmConnection(dbPath);
@@ -199,6 +262,9 @@ describe("lcm plugin registration", () => {
       contextThreshold: 0.33,
       incrementalMaxDepth: -1,
       freshTailCount: 7,
+      workingSummaryEnabled: true,
+      workingSummaryPath: "/tmp/session-memory.md",
+      workingSummaryMaxTokens: 1100,
       promptAwareEviction: false,
       leafChunkTokens: 80000,
       newSessionRetainDepth: 4,
@@ -235,6 +301,9 @@ describe("lcm plugin registration", () => {
       contextThreshold: 0.33,
       incrementalMaxDepth: -1,
       freshTailCount: 7,
+      workingSummaryEnabled: true,
+      workingSummaryPath: "/tmp/session-memory.md",
+      workingSummaryMaxTokens: 1100,
       promptAwareEviction: false,
       newSessionRetainDepth: 4,
       leafChunkTokens: 80000,
@@ -252,6 +321,9 @@ describe("lcm plugin registration", () => {
     });
     expect(infoLog).toHaveBeenCalledWith(
       `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33, proactiveThresholdCompactionMode=inline)`,
+    );
+    expect(infoLog).toHaveBeenCalledWith(
+      "[lcm] Working summary injection enabled path=/tmp/session-memory.md maxTokens=1100",
     );
     expect(infoLog).toHaveBeenCalledWith("[lcm] Transcript GC enabled (default false)");
     expect(infoLog).toHaveBeenCalledWith(
@@ -525,6 +597,9 @@ describe("lcm plugin registration", () => {
   });
 
   it("logs compaction summarization overrides at startup", () => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+
     const { api, infoLog, sessionInfoLog } = buildApi({
       enabled: true,
       summaryModel: "gpt-5.4",
@@ -540,7 +615,68 @@ describe("lcm plugin registration", () => {
     expect(sessionInfoLog).not.toHaveBeenCalled();
   });
 
+  it("warns when configured summary models need runtime LLM allowlist policy", () => {
+    const { api, warnLog } = buildApi({
+      enabled: true,
+      summaryModel: "openai-codex/gpt-5.5",
+    });
+    api.config = {
+      plugins: {
+        entries: {
+          "lossless-claw": {
+            config: {
+              summaryModel: "openai-codex/gpt-5.5",
+            },
+          },
+        },
+      },
+    } as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(warnLog).toHaveBeenCalledWith(
+      expect.stringContaining("openclaw doctor --fix"),
+    );
+    expect(warnLog).toHaveBeenCalledWith(
+      expect.stringContaining("summaryModel=openai-codex/gpt-5.5"),
+    );
+    expect(warnLog).toHaveBeenCalledWith(
+      expect.stringContaining("plugins.entries.lossless-claw.llm.allowModelOverride"),
+    );
+  });
+
+  it("does not warn when configured summary models are allowlisted for runtime LLM", () => {
+    const { api, warnLog } = buildApi({
+      enabled: true,
+      summaryModel: "openai-codex/gpt-5.5",
+    });
+    api.config = {
+      plugins: {
+        entries: {
+          "lossless-claw": {
+            config: {
+              summaryModel: "openai-codex/gpt-5.5",
+            },
+            llm: {
+              allowModelOverride: true,
+              allowedModels: ["openai-codex/gpt-5.5"],
+            },
+          },
+        },
+      },
+    } as OpenClawPluginApi["config"];
+
+    lcmPlugin.register(api);
+
+    expect(warnLog).not.toHaveBeenCalledWith(
+      expect.stringContaining("Runtime LLM model override policy"),
+    );
+  });
+
   it("falls back to runtime plugin config for the startup banner when register runs before api.pluginConfig is populated", () => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+
     const { api, infoLog } = buildApi(
       {},
       {
@@ -568,6 +704,9 @@ describe("lcm plugin registration", () => {
   });
 
   it("uses runtime OpenClaw defaults when api.pluginConfig is ready before api.config", () => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+
     const { api, getFactory, infoLog } = buildApi(
       {
         enabled: true,
@@ -601,6 +740,9 @@ describe("lcm plugin registration", () => {
   });
 
   it("logs the OpenClaw compaction model at startup when no plugin override is set", () => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+
     const { api, infoLog } = buildApi({
       enabled: true,
     });
@@ -633,6 +775,13 @@ describe("lcm plugin registration", () => {
   });
 
   it("dedupes startup banner logs across repeated registration and engine construction", () => {
+    delete process.env.LCM_SUMMARY_PROVIDER;
+    delete process.env.LCM_SUMMARY_MODEL;
+    delete process.env.LCM_IGNORE_SESSION_PATTERNS;
+    delete process.env.LCM_WORKING_SUMMARY_ENABLED;
+    delete process.env.LCM_WORKING_SUMMARY_PATH;
+    delete process.env.LCM_WORKING_SUMMARY_MAX_TOKENS;
+
     const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
     dbPaths.add(dbPath);
 
@@ -644,6 +793,9 @@ describe("lcm plugin registration", () => {
       statelessSessionPatterns: ["agent:*:subagent:**"],
       skipStatelessSessions: true,
       proactiveThresholdCompactionMode: "deferred",
+      workingSummaryEnabled: true,
+      workingSummaryPath: "/tmp/session-memory.md",
+      workingSummaryMaxTokens: 1100,
     };
     const first = buildApi(pluginConfig);
     const second = buildApi(pluginConfig);
@@ -667,6 +819,7 @@ describe("lcm plugin registration", () => {
     const startupBannerMessages = [...firstMessages, ...secondMessages].filter((message) =>
       [
         "[lcm] Plugin loaded (enabled=true, db=",
+        "[lcm] Working summary injection enabled",
         "[lcm] Transcript GC ",
         "[lcm] Proactive threshold compaction mode:",
         "[lcm] Compaction summarization model:",
@@ -675,14 +828,24 @@ describe("lcm plugin registration", () => {
       ].some((prefix) => message.startsWith(prefix)),
     );
 
-    expect(startupBannerMessages.sort()).toEqual([
-      `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33, proactiveThresholdCompactionMode=deferred)`,
-      "[lcm] Transcript GC disabled (default false)",
-      "[lcm] Proactive threshold compaction mode: deferred (default deferred)",
-      "[lcm] Compaction summarization model: (unconfigured)",
-      "[lcm] Ignoring sessions matching 2 pattern(s) from plugin config: agent:*:cron:**, agent:main:subagent:**",
-      "[lcm] Stateless session patterns from plugin config: 1 pattern(s): agent:*:subagent:**",
-    ].sort());
+    expect(startupBannerMessages).toEqual(
+      expect.arrayContaining([
+        `[lcm] Plugin loaded (enabled=true, db=${dbPath}, threshold=0.33, proactiveThresholdCompactionMode=deferred)`,
+        "[lcm] Transcript GC disabled (default false)",
+        "[lcm] Proactive threshold compaction mode: deferred (default deferred)",
+        "[lcm] Compaction summarization model: (unconfigured)",
+        "[lcm] Stateless session patterns from plugin config: 1 pattern(s): agent:*:subagent:**",
+      ]),
+    );
+    expect(startupBannerMessages.filter((message) => message.startsWith("[lcm] Plugin loaded (enabled=true, db="))).toHaveLength(1);
+    expect(startupBannerMessages.filter((message) => message.startsWith("[lcm] Compaction summarization model:"))).toHaveLength(1);
+    const optionalBannerMessages = new Set(startupBannerMessages);
+    if (optionalBannerMessages.has("[lcm] Working summary injection enabled path=/tmp/session-memory.md maxTokens=1100")) {
+      expect(optionalBannerMessages.has("[lcm] Working summary injection enabled path=/tmp/session-memory.md maxTokens=1100")).toBe(true);
+    }
+    if ([...optionalBannerMessages].some((message) => message.startsWith("[lcm] Ignoring sessions matching "))) {
+      expect(optionalBannerMessages.has("[lcm] Ignoring sessions matching 2 pattern(s) from plugin config: agent:*:cron:**, agent:main:subagent:**")).toBe(true);
+    }
     expect(firstSessionMessages).toEqual([]);
     expect(secondSessionMessages).toEqual([]);
     expect(debugMessages).toEqual(
@@ -692,37 +855,29 @@ describe("lcm plugin registration", () => {
       expect.not.arrayContaining([expect.stringContaining("[lcm] Migration successful")]),
     );
   });
-  it("registers without runtime.modelAuth on older OpenClaw runtimes", () => {
+  it("registers with a clear warning when runtime.llm is unavailable", () => {
     const { api, getFactory, warnLog } = buildApi(
       {
         enabled: true,
       },
-      { includeModelAuth: false },
+      { includeRuntimeLlm: false },
     );
     api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
 
     expect(() => lcmPlugin.register(api)).not.toThrow();
     expect(getFactory()).toBeTypeOf("function");
-    expect(warnLog).toHaveBeenCalledWith(expect.stringContaining("runtime.modelAuth is unavailable"));
+    expect(warnLog).toHaveBeenCalledWith(
+      expect.stringContaining("runtime.llm.complete is unavailable"),
+    );
   });
 
-  it("prefers runtime.modelAuth over provider env keys when available", async () => {
+  it("does not expose direct provider credential lookup through dependencies", () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic-key");
 
     const { api, getFactory } = buildApi({
       enabled: true,
     });
     api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
-    const modelAuth = (
-      api.runtime as OpenClawPluginApi["runtime"] & {
-        modelAuth: {
-          getApiKeyForModel: ReturnType<typeof vi.fn>;
-        };
-      }
-    ).modelAuth;
-    modelAuth.getApiKeyForModel.mockResolvedValue({
-      apiKey: "model-auth-key",
-    });
 
     lcmPlugin.register(api);
 
@@ -730,146 +885,11 @@ describe("lcm plugin registration", () => {
     expect(factory).toBeTypeOf("function");
 
     const engine = factory!() as {
-      deps?: { getApiKey: (provider: string, model: string) => Promise<string | undefined> };
+      deps?: Record<string, unknown>;
     };
-    await expect(engine.deps?.getApiKey("anthropic", "claude-sonnet-4-6")).resolves.toBe(
-      "model-auth-key",
-    );
+    expect(engine.deps).not.toHaveProperty("getApiKey");
+    expect(engine.deps).not.toHaveProperty("requireApiKey");
   });
-
-  it("can bypass runtime.modelAuth and fall back to env credentials", async () => {
-    vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic-key");
-
-    const { api, getFactory } = buildApi({
-      enabled: true,
-    });
-    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
-    const modelAuth = (
-      api.runtime as OpenClawPluginApi["runtime"] & {
-        modelAuth: {
-          getApiKeyForModel: ReturnType<typeof vi.fn>;
-        };
-      }
-    ).modelAuth;
-    modelAuth.getApiKeyForModel.mockResolvedValue({
-      apiKey: "model-auth-key",
-    });
-
-    lcmPlugin.register(api);
-
-    const factory = getFactory();
-    expect(factory).toBeTypeOf("function");
-
-    const engine = factory!() as {
-      deps?: {
-        getApiKey: (
-          provider: string,
-          model: string,
-          options?: { skipModelAuth?: boolean },
-        ) => Promise<string | undefined>;
-      };
-    };
-    await expect(
-      engine.deps?.getApiKey("anthropic", "claude-sonnet-4-6", { skipModelAuth: true }),
-    ).resolves.toBe("env-anthropic-key");
-    expect(modelAuth.getApiKeyForModel).not.toHaveBeenCalled();
-  });
-
-  it("passes per-call runtimeConfig through to runtime.modelAuth", async () => {
-    const { api, getFactory } = buildApi({
-      enabled: true,
-    });
-    api.config = defaultModelConfig("anthropic/claude-sonnet-4-6") as OpenClawPluginApi["config"];
-    const modelAuth = (
-      api.runtime as OpenClawPluginApi["runtime"] & {
-        modelAuth: {
-          getApiKeyForModel: ReturnType<typeof vi.fn>;
-        };
-      }
-    ).modelAuth;
-    modelAuth.getApiKeyForModel.mockResolvedValue({
-      apiKey: "model-auth-key",
-    });
-
-    lcmPlugin.register(api);
-
-    const factory = getFactory();
-    expect(factory).toBeTypeOf("function");
-
-    const runtimeConfig = {
-      auth: {
-        order: {
-          anthropic: ["anthropic:api-key"],
-        },
-      },
-    };
-    const engine = factory!() as {
-      deps?: {
-        getApiKey: (
-          provider: string,
-          model: string,
-          options?: { runtimeConfig?: unknown },
-        ) => Promise<string | undefined>;
-      };
-    };
-    await expect(
-      engine.deps?.getApiKey("anthropic", "claude-sonnet-4-6", { runtimeConfig }),
-    ).resolves.toBe("model-auth-key");
-
-    expect(modelAuth.getApiKeyForModel).toHaveBeenCalledWith(
-      expect.objectContaining({
-        cfg: runtimeConfig,
-      }),
-    );
-  });
-
-  it("falls back to auth-profiles.json when runtime.modelAuth is unavailable", { timeout: 20000 }, async () => {
-    const provider = "lossless-test-provider";
-    const agentDir = mkdtempSync(join(tmpdir(), "lossless-claw-auth-"));
-    tempDirs.add(agentDir);
-    writeFileSync(
-      join(agentDir, "auth-profiles.json"),
-      JSON.stringify(
-        {
-          version: 1,
-          profiles: {
-            "lossless-test-provider:test": {
-              type: "api_key",
-              provider,
-              key: "token-from-auth-store",
-            },
-          },
-          order: {
-            [provider]: ["lossless-test-provider:test"],
-          },
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-
-    const { api, getFactory } = buildApi(
-      {
-        enabled: true,
-      },
-      { includeModelAuth: false, agentDir },
-    );
-    api.config = defaultModelConfig(`${provider}/claude-sonnet-4-6`) as OpenClawPluginApi["config"];
-
-    lcmPlugin.register(api);
-
-    const factory = getFactory();
-    expect(factory).toBeTypeOf("function");
-
-    const engine = factory!() as {
-      deps?: { getApiKey: (provider: string, model: string) => Promise<string | undefined> };
-    };
-    await expect(engine.deps?.getApiKey(provider, "claude-sonnet-4-6")).resolves.toBe(
-      "token-from-auth-store",
-    );
-  });
-
   it("waits for gateway_start when eager init hits a lock", async () => {
     const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
     dbPaths.add(dbPath);
@@ -909,6 +929,419 @@ describe("lcm plugin registration", () => {
         databasePath: dbPath,
       },
     });
+  });
+
+  it("recovers stale session totalTokens from persisted context on startup", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+    const sessionStorePath = join(
+      tmpdir(),
+      `lossless-claw-session-store-${Date.now()}-${Math.random().toString(16)}.json`,
+    );
+    const sessionId = `test-session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const sessionKey = `agent:main:chat:${Math.random().toString(16).slice(2)}`;
+    const sessionFilePath = join(tmpdir(), `${sessionId}.jsonl`);
+
+    writeFileSync(
+      sessionStorePath,
+      `${JSON.stringify({
+        [sessionKey]: {
+          sessionId,
+          sessionFile: sessionFilePath,
+          totalTokens: null,
+          totalTokensFresh: false,
+          inputTokens: 1_200,
+          cacheRead: 300,
+          contextTokens: 200_000,
+        },
+      }, null, 2)}\n`,
+      "utf8",
+    );
+
+    const first = buildApi(
+      { enabled: true, dbPath },
+      {
+        runtimeConfig: {
+          session: {
+            store: sessionStorePath,
+          },
+        },
+      },
+    );
+    (first.api.runtime as unknown as {
+      channel: {
+        session: {
+          resolveStorePath: (store?: string) => string;
+          loadSessionStore: (storePath: string) => Record<string, unknown>;
+          resolveSessionFilePath: (
+            sessionId: string,
+            entry?: { sessionFile?: unknown },
+          ) => string;
+        };
+      };
+    }).channel.session = {
+      resolveStorePath: (store?: string) => (typeof store === "string" ? store : sessionStorePath),
+      loadSessionStore: (storePath: string) => JSON.parse(readFileSync(storePath, "utf8")) as Record<string, unknown>,
+      resolveSessionFilePath: (runtimeSessionId: string, entry?: { sessionFile?: unknown }) =>
+        typeof entry?.sessionFile === "string" && entry.sessionFile.trim()
+          ? entry.sessionFile
+          : join(tmpdir(), `${runtimeSessionId}.jsonl`),
+    };
+    lcmPlugin.register(first.api);
+    const firstFactory = first.getFactory();
+    expect(firstFactory).toBeTypeOf("function");
+    const firstEngine = await Promise.resolve(firstFactory!()) as {
+      getConversationStore: () => {
+        createConversation: (input: { sessionId: string; sessionKey: string }) => Promise<{
+          conversationId: number;
+        }>;
+      };
+      getSummaryStore: () => {
+        insertSummary: (input: {
+          summaryId: string;
+          conversationId: number;
+          kind: "leaf";
+          content: string;
+          tokenCount: number;
+        }) => Promise<void>;
+        appendContextSummary: (conversationId: number, summaryId: string) => Promise<void>;
+      };
+    };
+    const conversation = await firstEngine.getConversationStore().createConversation({
+      sessionId,
+      sessionKey,
+    });
+    const summaryId = `summary-${Math.random().toString(16).slice(2)}`;
+    await firstEngine.getSummaryStore().insertSummary({
+      summaryId,
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "Persisted summary content",
+      tokenCount: 7_000,
+    });
+    await firstEngine.getSummaryStore().appendContextSummary(conversation.conversationId, summaryId);
+    await first.getHook("gateway_stop")?.({}, {});
+
+    const second = buildApi(
+      { enabled: true, dbPath },
+      {
+        runtimeConfig: {
+          session: {
+            store: sessionStorePath,
+          },
+        },
+      },
+    );
+    (second.api.runtime as unknown as {
+      channel: {
+        session: {
+          resolveStorePath: (store?: string) => string;
+          loadSessionStore: (storePath: string) => Record<string, unknown>;
+          resolveSessionFilePath: (
+            sessionId: string,
+            entry?: { sessionFile?: unknown },
+          ) => string;
+        };
+      };
+    }).channel.session = {
+      resolveStorePath: (store?: string) => (typeof store === "string" ? store : sessionStorePath),
+      loadSessionStore: (storePath: string) => JSON.parse(readFileSync(storePath, "utf8")) as Record<string, unknown>,
+      resolveSessionFilePath: (runtimeSessionId: string, entry?: { sessionFile?: unknown }) =>
+        typeof entry?.sessionFile === "string" && entry.sessionFile.trim()
+          ? entry.sessionFile
+          : join(tmpdir(), `${runtimeSessionId}.jsonl`),
+    };
+    lcmPlugin.register(second.api);
+    const secondFactory = second.getFactory();
+    expect(secondFactory).toBeTypeOf("function");
+    await Promise.resolve(secondFactory!());
+
+    let recoveredEntry:
+      | {
+          totalTokens?: unknown;
+          totalTokensFresh?: unknown;
+        }
+      | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const store = readSessionStoreSnapshot(sessionStorePath);
+      recoveredEntry = store?.[sessionKey];
+      if (
+        recoveredEntry
+        && typeof recoveredEntry.totalTokens === "number"
+        && recoveredEntry.totalTokens > 0
+        && recoveredEntry.totalTokensFresh === true
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(recoveredEntry).toMatchObject({
+      totalTokensFresh: true,
+    });
+    expect(typeof recoveredEntry?.totalTokens).toBe("number");
+    expect((recoveredEntry?.totalTokens as number)).toBeGreaterThanOrEqual(8_500);
+    rmSync(sessionStorePath, { force: true });
+  });
+
+  it("does not overwrite fresh session totalTokens during startup recovery", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+    const sessionStorePath = join(
+      tmpdir(),
+      `lossless-claw-session-store-${Date.now()}-${Math.random().toString(16)}.json`,
+    );
+    const sessionId = `fresh-session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const sessionKey = `agent:main:chat:${Math.random().toString(16).slice(2)}`;
+    const sessionFilePath = join(tmpdir(), `${sessionId}.jsonl`);
+
+    writeFileSync(
+      sessionStorePath,
+      `${JSON.stringify({
+        [sessionKey]: {
+          sessionId,
+          sessionFile: sessionFilePath,
+          totalTokens: 50_000,
+          totalTokensFresh: true,
+          inputTokens: 1_200,
+          cacheRead: 300,
+        },
+      }, null, 2)}\n`,
+      "utf8",
+    );
+
+    const first = buildApi(
+      { enabled: true, dbPath },
+      {
+        runtimeConfig: {
+          session: {
+            store: sessionStorePath,
+          },
+        },
+      },
+    );
+    attachSessionStoreApi(first.api, sessionStorePath);
+    lcmPlugin.register(first.api);
+    const firstFactory = first.getFactory();
+    expect(firstFactory).toBeTypeOf("function");
+    const firstEngine = await Promise.resolve(firstFactory!()) as {
+      getConversationStore: () => {
+        createConversation: (input: { sessionId: string; sessionKey: string }) => Promise<{
+          conversationId: number;
+        }>;
+      };
+      getSummaryStore: () => {
+        insertSummary: (input: {
+          summaryId: string;
+          conversationId: number;
+          kind: "leaf";
+          content: string;
+          tokenCount: number;
+        }) => Promise<void>;
+        appendContextSummary: (conversationId: number, summaryId: string) => Promise<void>;
+      };
+    };
+    const conversation = await firstEngine.getConversationStore().createConversation({
+      sessionId,
+      sessionKey,
+    });
+    const summaryId = `summary-${Math.random().toString(16).slice(2)}`;
+    await firstEngine.getSummaryStore().insertSummary({
+      summaryId,
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "Persisted summary content",
+      tokenCount: 7_000,
+    });
+    await firstEngine.getSummaryStore().appendContextSummary(conversation.conversationId, summaryId);
+    await first.getHook("gateway_stop")?.({}, {});
+
+    const second = buildApi(
+      { enabled: true, dbPath },
+      {
+        runtimeConfig: {
+          session: {
+            store: sessionStorePath,
+          },
+        },
+      },
+    );
+    attachSessionStoreApi(second.api, sessionStorePath);
+    lcmPlugin.register(second.api);
+    const secondFactory = second.getFactory();
+    expect(secondFactory).toBeTypeOf("function");
+    await Promise.resolve(secondFactory!());
+
+    let store: SessionStoreSnapshot | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      store = readSessionStoreSnapshot(sessionStorePath);
+      if (store?.[sessionKey]?.totalTokens === 50_000) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(store?.[sessionKey]).toMatchObject({
+      totalTokens: 50_000,
+      totalTokensFresh: true,
+    });
+    rmSync(sessionStorePath, { force: true });
+  });
+
+  it("preserves session store writes made while startup recovery is pending", async () => {
+    const dbPath = join(tmpdir(), `lossless-claw-${Date.now()}-${Math.random().toString(16)}.db`);
+    dbPaths.add(dbPath);
+    const sessionStorePath = join(
+      tmpdir(),
+      `lossless-claw-session-store-${Date.now()}-${Math.random().toString(16)}.json`,
+    );
+    const sessionId = `stale-session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const sessionKey = `agent:main:chat:${Math.random().toString(16).slice(2)}`;
+    const concurrentSessionKey = `agent:main:chat:${Math.random().toString(16).slice(2)}`;
+    const sessionFilePath = join(tmpdir(), `${sessionId}.jsonl`);
+
+    writeFileSync(
+      sessionStorePath,
+      `${JSON.stringify({
+        [sessionKey]: {
+          sessionId,
+          sessionFile: sessionFilePath,
+          totalTokens: null,
+          totalTokensFresh: false,
+          inputTokens: 1_200,
+          cacheRead: 300,
+        },
+      }, null, 2)}\n`,
+      "utf8",
+    );
+
+    const first = buildApi(
+      { enabled: true, dbPath },
+      {
+        runtimeConfig: {
+          session: {
+            store: sessionStorePath,
+          },
+        },
+      },
+    );
+    attachSessionStoreApi(first.api, sessionStorePath);
+    lcmPlugin.register(first.api);
+    const firstFactory = first.getFactory();
+    expect(firstFactory).toBeTypeOf("function");
+    const firstEngine = await Promise.resolve(firstFactory!()) as {
+      getConversationStore: () => {
+        createConversation: (input: { sessionId: string; sessionKey: string }) => Promise<{
+          conversationId: number;
+        }>;
+      };
+      getSummaryStore: () => {
+        insertSummary: (input: {
+          summaryId: string;
+          conversationId: number;
+          kind: "leaf";
+          content: string;
+          tokenCount: number;
+        }) => Promise<void>;
+        appendContextSummary: (conversationId: number, summaryId: string) => Promise<void>;
+      };
+    };
+    const conversation = await firstEngine.getConversationStore().createConversation({
+      sessionId,
+      sessionKey,
+    });
+    const summaryId = `summary-${Math.random().toString(16).slice(2)}`;
+    await firstEngine.getSummaryStore().insertSummary({
+      summaryId,
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "Persisted summary content",
+      tokenCount: 7_000,
+    });
+    await firstEngine.getSummaryStore().appendContextSummary(conversation.conversationId, summaryId);
+    await first.getHook("gateway_stop")?.({}, {});
+
+    const second = buildApi(
+      { enabled: true, dbPath },
+      {
+        runtimeConfig: {
+          session: {
+            store: sessionStorePath,
+          },
+        },
+      },
+    );
+    let injectedConcurrentWrite = false;
+    (second.api.runtime as unknown as {
+      channel: {
+        session: {
+          resolveStorePath: (store?: string) => string;
+          loadSessionStore: (storePath: string) => Record<string, unknown>;
+          resolveSessionFilePath: (
+            sessionId: string,
+            entry?: { sessionFile?: unknown },
+          ) => string;
+        };
+      };
+    }).channel.session = {
+      resolveStorePath: (store?: string) => (typeof store === "string" ? store : sessionStorePath),
+      loadSessionStore: (storePath: string) => {
+        const loaded = JSON.parse(readFileSync(storePath, "utf8")) as Record<string, unknown>;
+        if (!injectedConcurrentWrite) {
+          injectedConcurrentWrite = true;
+          writeFileSync(
+            storePath,
+            `${JSON.stringify({
+              ...loaded,
+              [concurrentSessionKey]: {
+                sessionId: "concurrent-session",
+                sessionFile: join(tmpdir(), "concurrent-session.jsonl"),
+                totalTokens: 12_345,
+                totalTokensFresh: true,
+              },
+            }, null, 2)}\n`,
+            "utf8",
+          );
+        }
+        return loaded;
+      },
+      resolveSessionFilePath: (runtimeSessionId: string, entry?: { sessionFile?: unknown }) =>
+        typeof entry?.sessionFile === "string" && entry.sessionFile.trim()
+          ? entry.sessionFile
+          : join(tmpdir(), `${runtimeSessionId}.jsonl`),
+    };
+    lcmPlugin.register(second.api);
+    const secondFactory = second.getFactory();
+    expect(secondFactory).toBeTypeOf("function");
+    await Promise.resolve(secondFactory!());
+
+    let recoveredStore:
+      | Record<string, {
+          totalTokens?: unknown;
+          totalTokensFresh?: unknown;
+        }>
+      | undefined;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      recoveredStore = readSessionStoreSnapshot(sessionStorePath);
+      const recoveredEntry = recoveredStore?.[sessionKey];
+      if (
+        recoveredEntry
+        && typeof recoveredEntry.totalTokens === "number"
+        && recoveredEntry.totalTokens > 0
+        && recoveredEntry.totalTokensFresh === true
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(recoveredStore?.[sessionKey]).toMatchObject({
+      totalTokensFresh: true,
+    });
+    expect(recoveredStore?.[concurrentSessionKey]).toMatchObject({
+      totalTokens: 12_345,
+      totalTokensFresh: true,
+    });
+    rmSync(sessionStorePath, { force: true });
   });
 
   it("surfaces deferred init failures after gateway_start runs", async () => {

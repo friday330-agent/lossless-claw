@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveEffectiveReasoning } from "../src/plugin/index.js";
 import { createLcmSummarizeFromLegacyParams } from "../src/summarize.js";
 
 function createDeps(overrides: Partial<Record<string, unknown>> = {}) {
@@ -21,8 +20,6 @@ function createDeps(overrides: Partial<Record<string, unknown>> = {}) {
       provider: providerHint?.trim() || "openrouter",
       model: modelRef?.trim() || "minimax/minimax-m2.7",
     }),
-    getApiKey: async () => "test-key",
-    requireApiKey: async () => "test-key",
     parseAgentSessionKey: () => null,
     isSubagentSessionKey: () => false,
     normalizeAgentId: (id?: string) => id ?? "main",
@@ -45,36 +42,6 @@ function createDeps(overrides: Partial<Record<string, unknown>> = {}) {
     calls,
   };
 }
-
-describe("resolveEffectiveReasoning", () => {
-  it("prefers an explicit reasoning setting over the supported-model default", () => {
-    expect(
-      resolveEffectiveReasoning({
-        reasoning: "high",
-        reasoningIfSupported: "low",
-        modelSupportsReasoning: true,
-      }),
-    ).toBe("high");
-  });
-
-  it("only applies the default when the model supports reasoning", () => {
-    expect(
-      resolveEffectiveReasoning({
-        reasoning: undefined,
-        reasoningIfSupported: "low",
-        modelSupportsReasoning: true,
-      }),
-    ).toBe("low");
-
-    expect(
-      resolveEffectiveReasoning({
-        reasoning: undefined,
-        reasoningIfSupported: "low",
-        modelSupportsReasoning: false,
-      }),
-    ).toBeUndefined();
-  });
-});
 
 describe("createLcmSummarizeFromLegacyParams", () => {
   it("requests a low default reasoning budget for the initial summarizer call", async () => {

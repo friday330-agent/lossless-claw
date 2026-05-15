@@ -33,6 +33,13 @@ export type CreateMessageInput = {
   content: string;
   tokenCount: number;
   identityHash?: string;
+  // Use only when the caller is intentionally importing a fresh transcript epoch.
+  skipReplayTimestampFloodGuard?: boolean;
+};
+
+type PreparedMessageInsert = CreateMessageInput & {
+  createdAt: string;
+  identityHash: string;
 };
 
 export type MessageRecord = {
@@ -43,6 +50,14 @@ export type MessageRecord = {
   content: string;
   tokenCount: number;
   createdAt: Date;
+  /**
+   * v4.2 §B — non-null when the row has been stratified into a
+   * stubbable payload via lcm-blob-migrate.mjs. Stores the externalized
+   * `file_xxx` id (in `large_files`); the assembler reads this to
+   * decide whether an evictable tool result can be replaced with a
+   * compact `[LCM Tool Output: file_xxx | …]` reference.
+   */
+  largeContent: string | null;
 };
 
 export type CreateMessagePartInput = {
@@ -133,6 +148,9 @@ interface MessageRow {
   content: string;
   token_count: number;
   created_at: string;
+  // v4.2 §B — sidecar fileId column. Optional in row shape because not
+  // every SELECT projects it; mappers tolerate undefined → null.
+  large_content?: string | null;
 }
 
 interface MessageSearchRow {
@@ -162,6 +180,10 @@ interface CountRow {
   count: number;
 }
 
+interface TimestampRow {
+  created_at: string;
+}
+
 interface MaxSeqRow {
   max_seq: number;
 }
@@ -184,6 +206,7 @@ function toConversationRecord(row: ConversationRow): ConversationRecord {
 
 function toMessageRecord(row: MessageRow): MessageRecord {
   return {
+    largeContent: row.large_content ?? null,
     messageId: row.message_id,
     conversationId: row.conversation_id,
     seq: row.seq,
@@ -251,7 +274,9 @@ function normalizeMessageContentForFullTextIndex(content: string): string | null
       inSummary = true;
       continue;
     }
-    if (line.startsWith("Use lcm_describe")) {
+    // Filter both legacy "Use lcm_describe …" and v4.2 "Call lcm_describe(…)"
+    // hint lines so they don't pollute the FTS index for unrelated queries.
+    if (line.startsWith("Use lcm_describe") || line.startsWith("Call lcm_describe")) {
       continue;
     }
     if (inSummary) {
@@ -512,18 +537,24 @@ export class ConversationStore {
   // ── Message operations ────────────────────────────────────────────────────
 
   async createMessage(input: CreateMessageInput): Promise<MessageRecord> {
+    const prepared = this.prepareMessageInsert(input);
+    if (!prepared.skipReplayTimestampFloodGuard) {
+      this.assertNoReplayTimestampFlood([prepared]);
+    }
+
     const result = this.db
       .prepare(
-        `INSERT INTO messages (conversation_id, seq, role, content, token_count, identity_hash)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (conversation_id, seq, role, content, token_count, identity_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        input.conversationId,
-        input.seq,
-        input.role,
-        input.content,
-        input.tokenCount,
-        input.identityHash ?? buildMessageIdentityHash(input.role, input.content),
+        prepared.conversationId,
+        prepared.seq,
+        prepared.role,
+        prepared.content,
+        prepared.tokenCount,
+        prepared.identityHash,
+        prepared.createdAt,
       );
 
     const messageId = Number(result.lastInsertRowid);
@@ -532,7 +563,7 @@ export class ConversationStore {
 
     const row = this.db
       .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
        FROM messages WHERE message_id = ?`,
       )
       .get(messageId) as unknown as MessageRow;
@@ -544,24 +575,31 @@ export class ConversationStore {
     if (inputs.length === 0) {
       return [];
     }
+    const createdAt = this.currentSqliteTimestamp();
+    const preparedInputs = inputs.map((input) => this.prepareMessageInsert(input, createdAt));
+    this.assertNoReplayTimestampFlood(
+      preparedInputs.filter((input) => !input.skipReplayTimestampFloodGuard),
+    );
+
     const insertStmt = this.db.prepare(
-      `INSERT INTO messages (conversation_id, seq, role, content, token_count, identity_hash)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (conversation_id, seq, role, content, token_count, identity_hash, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     const selectStmt = this.db.prepare(
-      `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+      `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
        FROM messages WHERE message_id = ?`,
     );
 
     const records: MessageRecord[] = [];
-    for (const input of inputs) {
+    for (const input of preparedInputs) {
       const result = insertStmt.run(
         input.conversationId,
         input.seq,
         input.role,
         input.content,
         input.tokenCount,
-        input.identityHash ?? buildMessageIdentityHash(input.role, input.content),
+        input.identityHash,
+        input.createdAt,
       );
 
       const messageId = Number(result.lastInsertRowid);
@@ -583,7 +621,7 @@ export class ConversationStore {
     if (limit != null) {
       const rows = this.db
         .prepare(
-          `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+          `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
          FROM messages
          WHERE conversation_id = ? AND seq > ?
          ORDER BY seq
@@ -595,7 +633,7 @@ export class ConversationStore {
 
     const rows = this.db
       .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
        FROM messages
        WHERE conversation_id = ? AND seq > ?
        ORDER BY seq`,
@@ -607,7 +645,7 @@ export class ConversationStore {
   async getLastMessage(conversationId: ConversationId): Promise<MessageRecord | null> {
     const row = this.db
       .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
        FROM messages
        WHERE conversation_id = ?
        ORDER BY seq DESC
@@ -653,13 +691,64 @@ export class ConversationStore {
     return row?.count ?? 0;
   }
 
+  async countMessagesByIdentityBeforeTimestamp(params: {
+    conversationId: ConversationId;
+    role: MessageRole;
+    content: string;
+    beforeCreatedAt: string;
+  }): Promise<number> {
+    return this.countMessagesByIdentityBeforeTimestampSync(params);
+  }
+
+  private countMessagesByIdentityBeforeTimestampSync(params: {
+    conversationId: ConversationId;
+    role: MessageRole;
+    content: string;
+    beforeCreatedAt: string;
+  }): number {
+    const identityHash = buildMessageIdentityHash(params.role, params.content);
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+       FROM messages
+       WHERE conversation_id = ?
+         AND identity_hash = ?
+         AND role = ?
+         AND content = ?
+         AND created_at < ?`,
+      )
+      .get(
+        params.conversationId,
+        identityHash,
+        params.role,
+        params.content,
+        params.beforeCreatedAt,
+      ) as unknown as CountRow | undefined;
+
+    return row?.count ?? 0;
+  }
+
   async getMessageById(messageId: MessageId): Promise<MessageRecord | null> {
     const row = this.db
       .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
        FROM messages WHERE message_id = ?`,
       )
       .get(messageId) as unknown as MessageRow | undefined;
+    return row ? toMessageRecord(row) : null;
+  }
+
+  /** Return the most recent message whose `large_content` sidecar references the given file id. */
+  async getMessageByLargeContent(fileId: string): Promise<MessageRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
+       FROM messages
+       WHERE large_content = ?
+       ORDER BY seq DESC
+       LIMIT 1`,
+      )
+      .get(fileId) as unknown as MessageRow | undefined;
     return row ? toMessageRecord(row) : null;
   }
 
@@ -857,6 +946,88 @@ export class ConversationStore {
     }
   }
 
+  private currentSqliteTimestamp(): string {
+    const row = this.db
+      .prepare(`SELECT datetime('now') AS created_at`)
+      .get() as unknown as TimestampRow;
+    return row.created_at;
+  }
+
+  private prepareMessageInsert(
+    input: CreateMessageInput,
+    createdAt = this.currentSqliteTimestamp(),
+  ): PreparedMessageInsert {
+    return {
+      ...input,
+      createdAt,
+      identityHash: input.identityHash ?? buildMessageIdentityHash(input.role, input.content),
+    };
+  }
+
+  private countExistingReplayRowsAtTimestamp(
+    conversationId: ConversationId,
+    createdAt: string,
+  ): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+       FROM messages AS m
+       WHERE m.conversation_id = ?
+         AND m.created_at = ?
+         AND length(m.content) > 0
+         AND EXISTS (
+           SELECT 1
+           FROM messages AS prior
+           WHERE prior.conversation_id = m.conversation_id
+             AND prior.identity_hash = m.identity_hash
+             AND prior.role = m.role
+             AND prior.content = m.content
+             AND prior.created_at < m.created_at
+         )`,
+      )
+      .get(conversationId, createdAt) as unknown as CountRow | undefined;
+    return row?.count ?? 0;
+  }
+
+  private assertNoReplayTimestampFlood(inputs: PreparedMessageInsert[]): void {
+    if (inputs.length === 0) {
+      return;
+    }
+
+    const replicatedByConversationAndTimestamp = new Map<string, number>();
+    for (const input of inputs) {
+      if (input.content.length === 0) {
+        continue;
+      }
+      const priorCount = this.countMessagesByIdentityBeforeTimestampSync({
+        conversationId: input.conversationId,
+        role: input.role,
+        content: input.content,
+        beforeCreatedAt: input.createdAt,
+      });
+      if (priorCount === 0) {
+        continue;
+      }
+      const key = `${input.conversationId}\u0000${input.createdAt}`;
+      replicatedByConversationAndTimestamp.set(
+        key,
+        (replicatedByConversationAndTimestamp.get(key) ?? 0) + 1,
+      );
+    }
+
+    for (const [key, candidateCount] of replicatedByConversationAndTimestamp) {
+      const [conversationIdText, createdAt] = key.split("\u0000");
+      const conversationId = Number(conversationIdText);
+      const existingCount = this.countExistingReplayRowsAtTimestamp(conversationId, createdAt);
+      const replicatedCount = existingCount + candidateCount;
+      if (replicatedCount >= 3) {
+        throw new Error(
+          `[lcm] refused replay-like message batch: conversation=${conversationId} createdAt=${createdAt} replicatedRows=${replicatedCount}`,
+        );
+      }
+    }
+  }
+
   private deleteMessageFromFullText(messageId: MessageId): void {
     if (!this.fts5Available) {
       return;
@@ -948,7 +1119,7 @@ export class ConversationStore {
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const rows = this.db
       .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
          FROM messages
          ${whereClause}
          ORDER BY created_at DESC
@@ -1016,7 +1187,7 @@ export class ConversationStore {
     const whereClause = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const rows = this.db
       .prepare(
-        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+        `SELECT message_id, conversation_id, seq, role, content, token_count, created_at, large_content
          FROM messages
          ${whereClause}
          ORDER BY created_at DESC`,

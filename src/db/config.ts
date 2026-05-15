@@ -18,12 +18,11 @@ export function resolveOpenclawStateDir(env: NodeJS.ProcessEnv = process.env): s
 }
 
 /**
- * Default for `criticalBudgetPressureRatio` — single source of truth so
- * resolver fallback, runtime fallback, and tests can all reference the same
- * value. Mirrored to `src/engine.ts`'s `?? DEFAULT_CRITICAL_BUDGET_PRESSURE_RATIO`
- * usage.
+ * Legacy default for accepted cache-aware config. Automatic compaction no
+ * longer consumes this value, but the resolver keeps it stable for existing
+ * plugin config and status surfaces.
  */
-export const DEFAULT_CRITICAL_BUDGET_PRESSURE_RATIO = 0.70;
+export const DEFAULT_CRITICAL_BUDGET_PRESSURE_RATIO = 0.90;
 export const DEFAULT_AUTO_ROTATE_SESSION_FILE_SIZE_BYTES = 2 * 1024 * 1024;
 
 export type CacheAwareCompactionConfig = {
@@ -33,25 +32,7 @@ export type CacheAwareCompactionConfig = {
   hotCachePressureFactor: number;
   hotCacheBudgetHeadroomRatio: number;
   coldCacheObservationThreshold: number;
-  /**
-   * Token-budget ratio that bypasses cache-aware deferral when the prompt is
-   * critically full. Defaults to 0.70 — once `currentTokenCount >= 0.70 *
-   * tokenBudget`, deferred compaction fires regardless of prompt-cache
-   * temperature so the runtime never has to fall back to emergency overflow
-   * truncation.
-   *
-   * The 0.70 default leaves a 30% headroom band (0–70%) where cache-aware
-   * throttling can defer up to the configured cache TTL window per dispatch
-   * (default 5 minutes via `cacheTTLSeconds: 300`).
-   * Above 70%, the bypass fires every turn regardless of cache state — that
-   * 30% buffer is enough room for a heavily-deferred backlog to drain before
-   * the runtime emergency overflow handler is needed. Set to `>= 1` to
-   * disable the bypass entirely (cache-aware throttling fully controls
-   * deferral).
-   *
-   * Optional for backward compatibility — runtime defaults to 0.70 when this
-   * field is absent.
-   */
+  /** Legacy threshold-pressure bypass value. Accepted but not used automatically. */
   criticalBudgetPressureRatio?: number;
 };
 
@@ -65,6 +46,7 @@ export type AutoRotateSessionFileMode = "rotate" | "warn" | "off";
 
 export type AutoRotateSessionFilesConfig = {
   enabled: boolean;
+  createBackups: boolean;
   sizeBytes: number;
   startup: AutoRotateSessionFileMode;
   runtime: AutoRotateSessionFileMode;
@@ -84,6 +66,12 @@ export type LcmConfig = {
   databasePath: string;
   /** Directory for persisting large-file text payloads. */
   largeFilesDir: string;
+  /** When true, inject a working-summary candidate ahead of DAG summaries during assembly. */
+  workingSummaryEnabled: boolean;
+  /** Optional path to a working-summary markdown file injected during assembly. */
+  workingSummaryPath: string;
+  /** Optional token cap applied to the injected working summary candidate. */
+  workingSummaryMaxTokens?: number;
   /** Glob patterns for session keys to exclude from LCM storage entirely. */
   ignoreSessionPatterns: string[];
   /** Glob patterns for session keys that may read from LCM but never write to it. */
@@ -96,12 +84,26 @@ export type LcmConfig = {
   freshTailMaxTokens?: number;
   /** When true, budget-constrained assembly may keep older items by prompt relevance instead of pure chronology. */
   promptAwareEviction: boolean;
+  /**
+   * v4.2 §B — when true, evictable tool-result rows whose `large_content`
+   * sidecar is set (a `file_xxx` id from lcm-blob-migrate) are replaced
+   * with the v4.1 `[LCM Tool Output: file_xxx | tool=… | N bytes]`
+   * reference at assemble time. Fresh tail is never stubbed. Drilldown
+   * via `lcm_describe(id="file_xxx")` returns the original content.
+   * Default false; flag-flip is reversible at runtime.
+   */
+  stubLargeToolPayloads: boolean;
   newSessionRetainDepth: number;
   leafMinFanout: number;
   condensedMinFanout: number;
   condensedMinFanoutHard: number;
+  /** Preferred source depth for routine full-sweep condensation. */
+  sweepMaxDepth: number;
+  /** Deprecated alias for `sweepMaxDepth`; kept for config compatibility. */
   incrementalMaxDepth: number;
   leafChunkTokens: number;
+  /** Optional target for summarized-prefix tokens after a full sweep. */
+  summaryPrefixTargetTokens?: number;
   /** Maximum raw parent-history tokens imported during first-time bootstrap. */
   bootstrapMaxTokens?: number;
   leafTargetTokens: number;
@@ -146,9 +148,9 @@ export type LcmConfig = {
   circuitBreakerCooldownMs: number;
   /** Explicit fallback provider/model pairs for compaction summarization. */
   fallbackProviders: Array<{ provider: string; model: string }>;
-  /** Cache-sensitive policy for incremental leaf compaction. */
+  /** Legacy cache-sensitive policy. Accepted but not used for automatic compaction. */
   cacheAwareCompaction: CacheAwareCompactionConfig;
-  /** Dynamic step-band policy for incremental leaf chunk sizing. */
+  /** Legacy dynamic step-band policy. Accepted but not used for automatic compaction. */
   dynamicLeafChunkTokens: DynamicLeafChunkTokensConfig;
 };
 
@@ -353,6 +355,16 @@ export function resolveLcmConfigWithDiagnostics(
     parseFiniteInt(env.LCM_BOOTSTRAP_MAX_TOKENS)
       ?? toNumber(pc.bootstrapMaxTokens)
       ?? Math.max(6000, Math.floor(resolvedLeafChunkTokens * 0.3));
+  const resolvedSweepMaxDepth =
+    parseFiniteInt(env.LCM_SWEEP_MAX_DEPTH)
+      ?? parseFiniteInt(env.LCM_INCREMENTAL_MAX_DEPTH)
+      ?? toNumber(pc.sweepMaxDepth)
+      ?? toNumber(pc.incrementalMaxDepth)
+      ?? 1;
+  const resolvedSummaryPrefixTargetTokens = toPositiveInteger(
+    parseFiniteInt(env.LCM_SUMMARY_PREFIX_TARGET_TOKENS)
+      ?? toNumber(pc.summaryPrefixTargetTokens),
+  );
   const envDelegationTimeoutMs =
     env.LCM_DELEGATION_TIMEOUT_MS !== undefined
       ? toNumber(env.LCM_DELEGATION_TIMEOUT_MS)
@@ -423,6 +435,18 @@ export function resolveLcmConfigWithDiagnostics(
         env.LCM_LARGE_FILES_DIR?.trim()
         ?? toStr(pc.largeFilesDir)
         ?? join(resolveOpenclawStateDir(env), "lcm-files"),
+      workingSummaryEnabled:
+        env.LCM_WORKING_SUMMARY_ENABLED !== undefined
+          ? env.LCM_WORKING_SUMMARY_ENABLED === "true"
+          : toBool(pc.workingSummaryEnabled) ?? false,
+      workingSummaryPath:
+        env.LCM_WORKING_SUMMARY_PATH?.trim()
+        ?? toStr(pc.workingSummaryPath)
+        ?? "",
+      workingSummaryMaxTokens:
+        parseFiniteInt(env.LCM_WORKING_SUMMARY_MAX_TOKENS)
+          ?? toNumber(pc.workingSummaryMaxTokens)
+          ?? 1200,
       ignoreSessionPatterns: ignoreSessionPatterns.patterns,
       statelessSessionPatterns: statelessSessionPatterns.patterns,
       skipStatelessSessions:
@@ -442,6 +466,13 @@ export function resolveLcmConfigWithDiagnostics(
         env.LCM_PROMPT_AWARE_EVICTION_ENABLED !== undefined
           ? env.LCM_PROMPT_AWARE_EVICTION_ENABLED === "true"
           : toBool(pc.promptAwareEviction) ?? false,
+      // v4.2 §B — config + env-var propagation for the stub-tier flag.
+      // Default false. Mirror the env-takes-precedence-over-config
+      // pattern used by every other boolean LCM flag.
+      stubLargeToolPayloads:
+        env.LCM_STUB_LARGE_TOOL_PAYLOADS !== undefined
+          ? env.LCM_STUB_LARGE_TOOL_PAYLOADS === "true"
+          : toBool(pc.stubLargeToolPayloads) ?? false,
       newSessionRetainDepth:
         parseFiniteInt(env.LCM_NEW_SESSION_RETAIN_DEPTH)
           ?? toNumber(pc.newSessionRetainDepth) ?? 2,
@@ -454,10 +485,10 @@ export function resolveLcmConfigWithDiagnostics(
       condensedMinFanoutHard:
         parseFiniteInt(env.LCM_CONDENSED_MIN_FANOUT_HARD)
           ?? toNumber(pc.condensedMinFanoutHard) ?? 2,
-      incrementalMaxDepth:
-        parseFiniteInt(env.LCM_INCREMENTAL_MAX_DEPTH)
-          ?? toNumber(pc.incrementalMaxDepth) ?? 1,
+      sweepMaxDepth: resolvedSweepMaxDepth,
+      incrementalMaxDepth: resolvedSweepMaxDepth,
       leafChunkTokens: resolvedLeafChunkTokens,
+      summaryPrefixTargetTokens: resolvedSummaryPrefixTargetTokens,
       bootstrapMaxTokens: resolvedBootstrapMaxTokens,
       leafTargetTokens:
         parseFiniteInt(env.LCM_LEAF_TARGET_TOKENS)
@@ -504,6 +535,10 @@ export function resolveLcmConfigWithDiagnostics(
           env.LCM_AUTO_ROTATE_SESSION_FILES_ENABLED !== undefined
             ? env.LCM_AUTO_ROTATE_SESSION_FILES_ENABLED !== "false"
             : toBool(autoRotateSessionFiles?.enabled) ?? true,
+        createBackups:
+          env.LCM_AUTO_ROTATE_SESSION_FILES_CREATE_BACKUPS !== undefined
+            ? env.LCM_AUTO_ROTATE_SESSION_FILES_CREATE_BACKUPS === "true"
+            : toBool(autoRotateSessionFiles?.createBackups) ?? false,
         sizeBytes: autoRotateSessionFileSizeBytes,
         startup:
           toAutoRotateSessionFileMode(env.LCM_AUTO_ROTATE_SESSION_FILES_STARTUP)

@@ -48,6 +48,7 @@ function createTestConfig(overrides: Partial<LcmConfig> = {}): LcmConfig {
     proactiveThresholdCompactionMode: "deferred",
     autoRotateSessionFiles: {
       enabled: true,
+      createBackups: false,
       sizeBytes: 2 * 1024 * 1024,
       startup: "rotate",
       runtime: "rotate",
@@ -65,7 +66,7 @@ function createTestConfig(overrides: Partial<LcmConfig> = {}): LcmConfig {
       hotCachePressureFactor: 4,
       hotCacheBudgetHeadroomRatio: 0.2,
       coldCacheObservationThreshold: 3,
-      criticalBudgetPressureRatio: 0.70,
+      criticalBudgetPressureRatio: 0.90,
     },
     dynamicLeafChunkTokens: {
       enabled: true,
@@ -84,8 +85,6 @@ function createTestDeps(config: LcmConfig): LcmDependencies {
       provider: providerHint ?? "test",
       model: modelRef ?? "test-model",
     }),
-    getApiKey: async () => "test-api-key",
-    requireApiKey: async () => "test-api-key",
     parseAgentSessionKey: () => null,
     isSubagentSessionKey: () => false,
     normalizeAgentId: (id?: string) => id ?? "",
@@ -205,38 +204,6 @@ describe("Circuit Breaker", () => {
     
     expect(blocked.reason).toBe("circuit breaker open");
     expect(blocked.compacted).toBe(false);
-  });
-
-  it("should also block compactLeafAsync when breaker is open", async () => {
-    await engine.bootstrap({ sessionId, sessionFile, sessionKey });
-    
-    const failingSummarizer = async () => {
-      throw makeAuthError();
-    };
-    
-    // Trip the breaker
-    for (let i = 0; i < 3; i++) {
-      await engine.compact({
-        sessionId,
-        sessionKey,
-        sessionFile,
-        tokenBudget: 5000,
-        force: true,
-        legacyParams: { summarize: failingSummarizer },
-      });
-    }
-    
-    // compactLeafAsync should also be blocked
-    const leafResult = await engine.compactLeafAsync({
-      sessionId,
-      sessionKey,
-      sessionFile,
-      tokenBudget: 5000,
-      force: true,
-      legacyParams: { summarize: failingSummarizer },
-    });
-    
-    expect(leafResult.reason).toBe("circuit breaker open");
   });
 
   it("should auto-reset after cooldown", async () => {

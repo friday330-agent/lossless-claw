@@ -32,7 +32,7 @@ Summaries are lossy by design. The "Expand for details about:" footer at the end
 
 Search across messages and/or summaries using regex or full-text search.
 
-Use `mode: "full_text"` for keyword or topical recall. Wrap exact multi-word phrases in quotes to preserve phrase matching. Keep the default `sort: "recency"` for recent events, switch to `sort: "relevance"` when looking for the best older match on a topic, and use `sort: "hybrid"` when you want relevance without giving up recency entirely.
+Use `mode: "full_text"` for keyword or topical recall. Full-text queries are not regexes: alternation (`A|B`), regex wildcards (`.*`), character classes (`[abc]`), and anchors (`^foo`, `foo$`) require `mode: "regex"`. Wrap exact multi-word phrases in quotes to preserve phrase matching. Keep the default `sort: "recency"` for recent events, switch to `sort: "relevance"` when looking for the best older match on a topic, and use `sort: "hybrid"` when you want relevance without giving up recency entirely.
 
 **Parameters:**
 
@@ -177,7 +177,7 @@ Add instructions to your agent's system prompt so it knows when to use LCM tools
 ## Memory & Context
 
 Use LCM tools for recall:
-1. `lcm_grep` — Search all conversations by keyword/regex. Prefer `mode: "full_text"` for topic recall, quote exact phrases, use `sort: "relevance"` for older-topic lookups, and `sort: "hybrid"` when recency should still matter.
+1. `lcm_grep` — Search all conversations by keyword/regex. Prefer `mode: "full_text"` for short topic terms, use `mode: "regex"` for alternation or other regex syntax, quote exact phrases, use `sort: "relevance"` for older-topic lookups, and `sort: "hybrid"` when recency should still matter.
 2. `lcm_describe` — Inspect a specific summary (cheap, no sub-agent)
 3. `lcm_expand_query` — Deep recall with bounded sub-agent expansion
 

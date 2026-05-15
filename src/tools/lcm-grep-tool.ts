@@ -25,7 +25,7 @@ function formatDisplayTime(
 const LcmGrepSchema = Type.Object({
   pattern: Type.String({
     description:
-      'Search pattern. Interpreted as regex when mode is "regex", or as an FTS5 text query when mode is "full_text". In full_text mode, FTS5 defaults to AND matching, so prefer 1-3 distinctive terms or one quoted multi-word phrase instead of padding with synonyms or extra keywords.',
+      'Search pattern. Interpreted as regex when mode is "regex", or as an FTS5 text query when mode is "full_text". In full_text mode, FTS5 defaults to AND matching, so prefer 1-3 distinctive terms or one quoted multi-word phrase instead of padding with synonyms or extra keywords. Regex syntax such as alternation (`A|B`) requires regex mode.',
   }),
   mode: Type.Optional(
     Type.String({
@@ -87,6 +87,65 @@ function truncateSnippet(content: string, maxLen: number = 200): string {
   return singleLine.substring(0, maxLen - 3) + "...";
 }
 
+// Identify clear regex syntax that is likely to make an FTS5 query silently
+// miss. This intentionally stays conservative instead of becoming a parser.
+function findRegexSyntaxInFullTextQuery(pattern: string): string | null {
+  let inQuote = false;
+  let escaped = false;
+
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    const next = pattern[index + 1];
+
+    if (escaped) {
+      escaped = false;
+      if (!inQuote && char && /[bBdDsSwW]/.test(char)) {
+        return "regex character escape";
+      }
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inQuote = !inQuote;
+      continue;
+    }
+    if (inQuote) {
+      continue;
+    }
+    if (char === "|") {
+      return "alternation";
+    }
+    if (char === "." && (next === "*" || next === "+" || next === "?")) {
+      return "wildcard";
+    }
+    if (char === "[") {
+      const closing = pattern.indexOf("]", index + 1);
+      if (closing > index + 1) {
+        return "character class";
+      }
+    }
+    if (char === "^" && (index === 0 || /\s/.test(pattern[index - 1] ?? ""))) {
+      return "anchor";
+    }
+    if (char === "$" && (index === pattern.length - 1 || /\s/.test(next ?? ""))) {
+      return "anchor";
+    }
+  }
+
+  return null;
+}
+
+function validateFullTextPattern(pattern: string): string | null {
+  const syntax = findRegexSyntaxInFullTextQuery(pattern);
+  if (!syntax) {
+    return null;
+  }
+  return `full_text mode does not support regex syntax (${syntax}). Use mode: "regex" for \`${pattern}\`, or rewrite the full_text query as 1-3 literal terms or one quoted phrase.`;
+}
+
 export function createLcmGrepTool(input: {
   deps: LcmDependencies;
   lcm?: LcmContextEngine;
@@ -119,6 +178,12 @@ export function createLcmGrepTool(input: {
       const limit = typeof p.limit === "number" ? Math.trunc(p.limit) : 50;
       const requestedSort = (p.sort as "recency" | "relevance" | "hybrid") ?? "recency";
       const effectiveSort = mode === "full_text" ? requestedSort : "recency";
+      if (mode === "full_text") {
+        const fullTextPatternError = validateFullTextPattern(pattern);
+        if (fullTextPatternError) {
+          return jsonResult({ error: fullTextPatternError });
+        }
+      }
       let since: Date | undefined;
       let before: Date | undefined;
       try {

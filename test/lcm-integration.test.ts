@@ -1,4 +1,7 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type { MessagePartRecord, MessageRecord, MessageRole } from "../src/store/conversation-store.js";
 import type {
   SummaryRecord,
@@ -6,7 +9,10 @@ import type {
   SummaryKind,
   LargeFileRecord,
 } from "../src/store/summary-store.js";
-import { ContextAssembler } from "../src/assembler.js";
+import {
+  ContextAssembler,
+  produceWorkingSummaryInjectionCandidate,
+} from "../src/assembler.js";
 import { CompactionEngine, type CompactionConfig } from "../src/compaction.js";
 import { RetrievalEngine } from "../src/retrieval.js";
 import { LcmProviderAuthError } from "../src/summarize.js";
@@ -90,6 +96,7 @@ function createMockConversationStore() {
           content: input.content,
           tokenCount: input.tokenCount,
           createdAt: new Date(),
+          largeContent: null,
         };
         messages.push(msg);
         return msg;
@@ -698,12 +705,504 @@ describe("LCM integration: ingest -> assemble", () => {
   let convStore: ReturnType<typeof createMockConversationStore>;
   let sumStore: ReturnType<typeof createMockSummaryStore>;
   let assembler: ContextAssembler;
+  const tempDirs = new Set<string>();
+
+  afterEach(() => {
+    for (const dir of tempDirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    tempDirs.clear();
+  });
 
   beforeEach(() => {
     convStore = createMockConversationStore();
     sumStore = createMockSummaryStore();
     wireStores(convStore, sumStore);
     assembler = new ContextAssembler(convStore as any, sumStore as any);
+  });
+
+  it("injects a compaction injection summary ahead of working-summary sidecars and DAG summaries", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lcm-working-summary-"));
+    tempDirs.add(dir);
+    const workingSummaryPath = join(dir, "main-current.md");
+    writeFileSync(workingSummaryPath, "Working summary sidecar should be lower priority", "utf8");
+
+    await sumStore.insertSummary({
+      summaryId: "sum_old",
+      conversationId: CONV_ID,
+      kind: "leaf",
+      content: "older dag summary",
+      tokenCount: 20,
+    });
+    await sumStore.appendContextSummary(CONV_ID, "sum_old");
+    await ingestMessages(convStore, sumStore, 2, {
+      contentFn: (i) => `Fresh message ${i}`,
+    });
+
+    const result = await assembler.assemble({
+      conversationId: CONV_ID,
+      tokenBudget: 100_000,
+      injectionSummaries: [
+        {
+          kind: "compaction_injection_summary",
+          sourceId: "inj_current",
+          content: "Injection summary: preserve current stop point",
+          maxTokens: 1200,
+        },
+      ],
+      workingSummary: {
+        path: workingSummaryPath,
+        maxTokens: 1200,
+      },
+      freshTailCount: 2,
+    });
+
+    const firstMessageText = extractMessageText(result.messages[0].content);
+    expect(firstMessageText).toContain('kind="compaction_injection_summary"');
+    expect(firstMessageText).toContain("Injection summary: preserve current stop point");
+    expect(firstMessageText).not.toContain("Working summary sidecar should be lower priority");
+    expect(result.sourceCounters).toMatchObject({
+      injectionSummaryInjected: true,
+      injectionSummarySkippedReason: undefined,
+      injectionSummarySource: "direct_input",
+      injectionSummarySourceId: "inj_current",
+      workingSummaryInjected: false,
+      workingSummarySkippedReason: undefined,
+      selectedSource: "compaction_injection_summary",
+    });
+  });
+
+  it("falls back to working-summary sidecars when compaction injection summaries are invalid", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lcm-working-summary-"));
+    tempDirs.add(dir);
+    const workingSummaryPath = join(dir, "main-current.md");
+    writeFileSync(workingSummaryPath, "Current stop point: fix auth bug", "utf8");
+
+    await sumStore.insertSummary({
+      summaryId: "sum_old",
+      conversationId: CONV_ID,
+      kind: "leaf",
+      content: "older dag summary",
+      tokenCount: 20,
+    });
+    await sumStore.appendContextSummary(CONV_ID, "sum_old");
+    await ingestMessages(convStore, sumStore, 2, {
+      contentFn: (i) => `Fresh message ${i}`,
+    });
+
+    const result = await assembler.assemble({
+      conversationId: CONV_ID,
+      tokenBudget: 100_000,
+      injectionSummaries: [
+        {
+          kind: "compaction_injection_summary",
+          content: "x".repeat(8000),
+          maxTokens: 10,
+        },
+      ],
+      workingSummary: {
+        path: workingSummaryPath,
+        maxTokens: 1200,
+      },
+      freshTailCount: 2,
+    });
+
+    expect(extractMessageText(result.messages[0].content)).toContain("Current stop point: fix auth bug");
+    expect(result.sourceCounters).toMatchObject({
+      injectionSummaryInjected: false,
+      injectionSummarySkippedReason: "over_budget",
+      injectionSummarySource: "direct_input",
+      workingSummaryInjected: true,
+      workingSummarySkippedReason: undefined,
+      selectedSource: "working_summary",
+    });
+  });
+
+  it("maps a structured working-summary sidecar into an injection candidate before sidecar fallback", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lcm-working-summary-adapter-"));
+    tempDirs.add(dir);
+    const workingSummaryPath = join(dir, "main-current.md");
+    writeFileSync(
+      workingSummaryPath,
+      [
+        "Current topic: lossless-claw field mapping",
+        "User goal: keep the checkout on the adapter slice",
+        "Must remember: do not start DB migration",
+        "Current stop point: structured field mapping is under test",
+        "Current risk: do not start DB migration",
+        "Next step: compare field-mapped output against sidecar fallback",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await sumStore.insertSummary({
+      summaryId: "sum_old",
+      conversationId: CONV_ID,
+      kind: "leaf",
+      content: "older dag summary should be lower priority",
+      tokenCount: 20,
+    });
+    await sumStore.appendContextSummary(CONV_ID, "sum_old");
+    await ingestMessages(convStore, sumStore, 2, {
+      contentFn: (i) => `Fresh message ${i}`,
+    });
+
+    const adapter = produceWorkingSummaryInjectionCandidate({
+      path: workingSummaryPath,
+      maxTokens: 1200,
+    });
+    expect(adapter.skippedReason).toBeUndefined();
+    expect(adapter.source).toBe("working_summary_field_mapping");
+    expect(adapter.candidates).toHaveLength(1);
+
+    const result = await assembler.assemble({
+      conversationId: CONV_ID,
+      tokenBudget: 100_000,
+      injectionSummaries: adapter.candidates,
+      workingSummary: {
+        path: workingSummaryPath,
+        maxTokens: 1200,
+      },
+      freshTailCount: 2,
+    });
+
+    const firstMessageText = extractMessageText(result.messages[0].content);
+    expect(firstMessageText).toContain('kind="compaction_injection_summary"');
+    expect(firstMessageText).toContain("Working summary injection candidate");
+    expect(firstMessageText).toContain("Current topic: lossless-claw field mapping");
+    expect(firstMessageText).toContain("User goal: keep the checkout on the adapter slice");
+    expect(firstMessageText).toContain("Must-remember decisions: do not start DB migration");
+    expect(firstMessageText).toContain("Current stop point: structured field mapping is under test");
+    expect(firstMessageText).toContain("Current risk: do not start DB migration");
+    expect(firstMessageText).toContain("Next step: compare field-mapped output against sidecar fallback");
+    expect(firstMessageText).not.toContain("older dag summary should be lower priority");
+    expect(result.sourceCounters).toMatchObject({
+      injectionSummaryInjected: true,
+      injectionSummarySkippedReason: undefined,
+      injectionSummarySource: "working_summary_field_mapping",
+      injectionSummarySourceId: "working_summary_sidecar",
+      workingSummaryInjected: false,
+      workingSummarySkippedReason: undefined,
+      selectedSource: "compaction_injection_summary",
+    });
+  });
+
+  it("keeps unstructured working-summary sidecars on the legacy adapter path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lcm-working-summary-legacy-adapter-"));
+    tempDirs.add(dir);
+    const workingSummaryPath = join(dir, "main-current.md");
+    writeFileSync(workingSummaryPath, "Freeform handoff text without recognized field labels", "utf8");
+
+    const adapter = produceWorkingSummaryInjectionCandidate({
+      path: workingSummaryPath,
+      maxTokens: 1200,
+    });
+
+    expect(adapter.skippedReason).toBeUndefined();
+    expect(adapter.source).toBe("working_summary_adapter");
+    expect(adapter.candidates[0]).toMatchObject({
+      source: "working_summary_adapter",
+      content: "Freeform handoff text without recognized field labels",
+    });
+  });
+
+  it("compares real working-summary samples between old sidecar and field-mapped injection", async () => {
+    const samples = [
+      {
+        name: "lossless-continuity-handoff",
+        workingSummary: [
+          "Current topic: lossless-claw continuity handoff",
+          "User goal: keep current lossless-claw work resumable after compaction",
+          "Must remember: adapter benefits are source typing and fallback observability, not semantic quality yet",
+          "Current stop point: working-summary no-path, in-memory InjectionSummaryCandidate, adapter fixture A/B, and assemble-debug metadata are complete.",
+          "Current risk: do not start DB schema, store, or migration work before real A/B shows payoff.",
+          "Next step: compare old sidecar against field-mapped injection on real continuity samples.",
+        ].join("\n"),
+        requiredPhrases: [
+          "Current stop point: working-summary no-path",
+          "Current risk: do not start DB schema",
+          "Next step: compare old sidecar against field-mapped injection",
+        ],
+      },
+      {
+        name: "wiki-operations-handoff",
+        workingSummary: [
+          "Current topic: memory wiki operations handoff",
+          "User goal: avoid accidental bridge expansion while preserving the latest ingest state",
+          "Must remember: bridge source deletion and daily ingest were operational cleanup, not a new wiki strategy",
+          "Current stop point: bridge source files were removed and 4/27-4/30 Main/W550 dailies were ingested.",
+          "Current risk: do not resume automatic bridge expansion until the wiki usage decision is reopened.",
+          "Next step: hold at 53 lint issues and wait for a product decision instead of expanding ingestion.",
+        ].join("\n"),
+        requiredPhrases: [
+          "Current stop point: bridge source files were removed",
+          "Current risk: do not resume automatic bridge expansion",
+          "Next step: hold at 53 lint issues",
+        ],
+      },
+      {
+        name: "godot-gui-handoff",
+        workingSummary: [
+          "Current topic: Godot GUI handoff",
+          "User goal: keep GUI acceptance separate from script-level verification",
+          "Must remember: script-level checks passed, but manual GUI acceptance remains undone",
+          "Current stop point: factor type switching, middle-button canvas drag, and strength numeric input passed script-level verification.",
+          "Current risk: GUI acceptance for focus, slider sync, and type switching has not been manually checked.",
+          "Next step: run a manual Godot GUI pass before claiming interaction acceptance is complete.",
+        ].join("\n"),
+        requiredPhrases: [
+          "Current stop point: factor type switching",
+          "Current risk: GUI acceptance",
+          "Next step: run a manual Godot GUI pass",
+        ],
+      },
+    ];
+
+    const outcomes: Array<{
+      name: string;
+      requiredPhraseCount: number;
+      oldSelectedSource: string | undefined;
+      newSelectedSource: string | undefined;
+      fallbackObserved: boolean;
+    }> = [];
+
+    for (const [index, sample] of samples.entries()) {
+      const conversationId = 200 + index;
+      const dir = mkdtempSync(join(tmpdir(), "lcm-real-sample-ab-"));
+      tempDirs.add(dir);
+      const workingSummaryPath = join(dir, "main-current.md");
+      writeFileSync(workingSummaryPath, sample.workingSummary, "utf8");
+
+      await sumStore.insertSummary({
+        summaryId: `real_sample_${index}_old_dag`,
+        conversationId,
+        kind: "leaf",
+        content: `stale DAG summary for ${sample.name}`,
+        tokenCount: 20,
+      });
+      await sumStore.appendContextSummary(conversationId, `real_sample_${index}_old_dag`);
+      await ingestMessages(convStore, sumStore, 2, {
+        conversationId,
+        contentFn: (i) => `${sample.name} fresh tail message ${i}`,
+      });
+
+      const oldSidecar = await assembler.assemble({
+        conversationId,
+        tokenBudget: 100_000,
+        workingSummary: {
+          path: workingSummaryPath,
+          maxTokens: 1200,
+        },
+        freshTailCount: 2,
+      });
+      const adapter = produceWorkingSummaryInjectionCandidate({
+        path: workingSummaryPath,
+        maxTokens: 1200,
+      });
+      const adapterProduced = await assembler.assemble({
+        conversationId,
+        tokenBudget: 100_000,
+        injectionSummaries: adapter.candidates,
+        workingSummary: {
+          path: workingSummaryPath,
+          maxTokens: 1200,
+        },
+        freshTailCount: 2,
+      });
+
+      const oldText = extractMessageText(oldSidecar.messages[0].content);
+      const adapterText = extractMessageText(adapterProduced.messages[0].content);
+
+      for (const phrase of sample.requiredPhrases) {
+        expect(oldText).toContain(phrase);
+        expect(adapterText).toContain(phrase);
+      }
+      expect(oldText).not.toContain('kind="compaction_injection_summary"');
+      expect(adapterText).toContain('kind="compaction_injection_summary"');
+      expect(oldText).not.toContain(`stale DAG summary for ${sample.name}`);
+      expect(adapterText).not.toContain(`stale DAG summary for ${sample.name}`);
+      expect(oldSidecar.sourceCounters).toMatchObject({
+        workingSummaryInjected: true,
+        selectedSource: "working_summary",
+      });
+      expect(adapterProduced.sourceCounters).toMatchObject({
+        injectionSummaryInjected: true,
+        injectionSummarySource: "working_summary_field_mapping",
+        injectionSummarySourceId: "working_summary_sidecar",
+        workingSummaryInjected: false,
+        selectedSource: "compaction_injection_summary",
+      });
+
+      const adapterTokenOverhead = adapterProduced.estimatedTokens - oldSidecar.estimatedTokens;
+      expect(adapterTokenOverhead).toBeGreaterThanOrEqual(0);
+      expect(adapterTokenOverhead).toBeLessThanOrEqual(80);
+
+      outcomes.push({
+        name: sample.name,
+        requiredPhraseCount: sample.requiredPhrases.length,
+        oldSelectedSource: oldSidecar.sourceCounters?.selectedSource,
+        newSelectedSource: adapterProduced.sourceCounters?.selectedSource,
+        fallbackObserved:
+          oldSidecar.sourceCounters?.selectedSource !== "working_summary" ||
+          adapterProduced.sourceCounters?.selectedSource !== "compaction_injection_summary",
+      });
+    }
+
+    expect(outcomes).toEqual([
+      {
+        name: "lossless-continuity-handoff",
+        requiredPhraseCount: 3,
+        oldSelectedSource: "working_summary",
+        newSelectedSource: "compaction_injection_summary",
+        fallbackObserved: false,
+      },
+      {
+        name: "wiki-operations-handoff",
+        requiredPhraseCount: 3,
+        oldSelectedSource: "working_summary",
+        newSelectedSource: "compaction_injection_summary",
+        fallbackObserved: false,
+      },
+      {
+        name: "godot-gui-handoff",
+        requiredPhraseCount: 3,
+        oldSelectedSource: "working_summary",
+        newSelectedSource: "compaction_injection_summary",
+        fallbackObserved: false,
+      },
+    ]);
+  });
+
+  it("keeps sidecar and DAG fallback visible when field-mapped injection is over budget", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lcm-working-summary-adapter-budget-"));
+    tempDirs.add(dir);
+    const workingSummaryPath = join(dir, "main-current.md");
+    writeFileSync(
+      workingSummaryPath,
+      [
+        "Current stop point: this sample is intentionally too large",
+        "Next step: fallback should reach the DAG summary",
+        "x".repeat(8000),
+      ].join("\n"),
+      "utf8",
+    );
+
+    await sumStore.insertSummary({
+      summaryId: "sum_old",
+      conversationId: CONV_ID,
+      kind: "leaf",
+      content: "older dag summary remains the fallback",
+      tokenCount: 20,
+    });
+    await sumStore.appendContextSummary(CONV_ID, "sum_old");
+    await ingestMessages(convStore, sumStore, 2, {
+      contentFn: (i) => `Fresh message ${i}`,
+    });
+
+    const adapter = produceWorkingSummaryInjectionCandidate({
+      path: workingSummaryPath,
+      maxTokens: 10,
+    });
+    expect(adapter.skippedReason).toBeUndefined();
+    expect(adapter.candidates).toHaveLength(1);
+
+    const result = await assembler.assemble({
+      conversationId: CONV_ID,
+      tokenBudget: 100_000,
+      injectionSummaries: adapter.candidates,
+      workingSummary: {
+        path: workingSummaryPath,
+        maxTokens: 10,
+      },
+      freshTailCount: 2,
+    });
+
+    expect(extractMessageText(result.messages[0].content)).toContain("older dag summary remains the fallback");
+    expect(result.sourceCounters).toMatchObject({
+      injectionSummaryInjected: false,
+      injectionSummarySkippedReason: "over_budget",
+      injectionSummarySource: "working_summary_field_mapping",
+      injectionSummarySourceId: "working_summary_sidecar",
+      workingSummaryInjected: false,
+      workingSummarySkippedReason: "over_budget",
+      selectedSource: "dag_summary",
+    });
+  });
+
+  it("injects a working-summary candidate ahead of DAG summaries when enabled", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lcm-working-summary-"));
+    tempDirs.add(dir);
+    const workingSummaryPath = join(dir, "main-current.md");
+    writeFileSync(workingSummaryPath, "Current stop point: fix auth bug\nNext step: patch engine", "utf8");
+
+    await sumStore.insertSummary({
+      summaryId: "sum_old",
+      conversationId: CONV_ID,
+      kind: "leaf",
+      content: "older dag summary",
+      tokenCount: 20,
+    });
+    await sumStore.appendContextSummary(CONV_ID, "sum_old");
+    await ingestMessages(convStore, sumStore, 2, {
+      contentFn: (i) => `Fresh message ${i}`,
+    });
+
+    const result = await assembler.assemble({
+      conversationId: CONV_ID,
+      tokenBudget: 100_000,
+      workingSummary: {
+        path: workingSummaryPath,
+        maxTokens: 1200,
+      },
+      freshTailCount: 2,
+    });
+
+    expect(extractMessageText(result.messages[0].content)).toContain("Current stop point: fix auth bug");
+    expect(result.sourceCounters).toEqual({
+      injectionSummaryInjected: false,
+      injectionSummarySkippedReason: undefined,
+      workingSummaryInjected: true,
+      workingSummarySkippedReason: undefined,
+      selectedSource: "working_summary",
+    });
+  });
+
+  it("skips over-budget working-summary candidates and falls back to DAG summaries", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lcm-working-summary-"));
+    tempDirs.add(dir);
+    const workingSummaryPath = join(dir, "main-current.md");
+    writeFileSync(workingSummaryPath, "x".repeat(8000), "utf8");
+
+    await sumStore.insertSummary({
+      summaryId: "sum_old",
+      conversationId: CONV_ID,
+      kind: "leaf",
+      content: "older dag summary",
+      tokenCount: 20,
+    });
+    await sumStore.appendContextSummary(CONV_ID, "sum_old");
+    await ingestMessages(convStore, sumStore, 2, {
+      contentFn: (i) => `Fresh message ${i}`,
+    });
+
+    const result = await assembler.assemble({
+      conversationId: CONV_ID,
+      tokenBudget: 100_000,
+      workingSummary: {
+        path: workingSummaryPath,
+        maxTokens: 10,
+      },
+      freshTailCount: 2,
+    });
+
+    expect(extractMessageText(result.messages[0].content)).toContain("older dag summary");
+    expect(result.sourceCounters).toEqual({
+      injectionSummaryInjected: false,
+      injectionSummarySkippedReason: undefined,
+      workingSummaryInjected: false,
+      workingSummarySkippedReason: "over_budget",
+      selectedSource: "dag_summary",
+    });
   });
 
   it("ingested messages appear in assembled context", async () => {
@@ -1445,7 +1944,7 @@ describe("LCM integration: compaction", () => {
   });
 
   it("compactLeaf uses preceding summary context for soft leaf continuity", async () => {
-    const incrementalEngine = new CompactionEngine(convStore as any, sumStore as any, {
+    const leafEngine = new CompactionEngine(convStore as any, sumStore as any, {
       ...defaultCompactionConfig,
       freshTailCount: 1,
     });
@@ -1491,7 +1990,7 @@ describe("LCM integration: compaction", () => {
       },
     );
 
-    const result = await incrementalEngine.compactLeaf({
+    const result = await leafEngine.compactLeaf({
       conversationId: CONV_ID,
       tokenBudget: 200,
       summarize,
@@ -1504,8 +2003,8 @@ describe("LCM integration: compaction", () => {
     expect(summarizeCalls[0]?.isCondensed).toBe(false);
   });
 
-  it("compactLeaf keeps incremental behavior leaf-only when incrementalMaxDepth is zero", async () => {
-    const incrementalEngine = new CompactionEngine(convStore as any, sumStore as any, {
+  it("compactLeaf stays leaf-only when incrementalMaxDepth is zero", async () => {
+    const leafEngine = new CompactionEngine(convStore as any, sumStore as any, {
       ...defaultCompactionConfig,
       freshTailCount: 0,
       condensedMinFanout: 2,
@@ -1549,7 +2048,7 @@ describe("LCM integration: compaction", () => {
         return options?.isCondensed ? "Condensed summary" : "Leaf summary";
       },
     );
-    const result = await incrementalEngine.compactLeaf({
+    const result = await leafEngine.compactLeaf({
       conversationId: CONV_ID,
       tokenBudget: 1_200,
       summarize,
@@ -1561,8 +2060,8 @@ describe("LCM integration: compaction", () => {
     expect(sumStore._summaries.filter((summary) => summary.kind === "condensed")).toHaveLength(0);
   });
 
-  it("compactLeaf suppresses follow-on condensed passes when cache-aware policy disallows them", async () => {
-    const incrementalEngine = new CompactionEngine(convStore as any, sumStore as any, {
+  it("compactLeaf suppresses follow-on condensed passes when the caller disallows them", async () => {
+    const leafEngine = new CompactionEngine(convStore as any, sumStore as any, {
       ...defaultCompactionConfig,
       freshTailCount: 0,
       condensedMinFanout: 2,
@@ -1606,7 +2105,7 @@ describe("LCM integration: compaction", () => {
         return options?.isCondensed ? "Condensed summary" : "Leaf summary";
       },
     );
-    const result = await incrementalEngine.compactLeaf({
+    const result = await leafEngine.compactLeaf({
       conversationId: CONV_ID,
       tokenBudget: 1_200,
       summarize,
@@ -1623,7 +2122,7 @@ describe("LCM integration: compaction", () => {
   });
 
   it("compactLeaf performs one depth-zero condensation pass when incrementalMaxDepth is one", async () => {
-    const incrementalEngine = new CompactionEngine(convStore as any, sumStore as any, {
+    const leafEngine = new CompactionEngine(convStore as any, sumStore as any, {
       ...defaultCompactionConfig,
       freshTailCount: 0,
       condensedMinFanout: 2,
@@ -1667,7 +2166,7 @@ describe("LCM integration: compaction", () => {
         return options?.isCondensed ? "Condensed summary" : "Leaf summary";
       },
     );
-    const result = await incrementalEngine.compactLeaf({
+    const result = await leafEngine.compactLeaf({
       conversationId: CONV_ID,
       tokenBudget: 1_200,
       summarize,
@@ -1683,7 +2182,7 @@ describe("LCM integration: compaction", () => {
   });
 
   it("compactLeaf cascades to depth two when incrementalMaxDepth is two", async () => {
-    const incrementalEngine = new CompactionEngine(convStore as any, sumStore as any, {
+    const leafEngine = new CompactionEngine(convStore as any, sumStore as any, {
       ...defaultCompactionConfig,
       freshTailCount: 0,
       condensedMinFanout: 2,
@@ -1738,7 +2237,7 @@ describe("LCM integration: compaction", () => {
         return options?.isCondensed ? `Condensed summary ${summarizeCount}` : "Leaf summary";
       },
     );
-    const result = await incrementalEngine.compactLeaf({
+    const result = await leafEngine.compactLeaf({
       conversationId: CONV_ID,
       tokenBudget: 1_200,
       summarize,
@@ -1756,7 +2255,7 @@ describe("LCM integration: compaction", () => {
 
 
   it("compactLeaf cascades without depth limit when incrementalMaxDepth is -1 (unlimited)", async () => {
-    const incrementalEngine = new CompactionEngine(convStore as any, sumStore as any, {
+    const leafEngine = new CompactionEngine(convStore as any, sumStore as any, {
       ...defaultCompactionConfig,
       freshTailCount: 0,
       leafMinFanout: 2,
@@ -1810,7 +2309,7 @@ describe("LCM integration: compaction", () => {
         return options?.isCondensed ? `Condensed at depth ${options.depth}` : "Leaf summary";
       },
     );
-    const result = await incrementalEngine.compactLeaf({
+    const result = await leafEngine.compactLeaf({
       conversationId: CONV_ID,
       tokenBudget: 1_200,
       summarize,
@@ -1829,6 +2328,188 @@ describe("LCM integration: compaction", () => {
 
     // Verify depth-0 condensation happened (produces a depth-1 summary)
     expect(depthsSummarized).toContain(1);
+  });
+
+  it("compactFullSweep treats sweepMaxDepth as the preferred condensation depth", async () => {
+    const seedLeafSummaries = async (
+      store: ReturnType<typeof createMockSummaryStore>,
+      prefix: string,
+    ) => {
+      await convStore.createConversation({ sessionId: `${prefix}-session` });
+      for (const suffix of ["a", "b"]) {
+        const summaryId = `${prefix}_${suffix}`;
+        await store.insertSummary({
+          summaryId,
+          conversationId: CONV_ID,
+          kind: "leaf",
+          depth: 0,
+          content: `Depth zero leaf ${suffix}`,
+          tokenCount: 60,
+        });
+        await store.appendContextSummary(CONV_ID, summaryId);
+      }
+    };
+
+    const cappedEngine = new CompactionEngine(convStore as any, sumStore as any, {
+      ...defaultCompactionConfig,
+      freshTailCount: 0,
+      leafMinFanout: 2,
+      condensedMinFanout: 2,
+      leafChunkTokens: 200,
+      condensedTargetTokens: 10,
+      sweepMaxDepth: 0,
+    });
+    await seedLeafSummaries(sumStore, "sum_sweep_depth_zero");
+
+    const cappedSummarize = vi.fn(async () => "Condensed summary");
+    const cappedResult = await cappedEngine.compactFullSweep({
+      conversationId: CONV_ID,
+      tokenBudget: 1_000,
+      summarize: cappedSummarize,
+      force: true,
+    });
+
+    expect(cappedResult.actionTaken).toBe(false);
+    expect(cappedSummarize).not.toHaveBeenCalled();
+    expect(sumStore._summaries.filter((summary) => summary.kind === "condensed")).toHaveLength(0);
+
+    const nextConvStore = createMockConversationStore();
+    const nextSumStore = createMockSummaryStore();
+    wireStores(nextConvStore, nextSumStore);
+    convStore = nextConvStore;
+    sumStore = nextSumStore;
+
+    const depthOneEngine = new CompactionEngine(convStore as any, sumStore as any, {
+      ...defaultCompactionConfig,
+      freshTailCount: 0,
+      leafMinFanout: 2,
+      condensedMinFanout: 2,
+      leafChunkTokens: 200,
+      condensedTargetTokens: 10,
+      sweepMaxDepth: 1,
+    });
+    await seedLeafSummaries(sumStore, "sum_sweep_depth_one");
+
+    const depthOneSummarize = vi.fn(
+      async (
+        _text: string,
+        _aggressive?: boolean,
+        options?: { isCondensed?: boolean; depth?: number },
+      ) => {
+        return options?.isCondensed ? "Depth one condensed summary" : "Leaf summary";
+      },
+    );
+    const depthOneResult = await depthOneEngine.compactFullSweep({
+      conversationId: CONV_ID,
+      tokenBudget: 1_000,
+      summarize: depthOneSummarize,
+      force: true,
+    });
+
+    expect(depthOneResult.actionTaken).toBe(true);
+    expect(depthOneResult.condensed).toBe(true);
+    expect(depthOneSummarize).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Boolean),
+      expect.objectContaining({ isCondensed: true, depth: 1 }),
+    );
+    expect(
+      sumStore._summaries.some((summary) => summary.kind === "condensed" && summary.depth === 1),
+    ).toBe(true);
+  });
+
+  it("compactFullSweep pressure-condenses beyond sweepMaxDepth when summary prefix exceeds target", async () => {
+    const pressureEngine = new CompactionEngine(convStore as any, sumStore as any, {
+      ...defaultCompactionConfig,
+      freshTailCount: 0,
+      condensedMinFanout: 4,
+      condensedMinFanoutHard: 2,
+      leafChunkTokens: 500,
+      condensedTargetTokens: 10,
+      sweepMaxDepth: 1,
+      summaryPrefixTargetTokens: 100,
+    });
+
+    await convStore.createConversation({ sessionId: "summary-prefix-pressure-depth" });
+    for (const suffix of ["a", "b"]) {
+      const summaryId = `sum_pressure_depth_one_${suffix}`;
+      await sumStore.insertSummary({
+        summaryId,
+        conversationId: CONV_ID,
+        kind: "condensed",
+        depth: 1,
+        content: `Depth one summary ${suffix}`,
+        tokenCount: 80,
+      });
+      await sumStore.appendContextSummary(CONV_ID, summaryId);
+    }
+
+    const summarize = vi.fn(
+      async (
+        _text: string,
+        _aggressive?: boolean,
+        options?: { isCondensed?: boolean; depth?: number },
+      ) => {
+        return options?.isCondensed ? "Depth two pressure summary" : "Leaf summary";
+      },
+    );
+    const result = await pressureEngine.compactFullSweep({
+      conversationId: CONV_ID,
+      tokenBudget: 1_000,
+      summarize,
+      force: true,
+    });
+
+    expect(result.actionTaken).toBe(true);
+    expect(result.condensed).toBe(true);
+    expect(summarize).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Boolean),
+      expect.objectContaining({ isCondensed: true, depth: 2 }),
+    );
+    expect(
+      sumStore._summaries.some((summary) => summary.kind === "condensed" && summary.depth === 2),
+    ).toBe(true);
+  });
+
+  it("compactFullSweep pressure-condenses beyond sweepMaxDepth when still over threshold", async () => {
+    const pressureEngine = new CompactionEngine(convStore as any, sumStore as any, {
+      ...defaultCompactionConfig,
+      freshTailCount: 0,
+      condensedMinFanout: 4,
+      condensedMinFanoutHard: 2,
+      leafChunkTokens: 500,
+      condensedTargetTokens: 10,
+      sweepMaxDepth: 1,
+      summaryPrefixTargetTokens: 10_000,
+    });
+
+    await convStore.createConversation({ sessionId: "threshold-pressure-depth" });
+    for (const suffix of ["a", "b"]) {
+      const summaryId = `sum_threshold_pressure_depth_one_${suffix}`;
+      await sumStore.insertSummary({
+        summaryId,
+        conversationId: CONV_ID,
+        kind: "condensed",
+        depth: 1,
+        content: `Depth one summary ${suffix}`,
+        tokenCount: 80,
+      });
+      await sumStore.appendContextSummary(CONV_ID, summaryId);
+    }
+
+    const summarize = vi.fn(async () => "Depth two threshold pressure summary");
+    const result = await pressureEngine.compactFullSweep({
+      conversationId: CONV_ID,
+      tokenBudget: 100,
+      summarize,
+    });
+
+    expect(result.actionTaken).toBe(true);
+    expect(result.condensed).toBe(true);
+    expect(
+      sumStore._summaries.some((summary) => summary.kind === "condensed" && summary.depth === 2),
+    ).toBe(true);
   });
 
 
@@ -1909,6 +2590,7 @@ describe("LCM integration: compaction", () => {
       leafMinFanout: 2,
       leafChunkTokens: 100,
       condensedTargetTokens: 10,
+      incrementalMaxDepth: 1,
     });
 
     await convStore.createConversation({ sessionId: "leaf-condensed-session" });
@@ -1962,6 +2644,7 @@ describe("LCM integration: compaction", () => {
       condensedMinFanout: 2,
       leafChunkTokens: 200,
       condensedTargetTokens: 10,
+      incrementalMaxDepth: 2,
     });
 
     await convStore.createConversation({ sessionId: "depth-aware-depth-assignment" });
@@ -2005,6 +2688,8 @@ describe("LCM integration: compaction", () => {
       condensedMinFanout: 3,
       leafChunkTokens: 200,
       condensedTargetTokens: 10,
+      incrementalMaxDepth: 1,
+      summaryPrefixTargetTokens: 1_000,
     });
 
     await convStore.createConversation({ sessionId: "depth-break-session" });
@@ -2068,6 +2753,7 @@ describe("LCM integration: compaction", () => {
       condensedMinFanout: 2,
       leafChunkTokens: 200,
       condensedTargetTokens: 10,
+      incrementalMaxDepth: 1,
     });
 
     await convStore.createConversation({ sessionId: "shallowest-first-session" });
@@ -2274,6 +2960,8 @@ describe("LCM integration: compaction", () => {
       condensedMinFanoutHard: 2,
       leafChunkTokens: 200,
       condensedTargetTokens: 10,
+      incrementalMaxDepth: 1,
+      summaryPrefixTargetTokens: 1_000,
     });
 
     await convStore.createConversation({ sessionId: "fanout-threshold-session" });
@@ -2299,7 +2987,7 @@ describe("LCM integration: compaction", () => {
     const summarize = vi.fn(async () => "Fanout relaxed summary");
     const normalResult = await depthAwareEngine.compact({
       conversationId: CONV_ID,
-      tokenBudget: 140,
+      tokenBudget: 500,
       summarize,
       force: true,
     });
@@ -2322,6 +3010,7 @@ describe("LCM integration: compaction", () => {
       condensedMinFanout: 2,
       leafChunkTokens: 200,
       condensedTargetTokens: 10,
+      incrementalMaxDepth: 1,
     });
 
     await convStore.createConversation({ sessionId: "balanced-depth-sweep-session" });
@@ -3237,6 +3926,7 @@ describe("LCM integration: full round-trip", () => {
       leafMinFanout: 2,
       leafChunkTokens: 100,
       condensedTargetTokens: 10,
+      incrementalMaxDepth: 1,
     });
 
     // Ingest 12 messages with substantial content so that after the leaf pass,

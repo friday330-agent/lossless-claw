@@ -332,7 +332,7 @@ export function recordExpansionDelegationTelemetry(params: {
   };
   const line = `[lcm][expansion_delegation] ${JSON.stringify(payload)}`;
   if (params.event === "start" || params.event === "success") {
-    params.deps.log.info(line);
+    params.deps.log.debug(line);
     return;
   }
   params.deps.log.warn(line);

@@ -2,8 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LcmConfig } from "../src/db/config.js";
 import { closeLcmConnection, createLcmDatabaseConnection } from "../src/db/connection.js";
@@ -43,6 +43,7 @@ function createTestConfig(databasePath: string): LcmConfig {
     proactiveThresholdCompactionMode: "deferred",
     autoRotateSessionFiles: {
       enabled: true,
+      createBackups: false,
       sizeBytes: 2 * 1024 * 1024,
       startup: "rotate",
       runtime: "rotate",
@@ -66,8 +67,6 @@ function createTestDeps(config: LcmConfig): LcmDependencies {
     })),
     callGateway: vi.fn(async () => ({})),
     resolveModel: vi.fn(() => ({ provider: "anthropic", model: "claude-opus-4-5" })),
-    getApiKey: vi.fn(async () => "test-api-key"),
-    requireApiKey: vi.fn(async () => "test-api-key"),
     parseAgentSessionKey: (key: string) => {
       const trimmed = key.trim();
       if (!trimmed.startsWith("agent:")) return null;

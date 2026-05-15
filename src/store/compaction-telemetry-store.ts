@@ -4,6 +4,23 @@ import { parseUtcTimestampOrNull } from "./parse-utc-timestamp.js";
 
 export type CacheState = "hot" | "cold" | "unknown";
 export type ActivityBand = "low" | "medium" | "high";
+export type AssemblySelectedSource =
+  | "raw_only"
+  | "dag_summary"
+  | "working_summary"
+  | "compaction_injection_summary";
+
+export type AssemblyTelemetryCounters = {
+  assemblyReadCount: number;
+  assemblyRawOnlyCount: number;
+  assemblyDagSummaryCount: number;
+  assemblyWorkingSummaryCount: number;
+  assemblyInjectionSummaryCount: number;
+  assemblyFallbackCount: number;
+  assemblyLastSelectedSource: AssemblySelectedSource | null;
+  assemblyLastFallbackReason: string | null;
+  assemblyLastReadAt: Date | null;
+};
 
 export type ConversationCompactionTelemetryRecord = {
   conversationId: number;
@@ -92,9 +109,65 @@ function toConversationCompactionTelemetryRecord(
   };
 }
 
+export function emptyAssemblyTelemetryCounters(): AssemblyTelemetryCounters {
+  return {
+    assemblyReadCount: 0,
+    assemblyRawOnlyCount: 0,
+    assemblyDagSummaryCount: 0,
+    assemblyWorkingSummaryCount: 0,
+    assemblyInjectionSummaryCount: 0,
+    assemblyFallbackCount: 0,
+    assemblyLastSelectedSource: null,
+    assemblyLastFallbackReason: null,
+    assemblyLastReadAt: null,
+  };
+}
+
+/**
+ * In-memory assembly source counters for the currently running plugin process.
+ *
+ * These counters intentionally do not write database schema: assembly already
+ * logs source metadata, while this helper gives tests and runtime status code a
+ * cheap per-process aggregation surface.
+ */
+export class AssemblyTelemetryStore {
+  private readonly records = new Map<number, AssemblyTelemetryCounters>();
+
+  recordObservation(input: {
+    conversationId: number;
+    selectedSource: AssemblySelectedSource;
+    fallbackReason?: string | null;
+  }): AssemblyTelemetryCounters {
+    const existing = this.records.get(input.conversationId) ?? emptyAssemblyTelemetryCounters();
+    const fallbackReason = input.fallbackReason?.trim() || null;
+    const updated: AssemblyTelemetryCounters = {
+      assemblyReadCount: existing.assemblyReadCount + 1,
+      assemblyRawOnlyCount:
+        existing.assemblyRawOnlyCount + (input.selectedSource === "raw_only" ? 1 : 0),
+      assemblyDagSummaryCount:
+        existing.assemblyDagSummaryCount + (input.selectedSource === "dag_summary" ? 1 : 0),
+      assemblyWorkingSummaryCount:
+        existing.assemblyWorkingSummaryCount + (input.selectedSource === "working_summary" ? 1 : 0),
+      assemblyInjectionSummaryCount:
+        existing.assemblyInjectionSummaryCount
+        + (input.selectedSource === "compaction_injection_summary" ? 1 : 0),
+      assemblyFallbackCount: existing.assemblyFallbackCount + (fallbackReason ? 1 : 0),
+      assemblyLastSelectedSource: input.selectedSource,
+      assemblyLastFallbackReason: fallbackReason,
+      assemblyLastReadAt: new Date(),
+    };
+    this.records.set(input.conversationId, updated);
+    return updated;
+  }
+
+  get(conversationId: number): AssemblyTelemetryCounters | null {
+    return this.records.get(conversationId) ?? null;
+  }
+}
+
 /**
  * Persist and query per-conversation prompt-cache telemetry used by
- * cache-aware incremental compaction.
+ * status reporting and legacy cache-aware diagnostics.
  */
 export class CompactionTelemetryStore {
   constructor(private readonly db: DatabaseSync) {}

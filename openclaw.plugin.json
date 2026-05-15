@@ -24,9 +24,13 @@
       "label": "Context Threshold",
       "help": "Fraction of context window that triggers compaction (0.0–1.0)"
     },
+    "sweepMaxDepth": {
+      "label": "Sweep Max Depth",
+      "help": "Preferred maximum condensation source depth during routine full sweeps (0 = leaf only, -1 = unlimited). Pressure sweeps may go deeper when summarized context remains above target."
+    },
     "incrementalMaxDepth": {
-      "label": "Incremental Max Depth",
-      "help": "How deep incremental compaction goes (0 = leaf only, -1 = unlimited)"
+      "label": "Incremental Max Depth (Deprecated)",
+      "help": "Deprecated alias for sweepMaxDepth. Kept for existing configs."
     },
     "freshTailCount": {
       "label": "Fresh Tail Count",
@@ -40,9 +44,17 @@
       "label": "Prompt-Aware Eviction",
       "help": "When enabled, budget-constrained assembly keeps older context by prompt relevance instead of pure chronology. This can improve recall under tight budgets, but it can also reduce provider prompt-cache hit rates because the preserved prefix changes as prompts change."
     },
+    "stubLargeToolPayloads": {
+      "label": "Stub Large Tool Payloads",
+      "help": "When enabled, evictable tool-result rows whose payload was externalized via lcm-blob-migrate are replaced with a [LCM Tool Output: file_xxx | …] reference at assemble time. Fresh tail is never stubbed. The agent recovers the original output via lcm_describe(id=file_xxx, expandFile=true). Default off; requires running scripts/lcm-blob-migrate.mjs first to populate messages.large_content."
+    },
     "leafChunkTokens": {
       "label": "Leaf Chunk Tokens",
-      "help": "Maximum source tokens per leaf compaction chunk before summarization"
+      "help": "Maximum source tokens per leaf compaction chunk before summarization (default 20000)"
+    },
+    "summaryPrefixTargetTokens": {
+      "label": "Summary Prefix Target Tokens",
+      "help": "Optional target for summarized-prefix tokens after a full sweep. When omitted, Lossless derives a pressure target from contextThreshold and leafChunkTokens."
     },
     "bootstrapMaxTokens": {
       "label": "Bootstrap Max Tokens",
@@ -86,11 +98,19 @@
     },
     "largeFilesDir": {
       "label": "Large Files Directory",
-      "help": "Directory for persisting large-file text payloads (default: <stateDir>/lcm-files). Uses OPENCLAW_STATE_DIR when set."
+      "help": "Directory for externalized large files and inline-image payloads (default: <OPENCLAW_STATE_DIR>/lcm-files)"
     },
-    "largeFilesDir": {
-      "label": "Large Files Directory",
-      "help": "Directory for externalized large files and inline-image payloads (default: ~/.openclaw/lcm-files)"
+    "workingSummaryEnabled": {
+      "label": "Working Summary Injection",
+      "help": "Enable v1 working-summary sidecar injection ahead of DAG summaries during assembly"
+    },
+    "workingSummaryPath": {
+      "label": "Working Summary Path",
+      "help": "Path to the working-summary markdown sidecar injected during assembly when enabled"
+    },
+    "workingSummaryMaxTokens": {
+      "label": "Working Summary Max Tokens",
+      "help": "Token cap for the injected working-summary candidate; oversized files are skipped"
     },
     "ignoreSessionPatterns": {
       "label": "Ignored Sessions",
@@ -114,7 +134,7 @@
     },
     "summaryModel": {
       "label": "Summary Model",
-      "help": "Model override for LCM summarization (e.g., 'gpt-5.4' to reuse the session provider, or 'openai-resp/gpt-5.4' for a full cross-provider ref)"
+      "help": "Runtime LLM model override for LCM summarization (e.g., 'gpt-5.4' with summaryProvider, or 'openai-resp/gpt-5.4'); explicit overrides require plugins.entries.lossless-claw.llm policy"
     },
     "summaryProvider": {
       "label": "Summary Provider",
@@ -122,7 +142,7 @@
     },
     "largeFileSummaryModel": {
       "label": "Large File Summary Model",
-      "help": "Model override for large-file summarization"
+      "help": "Runtime LLM model override for large-file summarization; explicit overrides require plugins.entries.lossless-claw.llm policy"
     },
     "largeFileSummaryProvider": {
       "label": "Large File Summary Provider",
@@ -165,40 +185,40 @@
       "help": "Cooldown before the summarization circuit breaker auto-resets"
     },
     "cacheAwareCompaction.enabled": {
-      "label": "Cache-Aware Compaction",
-      "help": "When enabled, hot prompt cache defers incremental compaction while cold cache allows bounded catch-up passes"
+      "label": "Cache-Aware Compaction (Deprecated)",
+      "help": "Deprecated compatibility setting. Automatic compaction is now threshold-only and does not use prompt-cache hot/cold state."
     },
     "cacheAwareCompaction.cacheTTLSeconds": {
-      "label": "Short Cache TTL (seconds)",
-      "help": "Treat short-lived prompt-cache entries as hot for this many seconds before deferred compaction may rewrite the prompt"
+      "label": "Short Cache TTL (Deprecated)",
+      "help": "Deprecated compatibility setting. Threshold debt no longer waits for cache TTL."
     },
     "cacheAwareCompaction.maxColdCacheCatchupPasses": {
-      "label": "Cold Cache Catch-Up Passes",
-      "help": "Maximum incremental leaf passes allowed in one maintenance cycle when prompt cache is cold"
+      "label": "Cold Cache Catch-Up (Deprecated)",
+      "help": "Deprecated compatibility setting. Automatic cold-cache catch-up passes were removed."
     },
     "cacheAwareCompaction.hotCachePressureFactor": {
-      "label": "Hot Cache Pressure Factor",
-      "help": "Multiplier applied to the hot-cache leaf trigger before raw-history pressure overrides cache preservation"
+      "label": "Hot Cache Pressure (Deprecated)",
+      "help": "Deprecated compatibility setting. Hot-cache raw-history pressure no longer drives automatic compaction."
     },
     "cacheAwareCompaction.hotCacheBudgetHeadroomRatio": {
-      "label": "Hot Cache Budget Headroom",
-      "help": "Fraction of the real token budget that must remain free before hot-cache incremental compaction is skipped entirely"
+      "label": "Hot Cache Headroom (Deprecated)",
+      "help": "Deprecated compatibility setting. Hot-cache budget headroom no longer defers threshold compaction."
     },
     "cacheAwareCompaction.coldCacheObservationThreshold": {
-      "label": "Cold Cache Observation Threshold",
-      "help": "Consecutive cold observations required before non-explicit cache misses are treated as truly cold"
+      "label": "Cold Cache Observations (Deprecated)",
+      "help": "Deprecated compatibility setting. Cold-cache streaks are diagnostic only."
     },
     "cacheAwareCompaction.criticalBudgetPressureRatio": {
-      "label": "Critical Budget Pressure Ratio",
-      "help": "Fraction of token budget at which deferred compaction fires regardless of prompt-cache state. Defaults to 0.70 — set to 1 to disable the override and let cache-aware throttling fully control deferral."
+      "label": "Critical Budget Pressure (Deprecated)",
+      "help": "Deprecated compatibility setting. contextThreshold is now the only automatic compaction threshold."
     },
     "dynamicLeafChunkTokens.enabled": {
-      "label": "Dynamic Leaf Chunk Tokens",
-      "help": "When enabled, incremental compaction uses a larger working leaf chunk in busy sessions and keeps the static floor in quieter sessions"
+      "label": "Dynamic Leaf Chunks (Deprecated)",
+      "help": "Deprecated compatibility setting. Automatic compaction now uses leafChunkTokens directly."
     },
     "dynamicLeafChunkTokens.max": {
-      "label": "Dynamic Leaf Chunk Max",
-      "help": "Maximum working leaf chunk target for dynamic incremental compaction. The static leafChunkTokens value remains the floor."
+      "label": "Dynamic Leaf Chunk Max (Deprecated)",
+      "help": "Deprecated compatibility setting. Automatic compaction now uses leafChunkTokens directly."
     },
     "timezone": {
       "label": "Timezone",
@@ -220,6 +240,10 @@
       "label": "Auto-Rotate Session Files",
       "help": "Automatically rotate oversized LCM-managed session JSONL files after startup and runtime checks"
     },
+    "autoRotateSessionFiles.createBackups": {
+      "label": "Auto-Rotate Backups",
+      "help": "Create the rolling rotate-latest SQLite backup before automatic session-file rotation; disabled by default"
+    },
     "autoRotateSessionFiles.sizeBytes": {
       "label": "Auto-Rotate Size Bytes",
       "help": "Session JSONL byte threshold for automatic rotation (default: 2097152)"
@@ -234,7 +258,7 @@
     },
     "fallbackProviders": {
       "label": "Fallback Providers",
-      "help": "Explicit fallback provider/model pairs for compaction summarization (e.g., [{\"provider\": \"anthropic\", \"model\": \"claude-haiku-4-5\"}])"
+      "help": "Explicit runtime LLM fallback provider/model pairs for compaction summarization; entries require plugins.entries.lossless-claw.llm policy"
     }
   },
   "configSchema": {
@@ -248,6 +272,10 @@
         "type": "number",
         "minimum": 0,
         "maximum": 1
+      },
+      "sweepMaxDepth": {
+        "type": "integer",
+        "minimum": -1
       },
       "incrementalMaxDepth": {
         "type": "integer",
@@ -264,7 +292,14 @@
       "promptAwareEviction": {
         "type": "boolean"
       },
+      "stubLargeToolPayloads": {
+        "type": "boolean"
+      },
       "leafChunkTokens": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "summaryPrefixTargetTokens": {
         "type": "integer",
         "minimum": 1
       },
@@ -305,6 +340,16 @@
       },
       "largeFilesDir": {
         "type": "string"
+      },
+      "workingSummaryEnabled": {
+        "type": "boolean"
+      },
+      "workingSummaryPath": {
+        "type": "string"
+      },
+      "workingSummaryMaxTokens": {
+        "type": "integer",
+        "minimum": 1
       },
       "ignoreSessionPatterns": {
         "type": "array",
@@ -445,6 +490,9 @@
           "enabled": {
             "type": "boolean"
           },
+          "createBackups": {
+            "type": "boolean"
+          },
           "sizeBytes": {
             "type": "integer",
             "minimum": 1
@@ -474,6 +522,19 @@
       "largeFilesDir": {
         "description": "Directory for persisting large-file text payloads (default: <OPENCLAW_STATE_DIR>/lcm-files)",
         "type": "string"
+      },
+      "workingSummaryEnabled": {
+        "description": "Enable v1 working-summary sidecar injection ahead of DAG summaries during assembly",
+        "type": "boolean"
+      },
+      "workingSummaryPath": {
+        "description": "Path to the working-summary markdown sidecar injected during assembly when enabled",
+        "type": "string"
+      },
+      "workingSummaryMaxTokens": {
+        "description": "Token cap for the injected working-summary candidate; oversized files are skipped",
+        "type": "integer",
+        "minimum": 1
       },
       "fallbackProviders": {
         "type": "array",
