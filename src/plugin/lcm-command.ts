@@ -33,6 +33,7 @@ import {
 } from "../store/compaction-maintenance-store.js";
 import { CompactionTelemetryStore } from "../store/compaction-telemetry-store.js";
 import { FocusBriefStore, hashFocusSourceContext } from "../store/focus-brief-store.js";
+import { assemblySourceTelemetry } from "../assembly-source-telemetry.js";
 
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
@@ -800,6 +801,7 @@ async function buildStatusText(params: {
       params.db,
       current.stats.conversationId,
     );
+    const sourceTelemetry = assemblySourceTelemetry.get(current.stats.conversationId);
     const focusLines = await buildFocusSummaryLines({
       store: new FocusBriefStore(params.db),
       conversationId: current.stats.conversationId,
@@ -835,6 +837,23 @@ async function buildStatusText(params: {
       ]),
     );
     lines.push("", buildSection("🎯 Focus", focusLines));
+    lines.push(
+      "",
+      buildSection("📦 Assembly source", [
+        buildStatLine("last selected", sourceTelemetry?.lastSelectedSource ?? "unknown"),
+        buildStatLine("last reason", sourceTelemetry?.lastReason ?? "none"),
+        buildStatLine(
+          "counts",
+          sourceTelemetry
+            ? `raw_only=${formatNumber(sourceTelemetry.counters.raw_only)}, dag_summary=${formatNumber(sourceTelemetry.counters.dag_summary)}, focus_brief=${formatNumber(sourceTelemetry.counters.focus_brief)}`
+            : "unobserved",
+        ),
+        buildStatLine(
+          "skipped",
+          sourceTelemetry ? formatAssemblySkippedReasons(sourceTelemetry.skippedReasons) : "none",
+        ),
+      ]),
+    );
     lines.push(
       "",
       buildSection("🛠️ Maintenance", [
@@ -1311,6 +1330,19 @@ function formatFocusDelta(diagnostics: {
     `${formatNumber(diagnostics.postFocusSummaryCount)} summaries`,
     `~${formatNumber(diagnostics.postFocusTokenCount)} tokens`,
   ].join(", ");
+}
+
+function formatAssemblySkippedReasons(
+  reasons: Partial<Record<string, number>>,
+): string {
+  const entries = Object.entries(reasons).filter(([, count]) => (count ?? 0) > 0);
+  if (entries.length === 0) {
+    return "none";
+  }
+  return entries
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([reason, count]) => `${reason}=${formatNumber(count ?? 0)}`)
+    .join(", ");
 }
 
 async function buildFocusSummaryLines(params: {

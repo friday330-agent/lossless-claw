@@ -27,6 +27,10 @@ import {
   pickToolName,
   type AssemblyOverflowDiagnostics,
 } from "./assembler.js";
+import {
+  assemblySourceTelemetry,
+  selectAssemblySourceTelemetryLabel,
+} from "./assembly-source-telemetry.js";
 import { CompactionEngine, type CompactionConfig } from "./compaction.js";
 import type { LcmConfig } from "./db/config.js";
 import { getLcmDbFeatures } from "./db/features.js";
@@ -7371,6 +7375,17 @@ export class LcmContextEngine implements ContextEngine {
       const activeFocusBrief = await this.focusBriefStore.getActiveFocusBrief(
         conversation.conversationId,
       );
+      const sourceTelemetrySelection = selectAssemblySourceTelemetryLabel({
+        hasSummaryItems,
+        hasActiveFocus: Boolean(activeFocusBrief),
+      });
+      const sourceTelemetry = assemblySourceTelemetry.record({
+        conversationId: conversation.conversationId,
+        selectedSource: sourceTelemetrySelection.selectedSource,
+        reason: sourceTelemetrySelection.reason,
+        hasSummaries: hasSummaryItems,
+        hasActiveFocus: Boolean(activeFocusBrief),
+      });
       const contextProjectionEpoch = buildContextEngineProjectionEpoch(
         conversation.conversationId,
         contextItems,
@@ -7381,7 +7396,7 @@ export class LcmContextEngine implements ContextEngine {
         ? ` volatileLiveInputsAppended=${volatileLiveInputAppend.appendedMessages} volatileLiveInputEvicted=${volatileLiveInputAppend.evictedMessages} volatileLiveInputOverBudget=${volatileLiveInputAppend.overBudget}`
         : "";
       this.deps.log.info(
-        `[lcm] assemble: done conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} summaryContextItems=${summaryContextItems} hasSummaryItems=${hasSummaryItems} inputMessages=${params.messages.length} outputMessages=${volatileLiveInputAppend.messages.length} tokenBudget=${tokenBudget} estimatedTokens=${volatileLiveInputAppend.estimatedTokens} contextProjectionMode=thread_bootstrap contextProjectionEpoch=${contextProjectionEpoch}${stubStatsLog}${volatileLiveInputLog} duration=${formatDurationMs(Date.now() - startedAt)}`,
+        `[lcm] assemble: done conversation=${conversation.conversationId} ${sessionLabel} contextItems=${contextItems.length} summaryContextItems=${summaryContextItems} hasSummaryItems=${hasSummaryItems} assemblySource=${sourceTelemetrySelection.selectedSource} assemblySourceReason=${sourceTelemetrySelection.reason ?? "selected"} assemblySourceCounts=raw_only:${sourceTelemetry.counters.raw_only},dag_summary:${sourceTelemetry.counters.dag_summary},focus_brief:${sourceTelemetry.counters.focus_brief} inputMessages=${params.messages.length} outputMessages=${volatileLiveInputAppend.messages.length} tokenBudget=${tokenBudget} estimatedTokens=${volatileLiveInputAppend.estimatedTokens} contextProjectionMode=thread_bootstrap contextProjectionEpoch=${contextProjectionEpoch}${stubStatsLog}${volatileLiveInputLog} duration=${formatDurationMs(Date.now() - startedAt)}`,
 
       );
       const prefixChange = describeAssembledPrefixChange(

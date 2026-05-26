@@ -9,6 +9,7 @@ import { ContextAssembler } from "../src/assembler.js";
 import type { LcmConfig } from "../src/db/config.js";
 import { closeLcmConnection, createLcmDatabaseConnection } from "../src/db/connection.js";
 import { LcmContextEngine } from "../src/engine.js";
+import { assemblySourceTelemetry } from "../src/assembly-source-telemetry.js";
 import { estimateTokens } from "../src/estimate-tokens.js";
 import {
   createDelegatedExpansionGrant,
@@ -322,6 +323,7 @@ async function ingestAndReadStoredContent(params: {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  assemblySourceTelemetry.reset();
   closeLcmConnection();
   resetDelegatedExpansionGrantsForTests();
   for (const dir of tempDirs.splice(0)) {

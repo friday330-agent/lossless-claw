@@ -12,6 +12,7 @@ import { SummaryStore } from "../src/store/summary-store.js";
 import { createLcmCommand, __testing } from "../src/plugin/lcm-command.js";
 import type { LcmSummarizeFn } from "../src/summarize.js";
 import type { LcmDependencies } from "../src/types.js";
+import { assemblySourceTelemetry } from "../src/assembly-source-telemetry.js";
 
 function createCommandFixture(options?: {
   summarize?: LcmSummarizeFn;
@@ -73,6 +74,7 @@ describe("lcm command", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    assemblySourceTelemetry.reset();
     for (const dbPath of dbPaths) {
       closeLcmConnection(dbPath);
     }
@@ -891,6 +893,43 @@ describe("lcm command", () => {
     expect(result.text).toContain("last failure: provider timeout");
     expect(result.text).toContain("requested token budget: 128,000");
     expect(result.text).toContain("observed token count: 96,000");
+  });
+
+  it("reports assembly source telemetry in status output", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "assembly-source-status-session",
+      sessionKey: "agent:main:telegram:assembly-source:1",
+      title: "Assembly source fixture",
+    });
+    assemblySourceTelemetry.record({
+      conversationId: conversation.conversationId,
+      selectedSource: "raw_only",
+      reason: "no_summaries",
+      hasSummaries: false,
+      hasActiveFocus: false,
+    });
+    assemblySourceTelemetry.record({
+      conversationId: conversation.conversationId,
+      selectedSource: "focus_brief",
+      hasSummaries: true,
+      hasActiveFocus: true,
+    });
+
+    const result = await fixture.command.handler(
+      createCommandContext("status", {
+        sessionKey: "agent:main:telegram:assembly-source:1",
+        sessionId: "assembly-source-status-session",
+      }),
+    );
+
+    expect(result.text).toContain("**📦 Assembly source**");
+    expect(result.text).toContain("last selected: focus_brief");
+    expect(result.text).toContain("counts: raw_only=1, dag_summary=0, focus_brief=1");
+    expect(result.text).toContain("skipped: no_summaries=1");
   });
 
   it("falls back to the active session id when the current session key is not stored yet", async () => {
