@@ -179,6 +179,58 @@ describe("focus brief generation", () => {
     ]);
   });
 
+  it("parses delegated JSON when markdown fields contain code fences", () => {
+    const raw = [
+      "I gathered the evidence.",
+      "",
+      "```json",
+      JSON.stringify({
+        evidenceMarkdown: [
+          "## Current Working State",
+          "```",
+          "summaryModel: deepseek/deepseek-v4-flash",
+          "```",
+        ].join("\n"),
+        citedSummaryIds: ["summary_focus_a"],
+        expandedSummaryIds: ["summary_focus_a"],
+        irrelevantSummaryIds: [],
+        expansionPrompts: [],
+        confidenceNotes: ["Contains an embedded markdown code fence."],
+        truncated: false,
+      }),
+      "```",
+    ].join("\n");
+
+    const parsed = __focusBriefTesting.parseFocusEvidenceReply(raw);
+
+    expect(parsed.evidenceMarkdown).toContain("summaryModel: deepseek/deepseek-v4-flash");
+    expect(parsed.citedSummaryIds).toEqual(["summary_focus_a"]);
+    expect(parsed.rawResultJson).toContain("evidenceMarkdown");
+  });
+
+  it("parses focus brief JSON with preface text and embedded markdown fences", () => {
+    const raw = [
+      "Here is the brief.",
+      "",
+      "```json",
+      JSON.stringify({
+        briefMarkdown: ["## Brief", "```", "focus_brief=active", "```"].join("\n"),
+        citedSummaryIds: ["summary_focus_a"],
+        expandedSummaryIds: [],
+        irrelevantSummaryIds: [],
+        expansionPrompts: [],
+        confidenceNotes: [],
+        truncated: false,
+      }),
+      "```",
+    ].join("\n");
+
+    const parsed = __focusBriefTesting.parseFocusBriefReply(raw);
+
+    expect(parsed.briefMarkdown).toContain("focus_brief=active");
+    expect(parsed.citedSummaryIds).toEqual(["summary_focus_a"]);
+  });
+
   it("uses the configured summary model for focus subagent turns", async () => {
     const agentParams: Array<Record<string, unknown>> = [];
     let sessionReads = 0;

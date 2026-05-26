@@ -186,19 +186,67 @@ function mergeExpansionPrompts(
   return output;
 }
 
+function extractBalancedJsonObjectCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  for (let start = 0; start < text.length; start++) {
+    if (text[start] !== "{") {
+      continue;
+    }
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < text.length; index++) {
+      const char = text[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === "\\") {
+          escaped = true;
+        } else if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+      if (char === "{") {
+        depth++;
+        continue;
+      }
+      if (char !== "}") {
+        continue;
+      }
+      depth--;
+      if (depth === 0) {
+        candidates.push(text.slice(start, index + 1).trim());
+        break;
+      }
+    }
+  }
+  return candidates;
+}
+
+function buildJsonReplyCandidates(reply: string): string[] {
+  const candidates = [reply];
+  const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    candidates.unshift(fenced[1].trim());
+  }
+  for (const candidate of extractBalancedJsonObjectCandidates(reply)) {
+    candidates.unshift(candidate);
+  }
+  return [...new Set(candidates)];
+}
+
 function parseFocusBriefReply(rawReply: string | undefined): ParsedFocusBriefReply {
   const reply = rawReply?.trim();
   if (!reply) {
     throw new Error("Focus brief subagent returned an empty reply.");
   }
 
-  const candidates: string[] = [reply];
-  const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) {
-    candidates.unshift(fenced[1].trim());
-  }
-
-  for (const candidate of candidates) {
+  for (const candidate of buildJsonReplyCandidates(reply)) {
     try {
       const parsed = JSON.parse(candidate) as Record<string, unknown>;
       const briefMarkdown =
@@ -237,13 +285,7 @@ function parseFocusEvidenceReply(rawReply: string | undefined): ParsedFocusEvide
     throw new Error("Focus evidence subagent returned an empty reply.");
   }
 
-  const candidates: string[] = [reply];
-  const fenced = reply.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) {
-    candidates.unshift(fenced[1].trim());
-  }
-
-  for (const candidate of candidates) {
+  for (const candidate of buildJsonReplyCandidates(reply)) {
     try {
       const parsed = JSON.parse(candidate) as Record<string, unknown>;
       const evidenceMarkdown =
