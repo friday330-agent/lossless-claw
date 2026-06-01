@@ -124,6 +124,8 @@ export type LcmConfig = {
   expansionModel: string;
   /** When true, focus/refocus delegated subagents reuse the configured summary provider/model override. */
   focusSubagentModelOverrideEnabled: boolean;
+  /** Optional target token count for generated focus/refocus briefs. */
+  focusBriefTargetTokens?: number;
   /** Max time to wait for delegated lcm_expand_query sub-agent completion. */
   delegationTimeoutMs: number;
   /** Max time to wait for a single model-backed LCM summarizer call. */
@@ -528,6 +530,10 @@ export function resolveLcmConfigWithDiagnostics(
         env.LCM_FOCUS_SUBAGENT_MODEL_OVERRIDE_ENABLED !== undefined
           ? env.LCM_FOCUS_SUBAGENT_MODEL_OVERRIDE_ENABLED === "true"
           : toBool(pc.focusSubagentModelOverrideEnabled) ?? false,
+      focusBriefTargetTokens: toPositiveInteger(
+        parseFiniteInt(env.LCM_FOCUS_BRIEF_TARGET_TOKENS)
+          ?? toNumber(pc.focusBriefTargetTokens),
+      ),
       delegationTimeoutMs: envDelegationTimeoutMs ?? toNumber(pc.delegationTimeoutMs) ?? 120000,
       summaryTimeoutMs:
         parseFiniteInt(env.LCM_SUMMARY_TIMEOUT_MS)

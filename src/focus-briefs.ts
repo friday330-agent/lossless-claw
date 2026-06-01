@@ -354,7 +354,14 @@ function buildActiveSummaryManifest(summaries: ActiveFocusSummaryRecord[]): stri
     .join("\n\n");
 }
 
-function resolveFocusTargetTokens(summaryTokens: number): number {
+function resolveFocusTargetTokens(params: {
+  summaryTokens: number;
+  configuredTargetTokens?: number;
+}): number {
+  if (params.configuredTargetTokens !== undefined) {
+    return Math.max(1, Math.floor(params.configuredTargetTokens));
+  }
+  const summaryTokens = params.summaryTokens;
   if (!Number.isFinite(summaryTokens) || summaryTokens <= 0) {
     return DEFAULT_FOCUS_BRIEF_TARGET_TOKENS;
   }
@@ -764,7 +771,10 @@ async function runDelegatedFocusWorkflow(params: {
   synthesisPhaseName: string;
   stampedBy: string;
 }): Promise<FocusBriefGeneration> {
-  const targetTokens = resolveFocusTargetTokens(params.summaryTokens);
+  const targetTokens = resolveFocusTargetTokens({
+    summaryTokens: params.summaryTokens,
+    configuredTargetTokens: params.deps.config.focusBriefTargetTokens,
+  });
   const tokenCap = resolveFocusExpansionTokenCap({
     summaryTokens: params.summaryTokens,
     targetTokens,

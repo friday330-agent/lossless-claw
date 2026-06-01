@@ -506,6 +506,16 @@ Why it matters:
 - lower values fail faster under slow sub-agent paths
 - higher values tolerate deeper recall but can make calls feel stuck longer
 
+### `focusBriefTargetTokens`
+
+Optional target token count for focus/refocus briefs.
+
+Why it matters:
+
+- leave unset for the default long-form focus brief target
+- set lower for lightweight runtime verification or quota-sensitive checks
+- affects focus/refocus prompt targets and derived delegation timeout, but does not change summary storage
+
 ### `maxAssemblyTokenBudget`
 
 Hard ceiling for assembled LCM token budget.

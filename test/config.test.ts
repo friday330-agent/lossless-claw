@@ -46,6 +46,7 @@ describe("resolveLcmConfig", () => {
     expect(config.summaryProvider).toBe("");
     expect(config.summaryModel).toBe("");
     expect(config.focusSubagentModelOverrideEnabled).toBe(false);
+    expect(config.focusBriefTargetTokens).toBeUndefined();
     expect(config.pruneHeartbeatOk).toBe(false);
     expect(config.transcriptGcEnabled).toBe(false);
     expect(config.proactiveThresholdCompactionMode).toBe("deferred");
@@ -94,6 +95,7 @@ describe("resolveLcmConfig", () => {
       transcriptGcEnabled: true,
       proactiveThresholdCompactionMode: "inline",
       focusSubagentModelOverrideEnabled: true,
+      focusBriefTargetTokens: 1200,
       autoRotateSessionFiles: {
         enabled: false,
         createBackups: true,
@@ -140,6 +142,7 @@ describe("resolveLcmConfig", () => {
     expect(config.transcriptGcEnabled).toBe(true);
     expect(config.proactiveThresholdCompactionMode).toBe("inline");
     expect(config.focusSubagentModelOverrideEnabled).toBe(true);
+    expect(config.focusBriefTargetTokens).toBe(1200);
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
       createBackups: true,
@@ -188,6 +191,7 @@ describe("resolveLcmConfig", () => {
       LCM_DYNAMIC_LEAF_CHUNK_TOKENS_ENABLED: "true",
       LCM_DYNAMIC_LEAF_CHUNK_TOKENS_MAX: "60000",
       LCM_PROACTIVE_THRESHOLD_COMPACTION_MODE: "inline",
+      LCM_FOCUS_BRIEF_TARGET_TOKENS: "1600",
       LCM_SWEEP_MAX_DEPTH: "4",
       LCM_INCREMENTAL_MAX_DEPTH: "3",
       LCM_SUMMARY_PREFIX_TARGET_TOKENS: "45000",
@@ -211,6 +215,7 @@ describe("resolveLcmConfig", () => {
       skipStatelessSessions: true,
       transcriptGcEnabled: false,
       proactiveThresholdCompactionMode: "deferred",
+      focusBriefTargetTokens: 1200,
       autoRotateSessionFiles: {
         enabled: true,
         createBackups: false,
@@ -245,6 +250,7 @@ describe("resolveLcmConfig", () => {
     expect(config.skipStatelessSessions).toBe(false);
     expect(config.transcriptGcEnabled).toBe(true);
     expect(config.proactiveThresholdCompactionMode).toBe("inline");
+    expect(config.focusBriefTargetTokens).toBe(1600);
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
       createBackups: true,
@@ -671,6 +677,10 @@ describe("resolveLcmConfig", () => {
   it("ships a manifest with expansionModel, expansionProvider, and delegationTimeoutMs in schema", () => {
     expect(manifest.configSchema.properties.expansionModel).toEqual({ type: "string" });
     expect(manifest.configSchema.properties.expansionProvider).toEqual({ type: "string" });
+    expect(manifest.configSchema.properties.focusBriefTargetTokens).toEqual({
+      type: "integer",
+      minimum: 1,
+    });
     expect(manifest.configSchema.properties.delegationTimeoutMs).toEqual({
       type: "integer",
       minimum: 1,

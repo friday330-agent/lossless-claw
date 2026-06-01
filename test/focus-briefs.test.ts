@@ -110,9 +110,65 @@ describe("focus brief generation", () => {
   });
 
   it("targets a much larger brief than the active summary token total", () => {
-    expect(__focusBriefTesting.resolveFocusTargetTokens(1200)).toBe(12_000);
-    expect(__focusBriefTesting.resolveFocusTargetTokens(3000)).toBe(12_000);
+    expect(__focusBriefTesting.resolveFocusTargetTokens({ summaryTokens: 1200 })).toBe(12_000);
+    expect(__focusBriefTesting.resolveFocusTargetTokens({ summaryTokens: 3000 })).toBe(12_000);
     expect(__focusBriefTesting.resolveFocusMinimumTokens(12_000)).toBe(7200);
+  });
+
+  it("uses configured target tokens for lightweight focus verification", async () => {
+    const agentMessages: string[] = [];
+    let sessionReads = 0;
+    const callGateway = vi.fn(async (request: { method: string; params?: Record<string, unknown> }) => {
+      if (request.method === "agent") {
+        agentMessages.push(String(request.params?.message ?? ""));
+        return { runId: `focus-run-${agentMessages.length}` };
+      }
+      if (request.method === "agent.wait") {
+        return { status: "ok" };
+      }
+      if (request.method === "sessions.get") {
+        sessionReads += 1;
+        return {
+          messages: [
+            {
+              role: "assistant",
+              content:
+                sessionReads === 1
+                  ? evidenceReply()
+                  : JSON.stringify({
+                      briefMarkdown: longBrief("Small verification detail"),
+                      citedSummaryIds: ["summary_focus_a"],
+                      expandedSummaryIds: ["summary_focus_a"],
+                      irrelevantSummaryIds: [],
+                      expansionPrompts: [],
+                      confidenceNotes: ["direct context"],
+                      truncated: false,
+                    }),
+            },
+          ],
+        };
+      }
+      if (request.method === "sessions.delete") {
+        return { ok: true };
+      }
+      throw new Error(`unexpected gateway method ${request.method}`);
+    });
+
+    const result = await runDelegatedFocusBrief({
+      deps: createDeps(callGateway as LcmDependencies["callGateway"], {
+        focusBriefTargetTokens: 1200,
+      }),
+      requesterSessionKey: "agent:main:telegram:direct:origin",
+      conversationId: 42,
+      focusPrompt: "alpha review",
+      summaries: activeSummaries,
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.targetTokens).toBe(1200);
+    expect(result.warning).toBeUndefined();
+    expect(agentMessages[0]).toContain("Target brief length for the later synthesis turn: 1000-1200 tokens");
+    expect(agentMessages[1]).toContain("Target brief length: 1000-1200 tokens");
   });
 
   it("derives a timeout for 12k focus briefs", () => {

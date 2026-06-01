@@ -164,6 +164,10 @@
       "label": "Focus Subagent Model Override",
       "help": "When enabled, focus/refocus delegated sub-agents reuse summaryProvider/summaryModel. Default off so focus follows the host default model unless explicitly trusted."
     },
+    "focusBriefTargetTokens": {
+      "label": "Focus Brief Target Tokens",
+      "help": "Optional target token count for focus/refocus briefs. Leave unset for the default long-form 12000-token brief; set lower for lightweight runtime verification."
+    },
     "delegationTimeoutMs": {
       "label": "Delegation Timeout (ms)",
       "help": "Maximum time to wait for delegated lcm_expand_query sub-agent completion before timing out"
@@ -404,6 +408,10 @@
       },
       "focusSubagentModelOverrideEnabled": {
         "type": "boolean"
+      },
+      "focusBriefTargetTokens": {
+        "type": "integer",
+        "minimum": 1
       },
       "delegationTimeoutMs": {
         "type": "integer",
