@@ -45,6 +45,7 @@ describe("resolveLcmConfig", () => {
     expect(config.leafTargetTokens).toBe(2400);
     expect(config.summaryProvider).toBe("");
     expect(config.summaryModel).toBe("");
+    expect(config.focusSubagentModelOverrideEnabled).toBe(false);
     expect(config.pruneHeartbeatOk).toBe(false);
     expect(config.transcriptGcEnabled).toBe(false);
     expect(config.proactiveThresholdCompactionMode).toBe("deferred");
@@ -92,6 +93,7 @@ describe("resolveLcmConfig", () => {
       pruneHeartbeatOk: true,
       transcriptGcEnabled: true,
       proactiveThresholdCompactionMode: "inline",
+      focusSubagentModelOverrideEnabled: true,
       autoRotateSessionFiles: {
         enabled: false,
         createBackups: true,
@@ -137,6 +139,7 @@ describe("resolveLcmConfig", () => {
     expect(config.pruneHeartbeatOk).toBe(true);
     expect(config.transcriptGcEnabled).toBe(true);
     expect(config.proactiveThresholdCompactionMode).toBe("inline");
+    expect(config.focusSubagentModelOverrideEnabled).toBe(true);
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
       createBackups: true,

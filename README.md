@@ -151,6 +151,7 @@ Add a `lossless-claw` entry under `plugins.entries` in your OpenClaw config:
           "proactiveThresholdCompactionMode": "deferred",
           "summaryModel": "openai/gpt-5.4-mini",
           "expansionModel": "openai/gpt-5.4-mini",
+          "focusSubagentModelOverrideEnabled": false,
           "delegationTimeoutMs": 300000,
           "summaryTimeoutMs": 60000
         }
@@ -160,7 +161,7 @@ Add a `lossless-claw` entry under `plugins.entries` in your OpenClaw config:
 }
 ```
 
-`leafChunkTokens` controls how many source tokens can accumulate in a leaf compaction chunk before summarization is triggered. The default is `20000`, but quota-limited summary providers may benefit from a larger value to reduce compaction frequency. `summaryModel` and `summaryProvider` let you request a cheaper or faster compaction model through OpenClaw's `api.runtime.llm.complete` capability; OpenClaw still owns provider dispatch and auth. Explicit summary model requests require `llm.allowModelOverride` and matching `llm.allowedModels` policy entries for `lossless-claw`. `expansionModel` does the same for `lcm_expand_query` sub-agent calls (drilling into summaries to recover detail). `delegationTimeoutMs` controls how long `lcm_expand_query` waits for that delegated sub-agent to finish before returning a timeout error; it defaults to `120000` (120s). `summaryTimeoutMs` controls the per-call timeout for model-backed LCM summarization; it defaults to `60000` (60s). When unset, the model settings still fall back to OpenClaw's configured default model/provider. See [Expansion model override requirements](#expansion-model-override-requirements) for the required `subagent` trust policy when using `expansionModel`.
+`leafChunkTokens` controls how many source tokens can accumulate in a leaf compaction chunk before summarization is triggered. The default is `20000`, but quota-limited summary providers may benefit from a larger value to reduce compaction frequency. `summaryModel` and `summaryProvider` let you request a cheaper or faster compaction model through OpenClaw's `api.runtime.llm.complete` capability; OpenClaw still owns provider dispatch and auth. Explicit summary model requests require `llm.allowModelOverride` and matching `llm.allowedModels` policy entries for `lossless-claw`. `expansionModel` does the same for `lcm_expand_query` sub-agent calls (drilling into summaries to recover detail). Focus/refocus delegated sub-agents do not reuse `summaryModel` by default; set `focusSubagentModelOverrideEnabled` only after the host's plugin subagent policy explicitly allows that target, otherwise focus runs on the host default model. `delegationTimeoutMs` controls how long `lcm_expand_query` waits for that delegated sub-agent to finish before returning a timeout error; it defaults to `120000` (120s). `summaryTimeoutMs` controls the per-call timeout for model-backed LCM summarization; it defaults to `60000` (60s). When unset, the model settings still fall back to OpenClaw's configured default model/provider. See [Expansion model override requirements](#expansion-model-override-requirements) for the required `subagent` trust policy when using `expansionModel`.
 
 ### Environment variables
 
@@ -190,6 +191,7 @@ Add a `lossless-claw` entry under `plugins.entries` in your OpenClaw config:
 | `LCM_SUMMARY_BASE_URL` | *(from OpenClaw / provider default)* | Base URL override for summarization API calls |
 | `LCM_EXPANSION_MODEL` | *(from OpenClaw)* | Model override for `lcm_expand_query` sub-agent (e.g. `openai/gpt-5.4-mini`) |
 | `LCM_EXPANSION_PROVIDER` | *(from OpenClaw)* | Provider override for `lcm_expand_query` sub-agent |
+| `LCM_FOCUS_SUBAGENT_MODEL_OVERRIDE_ENABLED` | `false` | When `true`, focus/refocus delegated sub-agents reuse `LCM_SUMMARY_PROVIDER`/`LCM_SUMMARY_MODEL`; when `false`, they run on the host default model |
 | `LCM_DELEGATION_TIMEOUT_MS` | `120000` | Max time to wait for delegated `lcm_expand_query` sub-agent completion |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Max time to wait for a single model-backed LCM summarizer call |
 | `LCM_PRUNE_HEARTBEAT_OK` | `false` | Retroactively delete `HEARTBEAT_OK` turn cycles from LCM storage |
@@ -245,6 +247,7 @@ Plugin config equivalents:
 - `newSessionRetainDepth`
 - `summaryModel`
 - `summaryProvider`
+- `focusSubagentModelOverrideEnabled`
 - `delegationTimeoutMs`
 - `summaryTimeoutMs`
 

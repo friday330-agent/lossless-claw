@@ -231,7 +231,7 @@ describe("focus brief generation", () => {
     expect(parsed.citedSummaryIds).toEqual(["summary_focus_a"]);
   });
 
-  it("uses the configured summary model for focus subagent turns", async () => {
+  it("uses the configured summary model for focus subagent turns when explicitly enabled", async () => {
     const agentParams: Array<Record<string, unknown>> = [];
     let sessionReads = 0;
     const callGateway = vi.fn(async (request: { method: string; params?: Record<string, unknown> }) => {
@@ -274,6 +274,7 @@ describe("focus brief generation", () => {
       deps: createDeps(callGateway as LcmDependencies["callGateway"], {
         summaryProvider: "openai",
         summaryModel: "gpt-5.5",
+        focusSubagentModelOverrideEnabled: true,
         expansionProvider: "openrouter",
         expansionModel: "anthropic/claude-haiku-4-5",
       }),
@@ -291,7 +292,7 @@ describe("focus brief generation", () => {
     }
   });
 
-  it("does not override the conversation model when no summary model is configured", async () => {
+  it("does not override the conversation model when focus subagent model override is disabled", async () => {
     const agentParams: Array<Record<string, unknown>> = [];
     let sessionReads = 0;
     const callGateway = vi.fn(async (request: { method: string; params?: Record<string, unknown> }) => {
@@ -333,6 +334,7 @@ describe("focus brief generation", () => {
     const result = await runDelegatedFocusBrief({
       deps: createDeps(callGateway as LcmDependencies["callGateway"], {
         summaryProvider: "openai",
+        summaryModel: "gpt-5.5",
         expansionProvider: "openrouter",
         expansionModel: "anthropic/claude-haiku-4-5",
       }),

@@ -160,6 +160,10 @@
       "label": "Expansion Provider",
       "help": "Provider override for lcm_expand_query sub-agent (e.g., 'anthropic')"
     },
+    "focusSubagentModelOverrideEnabled": {
+      "label": "Focus Subagent Model Override",
+      "help": "When enabled, focus/refocus delegated sub-agents reuse summaryProvider/summaryModel. Default off so focus follows the host default model unless explicitly trusted."
+    },
     "delegationTimeoutMs": {
       "label": "Delegation Timeout (ms)",
       "help": "Maximum time to wait for delegated lcm_expand_query sub-agent completion before timing out"
@@ -397,6 +401,9 @@
       },
       "expansionProvider": {
         "type": "string"
+      },
+      "focusSubagentModelOverrideEnabled": {
+        "type": "boolean"
       },
       "delegationTimeoutMs": {
         "type": "integer",

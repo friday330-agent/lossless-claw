@@ -649,6 +649,9 @@ function buildFocusAgentParams(params: {
       taskSummary: "Generate a Lossless focus brief using lcm_grep, lcm_describe, and lcm_expand.",
     }),
   };
+  if (!params.deps.config.focusSubagentModelOverrideEnabled) {
+    return agentParams;
+  }
   const summaryModel = params.deps.config.summaryModel.trim();
   if (!summaryModel) {
     return agentParams;
