@@ -366,10 +366,13 @@ describe("focus brief generation", () => {
 
     expect(result.status).toBe("ok");
     expect(agentParams).toHaveLength(2);
+    expect(agentParams[0]?.toolsAllow).toEqual(["lcm_grep", "lcm_describe", "lcm_expand"]);
+    expect(agentParams[0]).not.toHaveProperty("disableTools");
+    expect(agentParams[1]?.disableTools).toBe(true);
+    expect(agentParams[1]).not.toHaveProperty("toolsAllow");
     for (const params of agentParams) {
       expect(params.provider).toBe("openai");
       expect(params.model).toBe("gpt-5.5");
-      expect(params.disableTools).toBe(true);
     }
   });
 
@@ -427,10 +430,13 @@ describe("focus brief generation", () => {
 
     expect(result.status).toBe("ok");
     expect(agentParams).toHaveLength(2);
+    expect(agentParams[0]?.toolsAllow).toEqual(["lcm_grep", "lcm_describe", "lcm_expand"]);
+    expect(agentParams[0]).not.toHaveProperty("disableTools");
+    expect(agentParams[1]?.disableTools).toBe(true);
+    expect(agentParams[1]).not.toHaveProperty("toolsAllow");
     for (const params of agentParams) {
       expect(params).not.toHaveProperty("provider");
       expect(params).not.toHaveProperty("model");
-      expect(params.disableTools).toBe(true);
     }
   });
 
@@ -438,11 +444,18 @@ describe("focus brief generation", () => {
     let sessionReads = 0;
     const callGateway = vi.fn(async (request: { method: string; params?: Record<string, unknown> }) => {
       if (request.method === "agent") {
+        const agentCallCount = callGateway.mock.calls.filter((call) => call[0].method === "agent").length;
         expect(request.params?.sessionKey).toMatch(/^agent:main:subagent:/);
         expect(request.params?.lane).toBe("subagent");
-        expect(request.params?.disableTools).toBe(true);
+        if (agentCallCount === 1) {
+          expect(request.params?.toolsAllow).toEqual(["lcm_grep", "lcm_describe", "lcm_expand"]);
+          expect(request.params).not.toHaveProperty("disableTools");
+        } else {
+          expect(request.params?.disableTools).toBe(true);
+          expect(request.params).not.toHaveProperty("toolsAllow");
+        }
         expect(String(request.params?.message)).toContain("alpha review");
-        return { runId: `focus-run-${callGateway.mock.calls.filter((call) => call[0].method === "agent").length}` };
+        return { runId: `focus-run-${agentCallCount}` };
       }
       if (request.method === "agent.wait") {
         return { status: "ok" };

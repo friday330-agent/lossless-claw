@@ -20,6 +20,7 @@ const MIN_FOCUS_BRIEF_TARGET_TOKENS = 12_000;
 const MIN_FOCUS_BRIEF_TIMEOUT_MS = 240_000;
 const MAX_FOCUS_BRIEF_TIMEOUT_MS = 900_000;
 const FOCUS_BRIEF_TIMEOUT_MS_PER_TARGET_TOKEN = 50;
+const FOCUS_RECALL_TOOLS_ALLOW = ["lcm_grep", "lcm_describe", "lcm_expand"] as const;
 
 /** A future recall question that would help deepen a generated focus brief. */
 export type FocusBriefExpansionPrompt = {
@@ -692,20 +693,26 @@ function buildFocusAgentParams(params: {
   deps: FocusBriefDeps;
   childSessionKey: string;
   message: string;
+  toolPolicy: "recall" | "disabled";
 }): Record<string, unknown> {
   // Keep provider/model and subagent-lane handling identical across evidence
   // and synthesis turns so runtime policy is stable for the full brief.
+  const taskSummary =
+    params.toolPolicy === "recall"
+      ? "Generate a bounded Lossless focus evidence dossier. Only Lossless recall tools are allowed; return only the requested JSON."
+      : "Generate a bounded Lossless focus brief. Tool calls are disabled; use embedded Lossless context and return only the requested JSON.";
   const agentParams: Record<string, unknown> = {
     message: params.message,
     sessionKey: params.childSessionKey,
     deliver: false,
     lane: params.deps.agentLaneSubagent,
-    disableTools: true,
+    ...(params.toolPolicy === "recall"
+      ? { toolsAllow: [...FOCUS_RECALL_TOOLS_ALLOW] }
+      : { disableTools: true }),
     extraSystemPrompt: params.deps.buildSubagentSystemPrompt({
       depth: 1,
       maxDepth: 8,
-      taskSummary:
-        "Generate a bounded Lossless focus brief. Tool calls are disabled; use embedded Lossless context and return only the requested JSON.",
+      taskSummary,
     }),
   };
   if (!params.deps.config.focusSubagentModelOverrideEnabled) {
@@ -730,6 +737,7 @@ async function runFocusAttempt<TParsed>(params: {
   message: string;
   timeoutMs: number;
   phaseName: string;
+  toolPolicy: "recall" | "disabled";
   parseReply: (rawReply: string | undefined) => TParsed;
   estimateText: (parsed: TParsed) => string;
 }): Promise<FocusAttemptResult<TParsed>> {
@@ -741,6 +749,7 @@ async function runFocusAttempt<TParsed>(params: {
         deps: params.deps,
         childSessionKey: params.childSessionKey,
         message: params.message,
+        toolPolicy: params.toolPolicy,
       }),
       timeoutMs: 10_000,
     })) as { runId?: unknown; error?: unknown };
@@ -871,6 +880,7 @@ async function runDelegatedFocusWorkflow(params: {
       message: evidenceMessage,
       timeoutMs,
       phaseName: params.evidencePhaseName,
+      toolPolicy: "recall",
       parseReply: parseFocusEvidenceReply,
       estimateText: (parsed) => parsed.evidenceMarkdown,
     });
@@ -919,6 +929,7 @@ async function runDelegatedFocusWorkflow(params: {
       }),
       timeoutMs,
       phaseName: params.synthesisPhaseName,
+      toolPolicy: "disabled",
       parseReply: parseFocusBriefReply,
       estimateText: (parsed) => parsed.briefMarkdown,
     });

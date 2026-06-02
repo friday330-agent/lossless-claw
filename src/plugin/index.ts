@@ -1152,6 +1152,8 @@ function createLcmDependencies(
             lane: params.params?.lane as string | undefined,
             deliver: (params.params?.deliver as boolean) ?? false,
             idempotencyKey: params.params?.idempotencyKey as string | undefined,
+            disableTools: params.params?.disableTools as boolean | undefined,
+            toolsAllow: params.params?.toolsAllow as string[] | undefined,
           });
         case "agent.wait":
           return sub.waitForRun({

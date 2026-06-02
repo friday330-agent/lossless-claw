@@ -493,6 +493,8 @@ describe("lcm plugin registration", () => {
         model: "anthropic/claude-haiku-4-5",
         deliver: false,
         idempotencyKey: "idem-1",
+        disableTools: true,
+        toolsAllow: ["lcm_grep", "lcm_describe"],
       },
     });
 
@@ -503,6 +505,8 @@ describe("lcm plugin registration", () => {
       model: "anthropic/claude-haiku-4-5",
       deliver: false,
       idempotencyKey: "idem-1",
+      disableTools: true,
+      toolsAllow: ["lcm_grep", "lcm_describe"],
     }));
   });
 
