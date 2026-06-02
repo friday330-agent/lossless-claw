@@ -86,6 +86,10 @@ describe("focus brief generation", () => {
     expect(prompt).toContain("Use lcm_describe");
     expect(prompt).toContain("Use lcm_expand directly");
     expect(prompt).toContain("do NOT call lcm_expand_query");
+    expect(prompt).toContain("Do NOT use shell, exec, read-file, filesystem, git, sqlite");
+    expect(prompt).toContain("do NOT fall back to shell or file inspection");
+    expect(prompt).toContain("synthesize the evidence from the embedded <active_summary_context>");
+    expect(prompt).toContain("expand at most 3 summaries");
     expect(prompt).toContain("Target brief length for the later synthesis turn: 7200-12000 tokens");
     expect(prompt).toContain("This is not the final brief");
     expect(prompt).toContain("Prefer dense, specific working memory");
@@ -93,6 +97,26 @@ describe("focus brief generation", () => {
     expect(prompt).toContain("newest summaries that pertain to the focus prompt");
     expect(prompt).toContain("summary_focus_a");
     expect(prompt).toContain('"evidenceMarkdown"');
+  });
+
+  it("builds a refocus evidence prompt that forbids non-recall fallback tools", () => {
+    const prompt = __focusBriefTesting.buildRefocusEvidenceTask({
+      focusPrompt: "alpha review",
+      existingBriefMarkdown: "## Existing\n- Keep alpha state.",
+      conversationId: 42,
+      deltaSummaries: activeSummaries,
+      targetTokens: 1200,
+      requestId: "request-one",
+      originSessionKey: "agent:main:telegram:direct:origin",
+    });
+
+    expect(prompt).toContain("Use lcm_grep");
+    expect(prompt).toContain("Use lcm_describe");
+    expect(prompt).toContain("Use lcm_expand directly");
+    expect(prompt).toContain("Do NOT use shell, exec, read-file, filesystem, git, sqlite");
+    expect(prompt).toContain("do NOT fall back to shell or file inspection");
+    expect(prompt).toContain("synthesize the evidence from the embedded <delta_summary_context>");
+    expect(prompt).toContain("expand at most 3 summaries");
   });
 
   it("builds a synthesis prompt from the evidence dossier", () => {
