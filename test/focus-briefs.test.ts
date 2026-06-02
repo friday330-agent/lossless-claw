@@ -369,6 +369,7 @@ describe("focus brief generation", () => {
     for (const params of agentParams) {
       expect(params.provider).toBe("openai");
       expect(params.model).toBe("gpt-5.5");
+      expect(params.disableTools).toBe(true);
     }
   });
 
@@ -429,6 +430,7 @@ describe("focus brief generation", () => {
     for (const params of agentParams) {
       expect(params).not.toHaveProperty("provider");
       expect(params).not.toHaveProperty("model");
+      expect(params.disableTools).toBe(true);
     }
   });
 
@@ -438,6 +440,7 @@ describe("focus brief generation", () => {
       if (request.method === "agent") {
         expect(request.params?.sessionKey).toMatch(/^agent:main:subagent:/);
         expect(request.params?.lane).toBe("subagent");
+        expect(request.params?.disableTools).toBe(true);
         expect(String(request.params?.message)).toContain("alpha review");
         return { runId: `focus-run-${callGateway.mock.calls.filter((call) => call[0].method === "agent").length}` };
       }

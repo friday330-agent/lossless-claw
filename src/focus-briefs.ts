@@ -700,11 +700,12 @@ function buildFocusAgentParams(params: {
     sessionKey: params.childSessionKey,
     deliver: false,
     lane: params.deps.agentLaneSubagent,
+    disableTools: true,
     extraSystemPrompt: params.deps.buildSubagentSystemPrompt({
       depth: 1,
       maxDepth: 8,
       taskSummary:
-        "Generate a bounded Lossless focus brief using only lcm_grep, lcm_describe, and lcm_expand; do not inspect files, git, sqlite, web, or shell.",
+        "Generate a bounded Lossless focus brief. Tool calls are disabled; use embedded Lossless context and return only the requested JSON.",
     }),
   };
   if (!params.deps.config.focusSubagentModelOverrideEnabled) {
