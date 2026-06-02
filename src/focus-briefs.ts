@@ -315,12 +315,48 @@ function buildPersistedFocusResultJson(
   parsed: ParsedFocusBriefReply,
   truncated: boolean,
   warning?: string,
+  metadata?: {
+    citedSummaryIds?: string[];
+    expandedSummaryIds?: string[];
+    irrelevantSummaryIds?: string[];
+    expansionPrompts?: FocusBriefExpansionPrompt[];
+    confidenceNotes?: string[];
+  },
 ): string | undefined {
-  if (!parsed.rawResultJson || (!truncated && !warning)) {
+  if (!parsed.rawResultJson && !metadata) {
+    return undefined;
+  }
+  if (!parsed.rawResultJson) {
+    return JSON.stringify({
+      ...(metadata?.citedSummaryIds ? { citedSummaryIds: metadata.citedSummaryIds } : {}),
+      ...(metadata?.expandedSummaryIds ? { expandedSummaryIds: metadata.expandedSummaryIds } : {}),
+      ...(metadata?.irrelevantSummaryIds ? { irrelevantSummaryIds: metadata.irrelevantSummaryIds } : {}),
+      ...(metadata?.expansionPrompts ? { expansionPrompts: metadata.expansionPrompts } : {}),
+      ...(metadata?.confidenceNotes ? { confidenceNotes: metadata.confidenceNotes } : {}),
+      ...(truncated ? { truncated: true } : {}),
+      ...(warning ? { warning } : {}),
+    });
+  }
+  if (!truncated && !warning && !metadata) {
     return parsed.rawResultJson;
   }
   try {
     const raw = JSON.parse(parsed.rawResultJson) as Record<string, unknown>;
+    if (metadata?.citedSummaryIds) {
+      raw.citedSummaryIds = metadata.citedSummaryIds;
+    }
+    if (metadata?.expandedSummaryIds) {
+      raw.expandedSummaryIds = metadata.expandedSummaryIds;
+    }
+    if (metadata?.irrelevantSummaryIds) {
+      raw.irrelevantSummaryIds = metadata.irrelevantSummaryIds;
+    }
+    if (metadata?.expansionPrompts) {
+      raw.expansionPrompts = metadata.expansionPrompts;
+    }
+    if (metadata?.confidenceNotes) {
+      raw.confidenceNotes = metadata.confidenceNotes;
+    }
     if (truncated) {
       raw.truncated = true;
     }
@@ -914,7 +950,16 @@ async function runDelegatedFocusWorkflow(params: {
       targetTokens,
       truncated,
       rawReply: attempt.rawReply,
-      rawResultJson: buildPersistedFocusResultJson(parsed, truncated, warning),
+      rawResultJson: buildPersistedFocusResultJson(parsed, truncated, warning, {
+        citedSummaryIds: normalizeStringArray([...evidence.citedSummaryIds, ...parsed.citedSummaryIds]),
+        expandedSummaryIds: normalizeStringArray([...evidence.expandedSummaryIds, ...parsed.expandedSummaryIds]),
+        irrelevantSummaryIds: normalizeStringArray([
+          ...evidence.irrelevantSummaryIds,
+          ...parsed.irrelevantSummaryIds,
+        ]),
+        expansionPrompts: mergeExpansionPrompts(evidence.expansionPrompts, parsed.expansionPrompts),
+        confidenceNotes: normalizeStringArray([...evidence.confidenceNotes, ...parsed.confidenceNotes]),
+      }),
       warning,
     };
   } catch (err) {

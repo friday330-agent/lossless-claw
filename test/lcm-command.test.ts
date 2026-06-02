@@ -455,18 +455,29 @@ describe("lcm command", () => {
       "sessions.delete",
     ]);
     const brief = fixture.db
-      .prepare(`SELECT brief_id, prompt, status, content, generator_run_id FROM focus_briefs`)
+      .prepare(`SELECT brief_id, prompt, status, content, generator_run_id, raw_result_json FROM focus_briefs`)
       .get() as {
       brief_id: string;
       prompt: string;
       status: string;
       content: string;
       generator_run_id: string;
+      raw_result_json: string;
     };
     expect(brief.prompt).toBe("alpha auth review state");
     expect(brief.status).toBe("active");
     expect(brief.content).toContain("Alpha auth is ready for review.");
     expect(brief.generator_run_id).toBe("focus-run-2");
+    const rawResult = JSON.parse(brief.raw_result_json) as {
+      citedSummaryIds?: string[];
+      expandedSummaryIds?: string[];
+      irrelevantSummaryIds?: string[];
+      confidenceNotes?: string[];
+    };
+    expect(rawResult.citedSummaryIds).toEqual(["focus_parent"]);
+    expect(rawResult.expandedSummaryIds).toEqual(["focus_leaf"]);
+    expect(rawResult.irrelevantSummaryIds).toEqual(["unrelated_summary"]);
+    expect(rawResult.confidenceNotes).toEqual(["focus_parent was in active context"]);
     const sources = fixture.db
       .prepare(`SELECT summary_id, role FROM focus_brief_sources ORDER BY role, summary_id`)
       .all() as Array<{ summary_id: string; role: string }>;
@@ -522,6 +533,10 @@ describe("lcm command", () => {
     expect(status.text).toContain("status: active");
     expect(status.text).toContain("source summaries: 1");
     expect(status.text).toContain("cited summaries: focus_parent");
+    expect(status.text).toContain("expanded summaries: focus_leaf");
+    expect(status.text).toContain("irrelevant summaries: unrelated_summary");
+    expect(status.text).toContain("expansion prompts: 1");
+    expect(status.text).toContain("confidence notes: focus_parent was in active context");
     expect(status.text).toContain("delta since focus: 1 messages, 1 summaries, ~20 tokens");
     expect(status.text).toContain("stale: yes");
     expect(status.text).toContain("source snapshot: obsolete");
@@ -535,6 +550,8 @@ describe("lcm command", () => {
     );
     expect(generalStatus.text).toContain("**🎯 Focus**");
     expect(generalStatus.text).toContain("status: active");
+    expect(generalStatus.text).toContain("expanded summaries: focus_leaf");
+    expect(generalStatus.text).toContain("confidence notes: focus_parent was in active context");
     expect(generalStatus.text).toContain("delta since focus: 1 messages, 1 summaries, ~20 tokens");
 
     const unfocus = await command.handler(

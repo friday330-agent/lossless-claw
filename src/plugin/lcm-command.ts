@@ -1332,6 +1332,82 @@ function formatFocusDelta(diagnostics: {
   ].join(", ");
 }
 
+type FocusResultMetadata = {
+  citedSummaryIds: string[];
+  expandedSummaryIds: string[];
+  irrelevantSummaryIds: string[];
+  expansionPromptCount: number;
+  confidenceNotes: string[];
+};
+
+function normalizeFocusMetadataStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    output.push(trimmed);
+  }
+  return output;
+}
+
+function parseFocusResultMetadata(rawResultJson: string | null): FocusResultMetadata {
+  if (!rawResultJson?.trim()) {
+    return {
+      citedSummaryIds: [],
+      expandedSummaryIds: [],
+      irrelevantSummaryIds: [],
+      expansionPromptCount: 0,
+      confidenceNotes: [],
+    };
+  }
+  try {
+    const parsed = JSON.parse(rawResultJson) as Record<string, unknown>;
+    return {
+      citedSummaryIds: normalizeFocusMetadataStringArray(parsed.citedSummaryIds),
+      expandedSummaryIds: normalizeFocusMetadataStringArray(parsed.expandedSummaryIds),
+      irrelevantSummaryIds: normalizeFocusMetadataStringArray(parsed.irrelevantSummaryIds),
+      expansionPromptCount: Array.isArray(parsed.expansionPrompts) ? parsed.expansionPrompts.length : 0,
+      confidenceNotes: normalizeFocusMetadataStringArray(parsed.confidenceNotes),
+    };
+  } catch {
+    return {
+      citedSummaryIds: [],
+      expandedSummaryIds: [],
+      irrelevantSummaryIds: [],
+      expansionPromptCount: 0,
+      confidenceNotes: [],
+    };
+  }
+}
+
+function formatFocusSummaryIds(ids: string[], max = 8): string {
+  if (ids.length === 0) {
+    return "none";
+  }
+  const shown = ids.slice(0, max).join(", ");
+  const remaining = ids.length - max;
+  return remaining > 0 ? `${shown}, +${formatNumber(remaining)} more` : shown;
+}
+
+function formatFocusConfidenceNotes(notes: string[], max = 3): string {
+  if (notes.length === 0) {
+    return "none";
+  }
+  const shown = notes.slice(0, max).map((note) => formatFocusPreview(note, 180)).join(" | ");
+  const remaining = notes.length - max;
+  return remaining > 0 ? `${shown} | +${formatNumber(remaining)} more` : shown;
+}
+
 function formatAssemblySkippedReasons(
   reasons: Partial<Record<string, number>>,
 ): string {
@@ -1365,12 +1441,17 @@ async function buildFocusSummaryLines(params: {
   }
 
   const diagnostics = await params.store.getFocusBriefDiagnostics(active);
+  const metadata = parseFocusResultMetadata(active.rawResultJson);
   const lines = [
     buildStatLine("status", "active"),
     buildStatLine("brief id", formatCommand(active.briefId)),
     buildStatLine("created", formatFocusBriefTime(active.createdAt, params.timezone)),
     buildStatLine("prompt", JSON.stringify(formatFocusPreview(active.prompt, 160))),
     buildStatLine("tokens", `${formatNumber(active.tokenCount)} / ${formatNumber(active.targetTokens)}`),
+    buildStatLine("expanded summaries", formatFocusSummaryIds(metadata.expandedSummaryIds)),
+    buildStatLine("irrelevant summaries", formatFocusSummaryIds(metadata.irrelevantSummaryIds)),
+    buildStatLine("expansion prompts", formatNumber(metadata.expansionPromptCount)),
+    buildStatLine("confidence notes", formatFocusConfidenceNotes(metadata.confidenceNotes)),
     buildStatLine("delta since focus", formatFocusDelta(diagnostics)),
     buildStatLine("stale", formatBoolean(diagnostics.stale)),
     buildStatLine("truncated", formatBoolean(diagnostics.truncated)),
@@ -1440,6 +1521,7 @@ async function buildFocusStatusText(params: {
 
   const sources = await store.getFocusBriefSources(primary.briefId);
   const cited = sources.filter((source) => source.role === "cited").map((source) => source.summaryId);
+  const metadata = parseFocusResultMetadata(primary.rawResultJson);
   const diagnostics = await store.getFocusBriefDiagnostics(primary);
   lines.push(
     buildSection(active ? "🎯 Active focus brief" : "🎯 Latest focus brief", [
@@ -1451,6 +1533,10 @@ async function buildFocusStatusText(params: {
       buildStatLine("target tokens", formatNumber(primary.targetTokens)),
       buildStatLine("source summaries", formatNumber(sources.filter((source) => source.role === "active_input").length)),
       buildStatLine("cited summaries", cited.length > 0 ? cited.slice(0, 8).join(", ") : "none"),
+      buildStatLine("expanded summaries", formatFocusSummaryIds(metadata.expandedSummaryIds)),
+      buildStatLine("irrelevant summaries", formatFocusSummaryIds(metadata.irrelevantSummaryIds)),
+      buildStatLine("expansion prompts", formatNumber(metadata.expansionPromptCount)),
+      buildStatLine("confidence notes", formatFocusConfidenceNotes(metadata.confidenceNotes)),
       buildStatLine("generator run", primary.generatorRunId ?? "unknown"),
       buildStatLine("delta since focus", formatFocusDelta(diagnostics)),
       buildStatLine("stale", formatBoolean(diagnostics.stale)),
@@ -1659,6 +1745,11 @@ async function buildFocusGenerateText(params: {
       buildStatLine("prompt", JSON.stringify(formatFocusPreview(params.prompt, 240))),
       buildStatLine("tokens", formatNumber(brief.tokenCount)),
       buildStatLine("target tokens", formatNumber(brief.targetTokens)),
+      buildStatLine("cited summaries", formatFocusSummaryIds(generation.citedSummaryIds)),
+      buildStatLine("expanded summaries", formatFocusSummaryIds(generation.expandedSummaryIds)),
+      buildStatLine("irrelevant summaries", formatFocusSummaryIds(generation.irrelevantSummaryIds)),
+      buildStatLine("expansion prompts", formatNumber(generation.expansionPrompts.length)),
+      buildStatLine("confidence notes", formatFocusConfidenceNotes(generation.confidenceNotes)),
       buildStatLine("generator run", generation.runId),
       buildStatLine("generator session", truncateMiddle(generation.childSessionKey, 60)),
       buildStatLine("truncated", formatBoolean(generation.truncated)),
@@ -1911,6 +2002,11 @@ async function buildRefocusText(params: {
       buildStatLine("prompt", JSON.stringify(formatFocusPreview(active.prompt, 240))),
       buildStatLine("tokens", formatNumber(brief.tokenCount)),
       buildStatLine("target tokens", formatNumber(brief.targetTokens)),
+      buildStatLine("cited summaries", formatFocusSummaryIds(generation.citedSummaryIds)),
+      buildStatLine("expanded summaries", formatFocusSummaryIds(generation.expandedSummaryIds)),
+      buildStatLine("irrelevant summaries", formatFocusSummaryIds(generation.irrelevantSummaryIds)),
+      buildStatLine("expansion prompts", formatNumber(generation.expansionPrompts.length)),
+      buildStatLine("confidence notes", formatFocusConfidenceNotes(generation.confidenceNotes)),
       buildStatLine("generator run", generation.runId),
       buildStatLine("generator session", truncateMiddle(generation.childSessionKey, 60)),
       buildStatLine("truncated", formatBoolean(generation.truncated)),
