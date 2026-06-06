@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -184,6 +185,8 @@ export type SessionMemoryOverlayRenderResult =
       content: string;
       tokenCount: number;
       entryCount: number;
+      segmentId: string;
+      sourceRefsCount: number;
       ordering: SessionMemoryOverlayOrdering;
       projectionKey: string;
     }
@@ -192,6 +195,19 @@ export type SessionMemoryOverlayRenderResult =
       source: "session_memory_overlay";
       reason: SessionMemoryOverlaySkipReason;
     };
+
+export type SessionMemoryOverlayTelemetry = {
+  surface: "session_memory";
+  state: "inserted" | "skipped";
+  insertedCount: number;
+  skippedCount: number;
+  skippedReason?: SessionMemoryOverlaySkipReason;
+  renderedTokens: number;
+  entryCount: number;
+  segmentId?: string;
+  sourceRefsCount: number;
+  projectionKey?: string;
+};
 
 export async function resolveSessionMemoryOverlay(params: {
   config?: Partial<SessionMemoryOverlayConfig>;
@@ -262,8 +278,10 @@ export function renderSessionMemoryOverlay(
       content,
       tokenCount,
       entryCount: lookupResult.entries.length,
+      segmentId: lookupResult.segmentId,
+      sourceRefsCount: countSessionMemorySourceRefs(lookupResult.entries),
       ordering: "after_focus_before_fresh_tail",
-      projectionKey: lookupResult.projectionKey,
+      projectionKey: buildSessionMemoryOverlayProjectionKey(lookupResult, config),
     };
   } catch {
     return {
@@ -272,6 +290,38 @@ export function renderSessionMemoryOverlay(
       reason: "render_error",
     };
   }
+}
+
+export function buildSessionMemoryOverlayTelemetry(
+  result: SessionMemoryOverlayRenderResult,
+): SessionMemoryOverlayTelemetry {
+  if (!result.ok) {
+    return {
+      surface: "session_memory",
+      state: "skipped",
+      insertedCount: 0,
+      skippedCount: 1,
+      skippedReason: result.reason,
+      renderedTokens: 0,
+      entryCount: 0,
+      segmentId: undefined,
+      sourceRefsCount: 0,
+      projectionKey: undefined,
+    };
+  }
+
+  return {
+    surface: "session_memory",
+    state: "inserted",
+    insertedCount: 1,
+    skippedCount: 0,
+    skippedReason: undefined,
+    renderedTokens: result.tokenCount,
+    entryCount: result.entryCount,
+    segmentId: result.segmentId,
+    sourceRefsCount: result.sourceRefsCount,
+    projectionKey: result.projectionKey,
+  };
 }
 
 export async function lookupSessionMemoryOverlay(
@@ -707,6 +757,38 @@ function buildSessionMemoryProjectionKey(entries: SessionMemoryOverlayEntry[]): 
     .join("|");
 }
 
+function buildSessionMemoryOverlayProjectionKey(
+  lookupResult: Extract<SessionMemoryOverlayLookupResult, { ok: true }>,
+  config: SessionMemoryOverlayConfig,
+): string {
+  const entries = lookupResult.entries.slice().sort(compareSessionMemoryEntriesForRender).map((entry) => {
+    return {
+      entryId: entry.entryId,
+      segmentId: entry.segmentId,
+      kind: entry.kind,
+      updatedAt: entry.updatedAt,
+      version: entry.version ?? null,
+      bodyHash: entry.bodyHash ?? hashSessionMemoryValue(entry.body),
+      sourceRefsHash: hashSessionMemoryValue(entry.sourceRefs.map(renderSessionMemorySourceRef).join("|")),
+    };
+  });
+  const payload = {
+    projectionFormat: "session_memory_overlay_projection_v1",
+    renderVersion: config.renderVersion,
+    maxTokens: config.maxTokens,
+    truncationEnabled: config.truncationEnabled,
+    sessionId: lookupResult.sessionId,
+    segmentId: lookupResult.segmentId,
+    lookupProjectionKey: lookupResult.projectionKey,
+    entries,
+  };
+  return `${config.renderVersion}:${hashSessionMemoryValue(JSON.stringify(payload))}`;
+}
+
+function countSessionMemorySourceRefs(entries: SessionMemoryOverlayEntry[]): number {
+  return entries.reduce((count, entry) => count + entry.sourceRefs.length, 0);
+}
+
 function buildSessionMemoryOverlayContent(
   lookupResult: Extract<SessionMemoryOverlayLookupResult, { ok: true }>,
   config: SessionMemoryOverlayConfig,
@@ -795,6 +877,10 @@ function escapeSessionMemoryAttribute(value: string): string {
 
 function escapeSessionMemoryText(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function hashSessionMemoryValue(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 export function parseSessionMemorySidecar(params: {

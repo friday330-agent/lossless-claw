@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
+  buildSessionMemoryOverlayTelemetry,
   DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
   parseSessionMemorySidecar,
   renderSessionMemoryOverlay,
@@ -673,6 +674,99 @@ describe("session-memory read-only overlay boundary", () => {
       ok: false,
       source: "session_memory_overlay",
       reason: "over_budget",
+    });
+  });
+
+  it("builds separate session-memory telemetry and projection keys without selected-source labels", async () => {
+    const baseLookupResult = {
+      ok: true as const,
+      source: "session_memory_overlay" as const,
+      sessionId: "session-active",
+      segmentId: "segment-active",
+      projectionKey: "legacy-entry-key",
+      entries: [
+        {
+          entryId: "entry-1",
+          segmentId: "segment-active",
+          kind: "decision" as const,
+          priority: 10,
+          body: "Keep session-memory telemetry separate from assembly source labels.",
+          bodyHash: "body-hash-1",
+          version: 1,
+          updatedAt: "2026-06-06T08:01:00.000Z",
+          sourceRefs: [{ type: "lcm_summary" as const, summaryId: "sum_123" }],
+        },
+      ],
+    };
+    const config = {
+      ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+      enabled: true,
+      maxTokens: 800,
+      renderVersion: "session_memory_overlay_v1",
+    };
+
+    const rendered = renderSessionMemoryOverlay(baseLookupResult, config);
+    expect(rendered).toMatchObject({
+      ok: true,
+      source: "session_memory_overlay",
+      projectionKey: expect.stringMatching(/^session_memory_overlay_v1:/),
+    });
+    if (!rendered.ok) {
+      throw new Error("expected rendered session-memory overlay");
+    }
+
+    const telemetry = buildSessionMemoryOverlayTelemetry(rendered);
+    expect(telemetry).toEqual({
+      surface: "session_memory",
+      state: "inserted",
+      insertedCount: 1,
+      skippedCount: 0,
+      skippedReason: undefined,
+      renderedTokens: rendered.tokenCount,
+      entryCount: 1,
+      segmentId: "segment-active",
+      sourceRefsCount: 1,
+      projectionKey: rendered.projectionKey,
+    });
+    expect(JSON.stringify(telemetry)).not.toContain("raw_only");
+    expect(JSON.stringify(telemetry)).not.toContain("dag_summary");
+    expect(JSON.stringify(telemetry)).not.toContain("focus_brief");
+
+    const changedSourceRefs = renderSessionMemoryOverlay(
+      {
+        ...baseLookupResult,
+        entries: [
+          {
+            ...baseLookupResult.entries[0],
+            sourceRefs: [{ type: "focus_brief" as const, briefId: "focus_123" }],
+          },
+        ],
+      },
+      config,
+    );
+    const changedCap = renderSessionMemoryOverlay(baseLookupResult, {
+      ...config,
+      maxTokens: 1600,
+    });
+    const skippedTelemetry = buildSessionMemoryOverlayTelemetry({
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "db_absent",
+    });
+
+    expect(changedSourceRefs.ok && changedSourceRefs.projectionKey).not.toBe(rendered.projectionKey);
+    expect(changedCap.ok && changedCap.projectionKey).not.toBe(rendered.projectionKey);
+    expect(skippedTelemetry).toEqual({
+      surface: "session_memory",
+      state: "skipped",
+      insertedCount: 0,
+      skippedCount: 1,
+      skippedReason: "db_absent",
+      renderedTokens: 0,
+      entryCount: 0,
+      segmentId: undefined,
+      sourceRefsCount: 0,
+      projectionKey: undefined,
     });
   });
 });
