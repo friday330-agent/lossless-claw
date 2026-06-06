@@ -52,6 +52,16 @@ export type AutoRotateSessionFilesConfig = {
   runtime: AutoRotateSessionFileMode;
 };
 
+export type SessionMemoryOverlayConfig = {
+  enabled: boolean;
+  dbPath: string;
+  lcmDbPath: string;
+  maxTokens: number;
+  staleAfterMs: number;
+  renderVersion: string;
+  truncationEnabled: boolean;
+};
+
 export type LcmConfigSource = "env" | "plugin-config" | "default";
 
 export type LcmConfigDiagnostics = {
@@ -126,6 +136,8 @@ export type LcmConfig = {
   focusSubagentModelOverrideEnabled: boolean;
   /** Optional target token count for generated focus/refocus briefs. */
   focusBriefTargetTokens?: number;
+  /** Disabled-by-default read-only session-memory overlay config. */
+  sessionMemoryOverlay: SessionMemoryOverlayConfig;
   /** Max time to wait for delegated lcm_expand_query sub-agent completion. */
   delegationTimeoutMs: number;
   /** Max time to wait for a single model-backed LCM summarizer call. */
@@ -345,6 +357,7 @@ export function resolveLcmConfigWithDiagnostics(
   const cacheAwareCompaction = toRecord(pc.cacheAwareCompaction);
   const dynamicLeafChunkTokens = toRecord(pc.dynamicLeafChunkTokens);
   const autoRotateSessionFiles = toRecord(pc.autoRotateSessionFiles);
+  const sessionMemoryOverlay = toRecord(pc.sessionMemoryOverlay);
   const proactiveThresholdCompactionMode = toProactiveThresholdCompactionMode(
     env.LCM_PROACTIVE_THRESHOLD_COMPACTION_MODE,
   ) ?? toProactiveThresholdCompactionMode(pc.proactiveThresholdCompactionMode) ?? "deferred";
@@ -534,6 +547,38 @@ export function resolveLcmConfigWithDiagnostics(
         parseFiniteInt(env.LCM_FOCUS_BRIEF_TARGET_TOKENS)
           ?? toNumber(pc.focusBriefTargetTokens),
       ),
+      sessionMemoryOverlay: {
+        enabled:
+          env.LCM_SESSION_MEMORY_OVERLAY_ENABLED !== undefined
+            ? env.LCM_SESSION_MEMORY_OVERLAY_ENABLED === "true"
+            : toBool(sessionMemoryOverlay?.enabled) ?? false,
+        dbPath:
+          env.LCM_SESSION_MEMORY_OVERLAY_DB_PATH?.trim()
+          ?? toStr(sessionMemoryOverlay?.dbPath)
+          ?? join(resolveOpenclawStateDir(env), "session-memory.db"),
+        lcmDbPath:
+          env.LCM_SESSION_MEMORY_OVERLAY_LCM_DB_PATH?.trim()
+          ?? toStr(sessionMemoryOverlay?.lcmDbPath)
+          ?? join(resolveOpenclawStateDir(env), "lcm.db"),
+        maxTokens:
+          toPositiveInteger(
+            parseFiniteInt(env.LCM_SESSION_MEMORY_OVERLAY_MAX_TOKENS)
+              ?? toNumber(sessionMemoryOverlay?.maxTokens),
+          ) ?? 800,
+        staleAfterMs:
+          toPositiveInteger(
+            parseFiniteInt(env.LCM_SESSION_MEMORY_OVERLAY_STALE_AFTER_MS)
+              ?? toNumber(sessionMemoryOverlay?.staleAfterMs),
+          ) ?? 86_400_000,
+        renderVersion:
+          env.LCM_SESSION_MEMORY_OVERLAY_RENDER_VERSION?.trim()
+          ?? toStr(sessionMemoryOverlay?.renderVersion)
+          ?? "session_memory_overlay_v1",
+        truncationEnabled:
+          env.LCM_SESSION_MEMORY_OVERLAY_TRUNCATION_ENABLED !== undefined
+            ? env.LCM_SESSION_MEMORY_OVERLAY_TRUNCATION_ENABLED === "true"
+            : toBool(sessionMemoryOverlay?.truncationEnabled) ?? false,
+      },
       delegationTimeoutMs: envDelegationTimeoutMs ?? toNumber(pc.delegationTimeoutMs) ?? 120000,
       summaryTimeoutMs:
         parseFiniteInt(env.LCM_SUMMARY_TIMEOUT_MS)

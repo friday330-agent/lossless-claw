@@ -168,6 +168,34 @@
       "label": "Focus Brief Target Tokens",
       "help": "Optional target token count for focus/refocus briefs. Leave unset for the default long-form 12000-token brief; set lower for lightweight runtime verification."
     },
+    "sessionMemoryOverlay.enabled": {
+      "label": "Session Memory Overlay",
+      "help": "Disabled-by-default read-only session-memory overlay insertion. Keep off unless an explicit fixture or rollout approval enables it."
+    },
+    "sessionMemoryOverlay.dbPath": {
+      "label": "Session Memory DB Path",
+      "help": "Path to the read-only session-memory SQLite database (default: <OPENCLAW_STATE_DIR>/session-memory.db). Ordinary assembly must not create this file."
+    },
+    "sessionMemoryOverlay.lcmDbPath": {
+      "label": "Session Memory LCM DB Path",
+      "help": "Path to the LCM SQLite database used for read-only source-reference provenance checks."
+    },
+    "sessionMemoryOverlay.maxTokens": {
+      "label": "Session Memory Max Tokens",
+      "help": "Maximum tokens for the rendered session-memory overlay. Over-budget defaults to skip."
+    },
+    "sessionMemoryOverlay.staleAfterMs": {
+      "label": "Session Memory Stale After (ms)",
+      "help": "Maximum age for active session-memory projection data before skipping."
+    },
+    "sessionMemoryOverlay.renderVersion": {
+      "label": "Session Memory Render Version",
+      "help": "Render-version string included in session-memory projection keys."
+    },
+    "sessionMemoryOverlay.truncationEnabled": {
+      "label": "Session Memory Truncation",
+      "help": "Future compatibility switch for truncating over-budget overlays. Default false; over-budget skips."
+    },
     "delegationTimeoutMs": {
       "label": "Delegation Timeout (ms)",
       "help": "Maximum time to wait for delegated lcm_expand_query sub-agent completion before timing out"
@@ -412,6 +440,35 @@
       "focusBriefTargetTokens": {
         "type": "integer",
         "minimum": 1
+      },
+      "sessionMemoryOverlay": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "dbPath": {
+            "type": "string"
+          },
+          "lcmDbPath": {
+            "type": "string"
+          },
+          "maxTokens": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "staleAfterMs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "renderVersion": {
+            "type": "string"
+          },
+          "truncationEnabled": {
+            "type": "boolean"
+          }
+        }
       },
       "delegationTimeoutMs": {
         "type": "integer",

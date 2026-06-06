@@ -47,6 +47,15 @@ describe("resolveLcmConfig", () => {
     expect(config.summaryModel).toBe("");
     expect(config.focusSubagentModelOverrideEnabled).toBe(false);
     expect(config.focusBriefTargetTokens).toBeUndefined();
+    expect(config.sessionMemoryOverlay).toEqual({
+      enabled: false,
+      dbPath: join(homedir(), ".openclaw", "session-memory.db"),
+      lcmDbPath: join(homedir(), ".openclaw", "lcm.db"),
+      maxTokens: 800,
+      staleAfterMs: 86_400_000,
+      renderVersion: "session_memory_overlay_v1",
+      truncationEnabled: false,
+    });
     expect(config.pruneHeartbeatOk).toBe(false);
     expect(config.transcriptGcEnabled).toBe(false);
     expect(config.proactiveThresholdCompactionMode).toBe("deferred");
@@ -96,6 +105,15 @@ describe("resolveLcmConfig", () => {
       proactiveThresholdCompactionMode: "inline",
       focusSubagentModelOverrideEnabled: true,
       focusBriefTargetTokens: 1200,
+      sessionMemoryOverlay: {
+        enabled: true,
+        dbPath: "/tmp/session-memory-plugin.db",
+        lcmDbPath: "/tmp/lcm-plugin.db",
+        maxTokens: 1200,
+        staleAfterMs: 1234,
+        renderVersion: "session_memory_overlay_plugin",
+        truncationEnabled: true,
+      },
       autoRotateSessionFiles: {
         enabled: false,
         createBackups: true,
@@ -143,6 +161,15 @@ describe("resolveLcmConfig", () => {
     expect(config.proactiveThresholdCompactionMode).toBe("inline");
     expect(config.focusSubagentModelOverrideEnabled).toBe(true);
     expect(config.focusBriefTargetTokens).toBe(1200);
+    expect(config.sessionMemoryOverlay).toEqual({
+      enabled: true,
+      dbPath: "/tmp/session-memory-plugin.db",
+      lcmDbPath: "/tmp/lcm-plugin.db",
+      maxTokens: 1200,
+      staleAfterMs: 1234,
+      renderVersion: "session_memory_overlay_plugin",
+      truncationEnabled: true,
+    });
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
       createBackups: true,
@@ -192,6 +219,13 @@ describe("resolveLcmConfig", () => {
       LCM_DYNAMIC_LEAF_CHUNK_TOKENS_MAX: "60000",
       LCM_PROACTIVE_THRESHOLD_COMPACTION_MODE: "inline",
       LCM_FOCUS_BRIEF_TARGET_TOKENS: "1600",
+      LCM_SESSION_MEMORY_OVERLAY_ENABLED: "false",
+      LCM_SESSION_MEMORY_OVERLAY_DB_PATH: "/tmp/session-memory-env.db",
+      LCM_SESSION_MEMORY_OVERLAY_LCM_DB_PATH: "/tmp/lcm-env.db",
+      LCM_SESSION_MEMORY_OVERLAY_MAX_TOKENS: "1600",
+      LCM_SESSION_MEMORY_OVERLAY_STALE_AFTER_MS: "5678",
+      LCM_SESSION_MEMORY_OVERLAY_RENDER_VERSION: "session_memory_overlay_env",
+      LCM_SESSION_MEMORY_OVERLAY_TRUNCATION_ENABLED: "false",
       LCM_SWEEP_MAX_DEPTH: "4",
       LCM_INCREMENTAL_MAX_DEPTH: "3",
       LCM_SUMMARY_PREFIX_TARGET_TOKENS: "45000",
@@ -216,6 +250,15 @@ describe("resolveLcmConfig", () => {
       transcriptGcEnabled: false,
       proactiveThresholdCompactionMode: "deferred",
       focusBriefTargetTokens: 1200,
+      sessionMemoryOverlay: {
+        enabled: true,
+        dbPath: "/tmp/session-memory-plugin.db",
+        lcmDbPath: "/tmp/lcm-plugin.db",
+        maxTokens: 1200,
+        staleAfterMs: 1234,
+        renderVersion: "session_memory_overlay_plugin",
+        truncationEnabled: true,
+      },
       autoRotateSessionFiles: {
         enabled: true,
         createBackups: false,
@@ -251,6 +294,15 @@ describe("resolveLcmConfig", () => {
     expect(config.transcriptGcEnabled).toBe(true);
     expect(config.proactiveThresholdCompactionMode).toBe("inline");
     expect(config.focusBriefTargetTokens).toBe(1600);
+    expect(config.sessionMemoryOverlay).toEqual({
+      enabled: false,
+      dbPath: "/tmp/session-memory-env.db",
+      lcmDbPath: "/tmp/lcm-env.db",
+      maxTokens: 1600,
+      staleAfterMs: 5678,
+      renderVersion: "session_memory_overlay_env",
+      truncationEnabled: false,
+    });
     expect(config.autoRotateSessionFiles).toEqual({
       enabled: false,
       createBackups: true,

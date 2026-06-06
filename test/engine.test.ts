@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -33,12 +34,18 @@ function createTestConfig(databasePath: string): LcmConfig {
     skipStatelessSessions: true,
     contextThreshold: 0.75,
     freshTailCount: 8,
+    promptAwareEviction: false,
+    stubLargeToolPayloads: false,
     newSessionRetainDepth: 2,
     leafMinFanout: 8,
     condensedMinFanout: 4,
     condensedMinFanoutHard: 2,
+    sweepMaxDepth: 0,
     incrementalMaxDepth: 0,
     leafChunkTokens: 20_000,
+    maxSweepIterations: 12,
+    sweepDeadlineMs: 120_000,
+    compactUntilUnderDeadlineMs: 300_000,
     leafTargetTokens: 600,
     condensedTargetTokens: 900,
     maxExpandTokens: 4000,
@@ -49,6 +56,16 @@ function createTestConfig(databasePath: string): LcmConfig {
     largeFileSummaryModel: "",
     expansionProvider: "",
     expansionModel: "",
+    focusSubagentModelOverrideEnabled: false,
+    sessionMemoryOverlay: {
+      enabled: false,
+      dbPath: join(databasePath, "..", "session-memory.db"),
+      lcmDbPath: databasePath,
+      maxTokens: 800,
+      staleAfterMs: 86_400_000,
+      renderVersion: "session_memory_overlay_v1",
+      truncationEnabled: false,
+    },
     delegationTimeoutMs: 120_000,
     summaryTimeoutMs: 60_000,
     timezone: "UTC",
@@ -165,6 +182,143 @@ function createEngineAtDatabasePath(databasePath: string): LcmContextEngine {
   const config = createTestConfig(databasePath);
   const db = createLcmDatabaseConnection(config.databasePath);
   return new LcmContextEngine(createTestDeps(config), db);
+}
+
+function createSessionMemoryOverlayFixture(params: {
+  dbPath: string;
+  conversationId: number;
+  body: string;
+}): { updateBody: (body: string) => void } {
+  const db = new DatabaseSync(params.dbPath);
+  db.exec(`
+    PRAGMA user_version = 1;
+    CREATE TABLE schema_migrations (
+      migration_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      applied_at TEXT NOT NULL,
+      checksum TEXT NOT NULL,
+      description TEXT NOT NULL
+    );
+    CREATE TABLE sessions (
+      session_id TEXT PRIMARY KEY,
+      conversation_id INTEGER NULL,
+      session_key TEXT NULL,
+      status TEXT NOT NULL,
+      title TEXT NULL,
+      started_at TEXT NOT NULL,
+      ended_at TEXT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      metadata_json TEXT NULL
+    );
+    CREATE TABLE segments (
+      segment_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      start_ref_json TEXT NULL,
+      end_ref_json TEXT NULL,
+      token_estimate INTEGER NULL,
+      entry_count INTEGER NOT NULL DEFAULT 0,
+      opened_at TEXT NOT NULL,
+      closed_at TEXT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE entries (
+      entry_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      segment_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      confidence REAL NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 0,
+      title TEXT NULL,
+      body TEXT NOT NULL,
+      source_refs_json TEXT NULL,
+      origin_entry_id TEXT NULL,
+      superseded_by_entry_id TEXT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      settled_at TEXT NULL
+    );
+    CREATE TABLE checkpoints (
+      checkpoint_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      from_segment_id TEXT NOT NULL,
+      to_segment_id TEXT NULL,
+      reason TEXT NOT NULL,
+      trigger_snapshot_json TEXT NOT NULL,
+      summary TEXT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE carry_forward (
+      carry_id TEXT PRIMARY KEY,
+      checkpoint_id TEXT NOT NULL,
+      from_entry_id TEXT NOT NULL,
+      to_entry_id TEXT NULL,
+      priority INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE links (
+      link_id TEXT PRIMARY KEY,
+      src_type TEXT NOT NULL,
+      src_id TEXT NOT NULL,
+      relation TEXT NOT NULL,
+      dst_type TEXT NOT NULL,
+      dst_id TEXT NOT NULL,
+      confidence REAL NULL,
+      source_refs_json TEXT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX sessions_status_updated_at_idx ON sessions (status, updated_at);
+    CREATE INDEX segments_session_status_seq_idx ON segments (session_id, status, seq);
+    CREATE INDEX entries_session_status_priority_updated_at_idx ON entries (session_id, status, priority, updated_at);
+    CREATE INDEX entries_segment_status_kind_idx ON entries (segment_id, status, kind);
+    CREATE INDEX links_src_relation_idx ON links (src_type, src_id, relation);
+    CREATE INDEX links_dst_relation_idx ON links (dst_type, dst_id, relation);
+    CREATE UNIQUE INDEX segments_session_seq_unique_idx ON segments (session_id, seq);
+    CREATE UNIQUE INDEX links_unique_edge_idx ON links (src_type, src_id, relation, dst_type, dst_id);
+    INSERT INTO schema_migrations (
+      migration_id, schema_version, applied_at, checksum, description
+    ) VALUES (
+      'fixture-schema', 1, '2026-06-07T00:00:00.000Z', 'fixture', 'fixture schema'
+    );
+    INSERT INTO sessions (
+      session_id, conversation_id, session_key, status, title, started_at, ended_at, created_at, updated_at, metadata_json
+    ) VALUES (
+      'session-active', ${params.conversationId}, NULL, 'active', NULL, '2026-06-07T00:00:00.000Z', NULL,
+      '2026-06-07T00:00:00.000Z', '2026-06-07T00:00:00.000Z', NULL
+    );
+    INSERT INTO segments (
+      segment_id, session_id, seq, status, start_ref_json, end_ref_json, token_estimate, entry_count,
+      opened_at, closed_at, created_at, updated_at
+    ) VALUES (
+      'segment-active', 'session-active', 1, 'active', NULL, NULL, 42, 1,
+      '2026-06-07T00:00:00.000Z', NULL, '2026-06-07T00:00:00.000Z', '2026-06-07T00:00:00.000Z'
+    );
+  `);
+  db.prepare(
+    `INSERT INTO entries (
+      entry_id, session_id, segment_id, kind, status, confidence, priority, title, body, source_refs_json,
+      origin_entry_id, superseded_by_entry_id, created_at, updated_at, settled_at
+    ) VALUES (
+      'entry-active', 'session-active', 'segment-active', 'decision', 'active', 0.9, 10, NULL,
+      ?, '[]', NULL, NULL, '2026-06-07T00:00:00.000Z', '2026-06-07T00:00:00.000Z', NULL
+    )`,
+  ).run(params.body);
+  db.close();
+  return {
+    updateBody: (body: string) => {
+      const updateDb = new DatabaseSync(params.dbPath);
+      const update = updateDb.prepare(
+        "UPDATE entries SET body = ?, updated_at = ? WHERE entry_id = 'entry-active'",
+      );
+      update.run(body, "2026-06-07T00:01:00.000Z");
+      updateDb.close();
+    },
+  };
 }
 
 function createSessionFilePath(name: string): string {
@@ -6021,6 +6175,58 @@ describe("LcmContextEngine.assemble canonical path", () => {
     expect(await focusStore.getFocusBrief(activeBrief.briefId)).toMatchObject({
       status: "inactive",
     });
+  });
+
+  it("changes projection epochs when inserted session-memory overlay changes", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-session-memory-"));
+    tempDirs.push(tempDir);
+    const config = createTestConfig(join(tempDir, "lcm.db"));
+    config.sessionMemoryOverlay = {
+      ...config.sessionMemoryOverlay,
+      enabled: true,
+      dbPath: join(tempDir, "session-memory.db"),
+      lcmDbPath: config.databasePath,
+    };
+    const engine = createEngineWithConfig(config);
+    const sessionId = "session-projection-session-memory";
+
+    await engine.ingest({
+      sessionId,
+      message: { role: "user", content: "persisted message one" } as AgentMessage,
+    });
+    const conversation = await engine.getConversationStore().getConversationBySessionId(sessionId);
+    expect(conversation).not.toBeNull();
+    const fixture = createSessionMemoryOverlayFixture({
+      dbPath: config.sessionMemoryOverlay.dbPath,
+      conversationId: conversation!.conversationId,
+      body: "Session memory decision version one.",
+    });
+
+    const first = await engine.assemble({
+      sessionId,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+    const firstJoined = first.messages
+      .map((message) =>
+        typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+      )
+      .join("\n");
+    expect(firstJoined).toContain("Session memory decision version one.");
+
+    fixture.updateBody("Session memory decision version two.");
+    const second = await engine.assemble({
+      sessionId,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+    const secondJoined = second.messages
+      .map((message) =>
+        typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+      )
+      .join("\n");
+    expect(secondJoined).toContain("Session memory decision version two.");
+    expect(second.contextProjection?.epoch).not.toBe(first.contextProjection?.epoch);
   });
 
   it("respects token budget in assembled output", async () => {

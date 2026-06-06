@@ -179,6 +179,7 @@ function buildContextEngineProjectionEpoch(
   conversationId: number,
   contextItems: ContextItemRecord[],
   activeFocusBrief?: FocusBriefRecord | null,
+  sessionMemoryProjectionKey?: string | null,
 ): string {
   const hash = createHash("sha256");
   hash.update(CONTEXT_ENGINE_PROJECTION_EPOCH_VERSION);
@@ -201,6 +202,10 @@ function buildContextEngineProjectionEpoch(
   if (focusProjectionKey) {
     hash.update("\0focus:");
     hash.update(focusProjectionKey);
+  }
+  if (sessionMemoryProjectionKey) {
+    hash.update("\0session-memory:");
+    hash.update(sessionMemoryProjectionKey);
   }
 
   return [
@@ -2960,6 +2965,9 @@ export class LcmContextEngine implements ContextEngine {
       this.summaryStore,
       this.config.timezone,
       this.focusBriefStore,
+      {
+        config: this.config.sessionMemoryOverlay,
+      },
     );
 
     const compactionConfig: CompactionConfig = {
@@ -7390,6 +7398,7 @@ export class LcmContextEngine implements ContextEngine {
         conversation.conversationId,
         contextItems,
         activeFocusBrief,
+        assembled.debug?.sessionMemoryOverlay?.projectionKey,
       );
       const summaryContextItems = contextItems.filter((item) => item.itemType === "summary").length;
       const volatileLiveInputLog = volatileLiveInputAppend.appendedMessages > 0
