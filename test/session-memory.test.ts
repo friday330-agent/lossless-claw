@@ -313,6 +313,58 @@ describe("session-memory read-only overlay boundary", () => {
     }
   });
 
+  it("skips fixture DBs with missing required lookup indexes", async () => {
+    const fixture = createCompatibleSessionMemoryFixture({ includeIndexes: false });
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "schema_index_missing",
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("skips fixture DBs with missing required unique constraints", async () => {
+    const fixture = createCompatibleSessionMemoryFixture({ includeUniqueConstraints: false });
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "schema_constraint_missing",
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("skips compatible fixture DBs with no active entries", async () => {
     const fixture = createCompatibleSessionMemoryFixture();
 
@@ -339,33 +391,13 @@ describe("session-memory read-only overlay boundary", () => {
     }
   });
 
-  it("reads active entries from a compatible fixture DB without creating WAL sidecars", async () => {
+  it("skips active entries when the lcm provenance DB schema is incompatible", async () => {
     const fixture = createCompatibleSessionMemoryFixture();
+    const lcmFixture = createLcmFixture({ compatibleSchema: false });
     const db = new DatabaseSync(fixture.dbPath);
-    db.exec(`
-      INSERT INTO sessions (
-        session_id, conversation_id, session_key, status, title, started_at, ended_at, created_at, updated_at, metadata_json
-      ) VALUES (
-        'session-active', 123, 'agent:main:test', 'active', NULL, '2026-06-06T08:00:00.000Z', NULL,
-        '2026-06-06T08:00:00.000Z', '2026-06-06T08:05:00.000Z', NULL
-      );
-      INSERT INTO segments (
-        segment_id, session_id, seq, status, start_ref_json, end_ref_json, token_estimate, entry_count,
-        opened_at, closed_at, created_at, updated_at
-      ) VALUES (
-        'segment-active', 'session-active', 1, 'active', NULL, NULL, 42, 1,
-        '2026-06-06T08:00:00.000Z', NULL, '2026-06-06T08:00:00.000Z', '2026-06-06T08:05:00.000Z'
-      );
-      INSERT INTO entries (
-        entry_id, session_id, segment_id, kind, status, confidence, priority, title, body, source_refs_json,
-        origin_entry_id, superseded_by_entry_id, created_at, updated_at, settled_at
-      ) VALUES (
-        'entry-1', 'session-active', 'segment-active', 'decision', 'active', 0.9, 10, NULL,
-        'Keep session-memory read-only until assembler wiring is separately approved.',
-        '[{"type":"lcm_summary","summary_id":"sum_example"}]',
-        NULL, NULL, '2026-06-06T08:03:00.000Z', '2026-06-06T08:04:00.000Z', NULL
-      );
-    `);
+    insertActiveSessionMemoryEntry(db, {
+      sourceRefsJson: '[{"type":"lcm_summary","summary_id":"sum_example"}]',
+    });
     db.close();
 
     try {
@@ -374,6 +406,83 @@ describe("session-memory read-only overlay boundary", () => {
           ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
           enabled: true,
           dbPath: fixture.dbPath,
+          lcmDbPath: lcmFixture.dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "lcm_schema_incompatible",
+      });
+    } finally {
+      fixture.cleanup();
+      lcmFixture.cleanup();
+    }
+  });
+
+  it("skips active entries when lcm source refs are missing", async () => {
+    const fixture = createCompatibleSessionMemoryFixture();
+    const lcmFixture = createLcmFixture();
+    const db = new DatabaseSync(fixture.dbPath);
+    insertActiveSessionMemoryEntry(db, {
+      sourceRefsJson: '[{"type":"lcm_summary","summary_id":"sum_missing"}]',
+    });
+    db.close();
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          lcmDbPath: lcmFixture.dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "source_ref_missing",
+      });
+    } finally {
+      fixture.cleanup();
+      lcmFixture.cleanup();
+    }
+  });
+
+  it("reads active entries from a compatible fixture DB without creating WAL sidecars", async () => {
+    const fixture = createCompatibleSessionMemoryFixture();
+    const lcmFixture = createLcmFixture({
+      summaries: ["sum_example"],
+      focusBriefs: ["focus_example"],
+      messages: [
+        { conversationId: 123, seq: 260 },
+        { conversationId: 123, seq: 280 },
+      ],
+    });
+    const db = new DatabaseSync(fixture.dbPath);
+    insertActiveSessionMemoryEntry(db, {
+      sourceRefsJson:
+        '[{"type":"lcm_summary","summary_id":"sum_example"},{"type":"focus_brief","brief_id":"focus_example"},{"type":"lcm_message_range","conversation_id":123,"session_key":"agent:main:test","start_seq":260,"end_seq":280}]',
+    });
+    db.close();
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          lcmDbPath: lcmFixture.dbPath,
         },
         request: {
           conversationId: 123,
@@ -394,7 +503,17 @@ describe("session-memory read-only overlay boundary", () => {
             priority: 10,
             body: "Keep session-memory read-only until assembler wiring is separately approved.",
             updatedAt: "2026-06-06T08:04:00.000Z",
-            sourceRefs: [{ type: "lcm_summary", summaryId: "sum_example" }],
+            sourceRefs: [
+              { type: "lcm_summary", summaryId: "sum_example" },
+              { type: "focus_brief", briefId: "focus_example" },
+              {
+                type: "lcm_message_range",
+                conversationId: 123,
+                sessionKey: "agent:main:test",
+                startSeq: 260,
+                endSeq: 280,
+              },
+            ],
           },
         ],
       });
@@ -403,13 +522,48 @@ describe("session-memory read-only overlay boundary", () => {
       expect(existsSync(`${fixture.dbPath}-shm`)).toBe(false);
     } finally {
       fixture.cleanup();
+      lcmFixture.cleanup();
     }
   });
 });
 
+function insertActiveSessionMemoryEntry(
+  db: DatabaseSync,
+  options?: {
+    sourceRefsJson?: string;
+  },
+): void {
+  db.exec(`
+    INSERT INTO sessions (
+      session_id, conversation_id, session_key, status, title, started_at, ended_at, created_at, updated_at, metadata_json
+    ) VALUES (
+      'session-active', 123, 'agent:main:test', 'active', NULL, '2026-06-06T08:00:00.000Z', NULL,
+      '2026-06-06T08:00:00.000Z', '2026-06-06T08:05:00.000Z', NULL
+    );
+    INSERT INTO segments (
+      segment_id, session_id, seq, status, start_ref_json, end_ref_json, token_estimate, entry_count,
+      opened_at, closed_at, created_at, updated_at
+    ) VALUES (
+      'segment-active', 'session-active', 1, 'active', NULL, NULL, 42, 1,
+      '2026-06-06T08:00:00.000Z', NULL, '2026-06-06T08:00:00.000Z', '2026-06-06T08:05:00.000Z'
+    );
+    INSERT INTO entries (
+      entry_id, session_id, segment_id, kind, status, confidence, priority, title, body, source_refs_json,
+      origin_entry_id, superseded_by_entry_id, created_at, updated_at, settled_at
+    ) VALUES (
+      'entry-1', 'session-active', 'segment-active', 'decision', 'active', 0.9, 10, NULL,
+      'Keep session-memory read-only until assembler wiring is separately approved.',
+      '${options?.sourceRefsJson ?? "[]"}',
+      NULL, NULL, '2026-06-06T08:03:00.000Z', '2026-06-06T08:04:00.000Z', NULL
+    );
+  `);
+}
+
 function createCompatibleSessionMemoryFixture(options?: {
   userVersion?: number;
   migrationVersion?: number;
+  includeIndexes?: boolean;
+  includeUniqueConstraints?: boolean;
 }): { dbPath: string; cleanup: () => void } {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-compatible-"));
   const dbPath = join(tempDir, "session-memory.db");
@@ -504,6 +658,133 @@ function createCompatibleSessionMemoryFixture(options?: {
       'fixture-schema', ${migrationVersion}, '2026-06-06T08:00:00.000Z', 'fixture', 'fixture schema'
     );
   `);
+  if (options?.includeIndexes !== false) {
+    db.exec(`
+      CREATE INDEX sessions_status_updated_at_idx ON sessions (status, updated_at);
+      CREATE INDEX segments_session_status_seq_idx ON segments (session_id, status, seq);
+      CREATE INDEX entries_session_status_priority_updated_at_idx ON entries (session_id, status, priority, updated_at);
+      CREATE INDEX entries_segment_status_kind_idx ON entries (segment_id, status, kind);
+      CREATE INDEX links_src_relation_idx ON links (src_type, src_id, relation);
+      CREATE INDEX links_dst_relation_idx ON links (dst_type, dst_id, relation);
+    `);
+  }
+  if (options?.includeUniqueConstraints !== false) {
+    db.exec(`
+      CREATE UNIQUE INDEX segments_session_seq_unique_idx ON segments (session_id, seq);
+      CREATE UNIQUE INDEX links_unique_edge_idx ON links (src_type, src_id, relation, dst_type, dst_id);
+    `);
+  }
+  db.close();
+
+  return {
+    dbPath,
+    cleanup: () => rmSync(tempDir, { recursive: true, force: true }),
+  };
+}
+
+function createLcmFixture(options?: {
+  compatibleSchema?: boolean;
+  summaries?: string[];
+  focusBriefs?: string[];
+  messages?: Array<{ conversationId: number; seq: number }>;
+}): { dbPath: string; cleanup: () => void } {
+  const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-lcm-"));
+  const dbPath = join(tempDir, "lcm.db");
+  const db = new DatabaseSync(dbPath);
+  if (options?.compatibleSchema === false) {
+    db.exec("CREATE TABLE unrelated (id TEXT PRIMARY KEY)");
+  } else {
+    db.exec(`
+      CREATE TABLE conversations (
+        conversation_id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        session_key TEXT,
+        title TEXT,
+        bootstrapped_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        active INTEGER NOT NULL DEFAULT 1,
+        archived_at TEXT
+      );
+      CREATE TABLE summaries (
+        summary_id TEXT PRIMARY KEY,
+        conversation_id INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        depth INTEGER NOT NULL DEFAULT 0,
+        content TEXT NOT NULL,
+        token_count INTEGER NOT NULL,
+        earliest_at TEXT,
+        latest_at TEXT,
+        descendant_count INTEGER NOT NULL DEFAULT 0,
+        descendant_token_count INTEGER NOT NULL DEFAULT 0,
+        source_message_token_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        file_ids TEXT NOT NULL DEFAULT '[]',
+        model TEXT NOT NULL DEFAULT 'unknown'
+      );
+      CREATE TABLE messages (
+        message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id INTEGER NOT NULL,
+        seq INTEGER NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        token_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        identity_hash TEXT,
+        large_content TEXT,
+        UNIQUE (conversation_id, seq)
+      );
+      CREATE TABLE focus_briefs (
+        brief_id TEXT PRIMARY KEY,
+        conversation_id INTEGER NOT NULL,
+        session_key TEXT,
+        prompt TEXT NOT NULL,
+        content TEXT NOT NULL,
+        status TEXT NOT NULL,
+        token_count INTEGER NOT NULL DEFAULT 0,
+        target_tokens INTEGER NOT NULL DEFAULT 0,
+        covered_latest_at TEXT,
+        covered_message_seq INTEGER,
+        source_context_hash TEXT NOT NULL DEFAULT '',
+        generator_run_id TEXT,
+        generator_session_key TEXT,
+        raw_result_json TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        superseded_at TEXT
+      );
+      INSERT INTO conversations (
+        conversation_id, session_id, session_key, title, created_at, updated_at, active
+      ) VALUES (
+        123, 'session-active', 'agent:main:test', 'fixture', '2026-06-06T08:00:00.000Z',
+        '2026-06-06T08:00:00.000Z', 1
+      );
+    `);
+    for (const summaryId of options?.summaries ?? []) {
+      db.prepare(
+        `INSERT INTO summaries (
+          summary_id, conversation_id, kind, depth, content, token_count, created_at
+        ) VALUES (?, 123, 'leaf', 0, 'fixture', 1, '2026-06-06T08:00:00.000Z')`,
+      ).run(summaryId);
+    }
+    for (const briefId of options?.focusBriefs ?? []) {
+      db.prepare(
+        `INSERT INTO focus_briefs (
+          brief_id, conversation_id, session_key, prompt, content, status, token_count, target_tokens,
+          source_context_hash, created_at, updated_at
+        ) VALUES (?, 123, 'agent:main:test', 'fixture', 'fixture', 'active', 1, 1, 'fixture',
+          '2026-06-06T08:00:00.000Z', '2026-06-06T08:00:00.000Z')`,
+      ).run(briefId);
+    }
+    for (const message of options?.messages ?? []) {
+      db.prepare(
+        `INSERT INTO messages (
+          conversation_id, seq, role, content, token_count, created_at
+        ) VALUES (?, ?, 'user', 'fixture', 1, '2026-06-06T08:00:00.000Z')`,
+      ).run(message.conversationId, message.seq);
+    }
+  }
   db.close();
 
   return {

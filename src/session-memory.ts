@@ -7,6 +7,7 @@ import { resolveOpenclawStateDir } from "./db/config.js";
 const DEFAULT_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_TOKENS = 800;
 const DEFAULT_OVERLAY_DB_PATH = join(resolveOpenclawStateDir(), "session-memory.db");
+const DEFAULT_OVERLAY_LCM_DB_PATH = join(resolveOpenclawStateDir(), "lcm.db");
 const DEFAULT_OVERLAY_RENDER_VERSION = "session_memory_overlay_v1";
 const SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION = 1;
 const REQUIRED_OVERLAY_TABLES = [
@@ -18,6 +19,24 @@ const REQUIRED_OVERLAY_TABLES = [
   "carry_forward",
   "links",
 ];
+const REQUIRED_OVERLAY_INDEXES = [
+  { tableName: "sessions", columns: ["status", "updated_at"] },
+  { tableName: "segments", columns: ["session_id", "status", "seq"] },
+  { tableName: "entries", columns: ["session_id", "status", "priority", "updated_at"] },
+  { tableName: "entries", columns: ["segment_id", "status", "kind"] },
+  { tableName: "links", columns: ["src_type", "src_id", "relation"] },
+  { tableName: "links", columns: ["dst_type", "dst_id", "relation"] },
+];
+const REQUIRED_OVERLAY_UNIQUE_CONSTRAINTS = [
+  { tableName: "segments", columns: ["session_id", "seq"] },
+  { tableName: "links", columns: ["src_type", "src_id", "relation", "dst_type", "dst_id"] },
+];
+const REQUIRED_LCM_TABLE_COLUMNS = {
+  conversations: ["conversation_id", "session_key"],
+  summaries: ["summary_id"],
+  messages: ["conversation_id", "seq"],
+  focus_briefs: ["brief_id"],
+};
 
 const REQUIRED_FIELDS = [
   ["current topic", "currentTopic"],
@@ -78,6 +97,7 @@ export type SessionMemoryOverlaySkipReason =
 export type SessionMemoryOverlayConfig = {
   enabled: boolean;
   dbPath: string;
+  lcmDbPath: string;
   maxTokens: number;
   staleAfterMs: number;
   renderVersion: string;
@@ -87,6 +107,7 @@ export type SessionMemoryOverlayConfig = {
 export const DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG: SessionMemoryOverlayConfig = {
   enabled: false,
   dbPath: DEFAULT_OVERLAY_DB_PATH,
+  lcmDbPath: DEFAULT_OVERLAY_LCM_DB_PATH,
   maxTokens: DEFAULT_MAX_TOKENS,
   staleAfterMs: DEFAULT_STALE_AFTER_MS,
   renderVersion: DEFAULT_OVERLAY_RENDER_VERSION,
@@ -201,7 +222,7 @@ export async function lookupSessionMemoryOverlay(
     if (!compatibility.ok) {
       return compatibility;
     }
-    return readActiveSessionMemoryEntries(db, request);
+    return readActiveSessionMemoryEntries(db, request, config);
   } catch {
     return {
       ok: false,
@@ -272,12 +293,69 @@ function checkSessionMemorySchemaCompatibility(db: DatabaseSync): SessionMemoryS
     };
   }
 
+  for (const indexSpec of REQUIRED_OVERLAY_INDEXES) {
+    if (!hasIndexWithColumns(db, indexSpec.tableName, indexSpec.columns)) {
+      return {
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "schema_index_missing",
+      };
+    }
+  }
+
+  for (const constraintSpec of REQUIRED_OVERLAY_UNIQUE_CONSTRAINTS) {
+    if (!hasIndexWithColumns(db, constraintSpec.tableName, constraintSpec.columns, { unique: true })) {
+      return {
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "schema_constraint_missing",
+      };
+    }
+  }
+
   return { ok: true };
+}
+
+function hasIndexWithColumns(
+  db: DatabaseSync,
+  tableName: string,
+  columns: string[],
+  options?: { unique?: boolean },
+): boolean {
+  const indexes = db.prepare(`PRAGMA index_list(${quoteSqliteIdentifier(tableName)})`).all() as Array<{
+    name: unknown;
+    unique: unknown;
+  }>;
+  for (const index of indexes) {
+    if (options?.unique && Number(index.unique) !== 1) {
+      continue;
+    }
+    const indexName = String(index.name);
+    const indexColumns = db.prepare(`PRAGMA index_info(${quoteSqliteIdentifier(indexName)})`).all() as Array<{
+      seqno: unknown;
+      name: unknown;
+    }>;
+    const orderedColumns = indexColumns
+      .sort((left, right) => Number(left.seqno) - Number(right.seqno))
+      .map((column) => String(column.name));
+    if (columns.length === orderedColumns.length && columns.every((column, index) => column === orderedColumns[index])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function quoteSqliteIdentifier(identifier: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(identifier)) {
+    throw new Error(`Invalid SQLite identifier: ${identifier}`);
+  }
+  return `"${identifier}"`;
 }
 
 function readActiveSessionMemoryEntries(
   db: DatabaseSync,
   request: SessionMemoryOverlayRequest,
+  config: SessionMemoryOverlayConfig,
 ): SessionMemoryOverlayLookupResult {
   const rows = db
     .prepare(
@@ -344,6 +422,11 @@ function readActiveSessionMemoryEntries(
     });
   }
 
+  const provenance = validateLcmSourceRefs(entries, config);
+  if (!provenance.ok) {
+    return provenance;
+  }
+
   return {
     ok: true,
     source: "session_memory_overlay",
@@ -352,6 +435,110 @@ function readActiveSessionMemoryEntries(
     entries,
     projectionKey: buildSessionMemoryProjectionKey(entries),
   };
+}
+
+function validateLcmSourceRefs(
+  entries: SessionMemoryOverlayEntry[],
+  config: SessionMemoryOverlayConfig,
+): SessionMemorySchemaCompatibilityResult {
+  const refs = entries.flatMap((entry) => entry.sourceRefs).filter(isLcmBackedSourceRef);
+  if (refs.length === 0) {
+    return { ok: true };
+  }
+  if (!existsSync(config.lcmDbPath)) {
+    return {
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "lcm_schema_incompatible",
+    };
+  }
+
+  let lcmDb: DatabaseSync | undefined;
+  try {
+    lcmDb = new DatabaseSync(config.lcmDbPath, { readOnly: true });
+    if (!hasRequiredLcmSchema(lcmDb)) {
+      return {
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "lcm_schema_incompatible",
+      };
+    }
+    for (const ref of refs) {
+      if (!sourceRefExists(lcmDb, ref)) {
+        return {
+          ok: false,
+          source: "session_memory_overlay",
+          reason: "source_ref_missing",
+        };
+      }
+    }
+    return { ok: true };
+  } catch {
+    return {
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "lcm_schema_incompatible",
+    };
+  } finally {
+    try {
+      lcmDb?.close();
+    } catch {
+      // Best-effort cleanup only; callers already get a fail-closed result.
+    }
+  }
+}
+
+type LcmBackedSourceRef = Extract<
+  SessionMemorySourceRef,
+  { type: "lcm_summary" } | { type: "lcm_message_range" } | { type: "focus_brief" }
+>;
+
+function isLcmBackedSourceRef(ref: SessionMemorySourceRef): ref is LcmBackedSourceRef {
+  return ref.type === "lcm_summary" || ref.type === "lcm_message_range" || ref.type === "focus_brief";
+}
+
+function hasRequiredLcmSchema(db: DatabaseSync): boolean {
+  for (const [tableName, columns] of Object.entries(REQUIRED_LCM_TABLE_COLUMNS)) {
+    const tableColumns = new Set(
+      db.prepare(`PRAGMA table_info(${quoteSqliteIdentifier(tableName)})`).all().map((row) => {
+        return String((row as { name: unknown }).name);
+      }),
+    );
+    for (const column of columns) {
+      if (!tableColumns.has(column)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+function sourceRefExists(db: DatabaseSync, ref: LcmBackedSourceRef): boolean {
+  if (ref.type === "lcm_summary") {
+    return (
+      db.prepare("SELECT 1 FROM summaries WHERE summary_id = ? LIMIT 1").get(ref.summaryId) !== undefined
+    );
+  }
+  if (ref.type === "focus_brief") {
+    return db.prepare("SELECT 1 FROM focus_briefs WHERE brief_id = ? LIMIT 1").get(ref.briefId) !== undefined;
+  }
+  if (
+    ref.sessionKey &&
+    db
+      .prepare("SELECT 1 FROM conversations WHERE conversation_id = ? AND session_key = ? LIMIT 1")
+      .get(ref.conversationId, ref.sessionKey) === undefined
+  ) {
+    return false;
+  }
+  const startExists =
+    db
+      .prepare("SELECT 1 FROM messages WHERE conversation_id = ? AND seq = ? LIMIT 1")
+      .get(ref.conversationId, ref.startSeq) !== undefined;
+  const endExists =
+    db
+      .prepare("SELECT 1 FROM messages WHERE conversation_id = ? AND seq = ? LIMIT 1")
+      .get(ref.conversationId, ref.endSeq) !== undefined;
+  return startExists && endExists;
 }
 
 function readNoActiveEntriesResult(): SessionMemoryOverlayLookupResult {
