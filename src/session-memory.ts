@@ -411,12 +411,20 @@ function readActiveSessionMemoryEntries(
         reason: "malformed_rows",
       };
     }
+    const body = String(row.body);
+    if (containsRawTranscript(body)) {
+      return {
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "raw_transcript_detected",
+      };
+    }
     entries.push({
       entryId: String(row.entry_id),
       segmentId: String(row.segment_id),
       kind,
       priority: Number(row.priority ?? 0),
-      body: String(row.body),
+      body,
       updatedAt: String(row.updated_at),
       sourceRefs,
     });
@@ -539,6 +547,13 @@ function sourceRefExists(db: DatabaseSync, ref: LcmBackedSourceRef): boolean {
       .prepare("SELECT 1 FROM messages WHERE conversation_id = ? AND seq = ? LIMIT 1")
       .get(ref.conversationId, ref.endSeq) !== undefined;
   return startExists && endExists;
+}
+
+function containsRawTranscript(body: string): boolean {
+  const roleLineCount = body
+    .split(/\r?\n/)
+    .filter((line) => /^(system|user|assistant|tool)\s*:/i.test(line.trim())).length;
+  return roleLineCount >= 2;
 }
 
 function readNoActiveEntriesResult(): SessionMemoryOverlayLookupResult {

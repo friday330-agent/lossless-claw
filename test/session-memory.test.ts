@@ -459,6 +459,74 @@ describe("session-memory read-only overlay boundary", () => {
     }
   });
 
+  it("skips active entries that contain raw transcript-shaped body text", async () => {
+    const fixture = createCompatibleSessionMemoryFixture();
+    const db = new DatabaseSync(fixture.dbPath);
+    insertActiveSessionMemoryEntry(db, {
+      body: ["user: Can you inspect the DB?", "assistant: I will check it now."].join("\n"),
+    });
+    db.close();
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "raw_transcript_detected",
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("does not create Friday-memory files for workspace source refs", async () => {
+    const fixture = createCompatibleSessionMemoryFixture();
+    const db = new DatabaseSync(fixture.dbPath);
+    insertActiveSessionMemoryEntry(db, {
+      sourceRefsJson: '[{"type":"workspace_file","path":"Friday-memory/CURRENT.md","line":1}]',
+    });
+    db.close();
+    const tempFridayMemoryPath = join(fixture.tempDir, "Friday-memory");
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        source: "session_memory_overlay",
+        entries: [
+          {
+            sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md", line: 1 }],
+          },
+        ],
+      });
+      expect(existsSync(tempFridayMemoryPath)).toBe(false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("reads active entries from a compatible fixture DB without creating WAL sidecars", async () => {
     const fixture = createCompatibleSessionMemoryFixture();
     const lcmFixture = createLcmFixture({
@@ -530,6 +598,7 @@ describe("session-memory read-only overlay boundary", () => {
 function insertActiveSessionMemoryEntry(
   db: DatabaseSync,
   options?: {
+    body?: string;
     sourceRefsJson?: string;
   },
 ): void {
@@ -547,16 +616,19 @@ function insertActiveSessionMemoryEntry(
       'segment-active', 'session-active', 1, 'active', NULL, NULL, 42, 1,
       '2026-06-06T08:00:00.000Z', NULL, '2026-06-06T08:00:00.000Z', '2026-06-06T08:05:00.000Z'
     );
-    INSERT INTO entries (
+  `);
+  db.prepare(
+    `INSERT INTO entries (
       entry_id, session_id, segment_id, kind, status, confidence, priority, title, body, source_refs_json,
       origin_entry_id, superseded_by_entry_id, created_at, updated_at, settled_at
     ) VALUES (
       'entry-1', 'session-active', 'segment-active', 'decision', 'active', 0.9, 10, NULL,
-      'Keep session-memory read-only until assembler wiring is separately approved.',
-      '${options?.sourceRefsJson ?? "[]"}',
-      NULL, NULL, '2026-06-06T08:03:00.000Z', '2026-06-06T08:04:00.000Z', NULL
-    );
-  `);
+      ?, ?, NULL, NULL, '2026-06-06T08:03:00.000Z', '2026-06-06T08:04:00.000Z', NULL
+    )`,
+  ).run(
+    options?.body ?? "Keep session-memory read-only until assembler wiring is separately approved.",
+    options?.sourceRefsJson ?? "[]",
+  );
 }
 
 function createCompatibleSessionMemoryFixture(options?: {
@@ -564,7 +636,7 @@ function createCompatibleSessionMemoryFixture(options?: {
   migrationVersion?: number;
   includeIndexes?: boolean;
   includeUniqueConstraints?: boolean;
-}): { dbPath: string; cleanup: () => void } {
+}): { tempDir: string; dbPath: string; cleanup: () => void } {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-compatible-"));
   const dbPath = join(tempDir, "session-memory.db");
   const userVersion = options?.userVersion ?? 1;
@@ -677,6 +749,7 @@ function createCompatibleSessionMemoryFixture(options?: {
   db.close();
 
   return {
+    tempDir,
     dbPath,
     cleanup: () => rmSync(tempDir, { recursive: true, force: true }),
   };
