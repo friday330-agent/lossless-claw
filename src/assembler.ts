@@ -10,10 +10,24 @@ import type { FocusBriefRecord, FocusBriefStore } from "./store/focus-brief-stor
 import type { SummaryStore, ContextItemRecord, SummaryRecord } from "./store/summary-store.js";
 import { estimateTokens } from "./estimate-tokens.js";
 import { formatToolOutputReference } from "./large-files.js";
+import {
+  DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+  buildSessionMemoryOverlayTelemetry,
+  renderSessionMemoryOverlay,
+  resolveSessionMemoryOverlay,
+  type SessionMemoryOverlayConfig,
+  type SessionMemoryOverlayLookup,
+  type SessionMemoryOverlayTelemetry,
+} from "./session-memory.js";
 
 type AgentMessage = Parameters<ContextEngine["ingest"]>[0]["message"];
 type AssemblySegment = "evictable" | "freshTail";
 type FocusBriefLookup = Pick<FocusBriefStore, "getActiveFocusBrief">;
+
+interface SessionMemoryOverlayRuntime {
+  config?: Partial<SessionMemoryOverlayConfig>;
+  lookup?: SessionMemoryOverlayLookup;
+}
 
 export interface AssemblyOverflowContributor {
   /** Context item ordinal in the persisted conversation window. */
@@ -241,6 +255,8 @@ export interface AssembleContextResult {
     overflowDiagnostics: AssemblyOverflowDiagnostics;
     /** v4.2 §B — number of evictable items rewritten to stubs. */
     stubStats?: { stubbedCount: number; tokensSaved: number };
+    /** Read-only session-memory overlay insertion metadata. */
+    sessionMemoryOverlay?: SessionMemoryOverlayTelemetry;
   };
 }
 
@@ -1051,6 +1067,8 @@ interface ResolvedItem {
   summaryMaxSourceSeq?: number | null;
   /** True when this is a synthetic active focus brief overlay. */
   isFocusBrief?: boolean;
+  /** True when this is a synthetic read-only session-memory overlay. */
+  isSessionMemoryOverlay?: boolean;
   /**
    * v4.2 §B (Option C) — externalized `file_xxx` id for this row's
    * tool-result payload, set by the migration tool. Non-null marks the
@@ -1225,6 +1243,41 @@ function resolveFreshTailOrdinal(
   return tailStartOrdinal;
 }
 
+function compareResolvedItemsForAssembly(a: ResolvedItem, b: ResolvedItem): number {
+  const ordinalDiff = a.ordinal - b.ordinal;
+  if (ordinalDiff !== 0) {
+    return ordinalDiff;
+  }
+  return overlaySortPriority(a) - overlaySortPriority(b);
+}
+
+function overlaySortPriority(item: ResolvedItem): number {
+  if (item.isFocusBrief) {
+    return 0;
+  }
+  if (item.isSessionMemoryOverlay) {
+    return 1;
+  }
+  return 2;
+}
+
+function resolveSessionMemoryOverlayOrdinal(
+  resolved: ResolvedItem[],
+  freshTailCount: number,
+  freshTailMaxTokens?: number,
+): number {
+  const freshTailOrdinal = resolveFreshTailOrdinal(resolved, freshTailCount, freshTailMaxTokens);
+  if (Number.isFinite(freshTailOrdinal)) {
+    return freshTailOrdinal - 0.5;
+  }
+  const maxOrdinal = resolved.reduce((max, item) => Math.max(max, item.ordinal), -1);
+  return maxOrdinal + 0.5;
+}
+
+function insertResolvedItem(resolved: ResolvedItem[], itemToInsert: ResolvedItem): ResolvedItem[] {
+  return [...resolved, itemToInsert].sort(compareResolvedItemsForAssembly);
+}
+
 // ── BM25-lite relevance scorer ────────────────────────────────────────────────
 
 /** @internal Exported for testing only. Tokenize text into lowercase alphanumeric terms. */
@@ -1281,6 +1334,7 @@ export class ContextAssembler {
     private summaryStore: SummaryStore,
     private timezone?: string,
     private focusBriefStore?: FocusBriefLookup,
+    private sessionMemoryOverlay?: SessionMemoryOverlayRuntime,
   ) {}
 
   /**
@@ -1310,9 +1364,16 @@ export class ContextAssembler {
     }
 
     // Step 2: Resolve each context item into a ResolvedItem, then apply any
-    // active focus overlay without mutating canonical context_items rows.
+    // active overlays without mutating canonical context_items rows.
     const canonicalResolved = await this.resolveItems(contextItems);
-    const resolved = await this.applyFocusOverlay(conversationId, canonicalResolved);
+    const focusResolved = await this.applyFocusOverlay(conversationId, canonicalResolved);
+    const sessionMemoryOverlay = await this.applySessionMemoryOverlay(
+      conversationId,
+      focusResolved,
+      freshTailCount,
+      input.freshTailMaxTokens,
+    );
+    const resolved = sessionMemoryOverlay.resolved;
 
     // Count stats from the full (pre-truncation) set
     let rawMessageCount = 0;
@@ -1320,7 +1381,7 @@ export class ContextAssembler {
     for (const item of resolved) {
       if (item.isMessage) {
         rawMessageCount++;
-      } else if (!item.isFocusBrief) {
+      } else if (!item.isFocusBrief && !item.isSessionMemoryOverlay) {
         summaryCount++;
       }
     }
@@ -1346,8 +1407,19 @@ export class ContextAssembler {
       }
     }
     const focusBriefItems = resolved.filter((item) => item.isFocusBrief);
-    const baseFreshTail = resolved.filter((item) => !item.isFocusBrief && item.ordinal >= freshTailOrdinal);
-    const evictable = resolved.filter((item) => !item.isFocusBrief && item.ordinal < freshTailOrdinal);
+    const sessionMemoryOverlayItems = resolved.filter((item) => item.isSessionMemoryOverlay);
+    const baseFreshTail = resolved.filter(
+      (item) =>
+        !item.isFocusBrief &&
+        !item.isSessionMemoryOverlay &&
+        item.ordinal >= freshTailOrdinal,
+    );
+    const evictable = resolved.filter(
+      (item) =>
+        !item.isFocusBrief &&
+        !item.isSessionMemoryOverlay &&
+        item.ordinal < freshTailOrdinal,
+    );
     const freshTail = baseFreshTail;
 
     // v4.2 §B — stub-tier substitution. Replace evictable tool-result
@@ -1360,10 +1432,14 @@ export class ContextAssembler {
     }
 
     // Step 4: Budget-aware selection
-    // First, compute the token cost of protected focus overlays and fresh tail.
+    // First, compute the token cost of protected overlays and fresh tail.
     let focusBriefTokens = 0;
     for (const item of focusBriefItems) {
       focusBriefTokens += item.tokens;
+    }
+    let sessionMemoryOverlayTokens = 0;
+    for (const item of sessionMemoryOverlayItems) {
+      sessionMemoryOverlayTokens += item.tokens;
     }
     let tailTokens = 0;
     for (const item of freshTail) {
@@ -1373,7 +1449,7 @@ export class ContextAssembler {
     // Fill remaining budget from evictable items, oldest first.
     // If the fresh tail alone exceeds the budget we still include it
     // (we never drop fresh items), but we skip all evictable items.
-    const remainingBudget = Math.max(0, tokenBudget - tailTokens - focusBriefTokens);
+    const remainingBudget = Math.max(0, tokenBudget - tailTokens - focusBriefTokens - sessionMemoryOverlayTokens);
     const selected: ResolvedItem[] = [];
     let evictableTokens = 0;
 
@@ -1383,19 +1459,20 @@ export class ContextAssembler {
     // total, then trim from the front.
     const evictableTotalTokens = evictable.reduce((sum, it) => sum + it.tokens, 0);
 
+    const prompt = input.prompt;
     let selectionMode: "full-fit" | "prompt-aware" | "chronological" = "full-fit";
     if (evictableTotalTokens <= remainingBudget) {
       // Everything fits
       selected.push(...evictable);
       evictableTokens = evictableTotalTokens;
-    } else if (input.promptAwareEviction !== false && hasSearchablePrompt(input.prompt)) {
+    } else if (input.promptAwareEviction !== false && hasSearchablePrompt(prompt)) {
       selectionMode = "prompt-aware";
       // Prompt-aware eviction: score each evictable item by relevance to the
       // prompt, then greedily fill budget from highest-scoring items down.
       // Re-sort selected items by ordinal to restore chronological order.
       const scored = evictable.map((item, idx) => ({
         item,
-        score: scoreRelevance(item.text, input.prompt),
+        score: scoreRelevance(item.text, prompt),
         idx, // original index — higher = more recent, used as tiebreaker
       }));
       // Sort: highest relevance first; most recent (higher idx) breaks ties
@@ -1435,13 +1512,13 @@ export class ContextAssembler {
       evictableTokens = accum;
     }
 
-    // Append protected focus overlays and fresh tail, then restore context
-    // order. Focus overlays are always included while active.
+    // Append protected overlays and fresh tail, then restore context order.
     selected.push(...focusBriefItems);
+    selected.push(...sessionMemoryOverlayItems);
     selected.push(...freshTail);
-    selected.sort((a, b) => a.ordinal - b.ordinal || (a.isFocusBrief ? -1 : b.isFocusBrief ? 1 : 0));
+    selected.sort(compareResolvedItemsForAssembly);
 
-    const estimatedTokens = evictableTokens + tailTokens + focusBriefTokens;
+    const estimatedTokens = evictableTokens + tailTokens + focusBriefTokens + sessionMemoryOverlayTokens;
     const overflowDiagnostics = buildOverflowDiagnostics({
       resolved,
       selected,
@@ -1542,6 +1619,7 @@ export class ContextAssembler {
         finalMessagesHash: hashMessages(repaired),
         overflowDiagnostics,
         stubStats,
+        sessionMemoryOverlay: sessionMemoryOverlay.telemetry,
       },
     };
   }
@@ -1608,6 +1686,49 @@ export class ContextAssembler {
       output.push(focusItem);
     }
     return output;
+  }
+
+  private async applySessionMemoryOverlay(
+    conversationId: number,
+    resolved: ResolvedItem[],
+    freshTailCount: number,
+    freshTailMaxTokens?: number,
+  ): Promise<{ resolved: ResolvedItem[]; telemetry: SessionMemoryOverlayTelemetry }> {
+    const config: SessionMemoryOverlayConfig = {
+      ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+      ...this.sessionMemoryOverlay?.config,
+    };
+    let sessionId: string | undefined;
+    let sessionKey: string | undefined;
+    if (config.enabled) {
+      const conversation = await this.conversationStore.getConversation(conversationId);
+      sessionId = conversation?.sessionId;
+      sessionKey = conversation?.sessionKey ?? undefined;
+    }
+
+    const lookupResult = await resolveSessionMemoryOverlay({
+      config,
+      request: { conversationId, sessionId, sessionKey },
+      lookup: this.sessionMemoryOverlay?.lookup,
+    });
+    const renderResult = renderSessionMemoryOverlay(lookupResult, config);
+    const telemetry = buildSessionMemoryOverlayTelemetry(renderResult);
+    if (!renderResult.ok) {
+      return { resolved, telemetry };
+    }
+
+    const overlayItem: ResolvedItem = {
+      ordinal: resolveSessionMemoryOverlayOrdinal(resolved, freshTailCount, freshTailMaxTokens),
+      message: { role: "user" as const, content: renderResult.content } as AgentMessage,
+      tokens: renderResult.tokenCount,
+      isMessage: false,
+      isSessionMemoryOverlay: true,
+      text: renderResult.content,
+    };
+    return {
+      resolved: insertResolvedItem(resolved, overlayItem),
+      telemetry,
+    };
   }
 
   /**
