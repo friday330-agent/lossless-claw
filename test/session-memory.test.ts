@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
   parseSessionMemorySidecar,
+  renderSessionMemoryOverlay,
   resolveSessionMemoryOverlay,
 } from "../src/session-memory.js";
 
@@ -592,6 +593,87 @@ describe("session-memory read-only overlay boundary", () => {
       fixture.cleanup();
       lcmFixture.cleanup();
     }
+  });
+
+  it("renders active entries in deterministic groups and skips over-budget output by default", async () => {
+    const lookupResult = {
+      ok: true as const,
+      source: "session_memory_overlay" as const,
+      sessionId: "session-active",
+      segmentId: "segment-active",
+      projectionKey: "entry-constraint|entry-decision|entry-action",
+      entries: [
+        {
+          entryId: "entry-action",
+          segmentId: "segment-active",
+          kind: "next_action" as const,
+          priority: 5,
+          body: "Add fixture tests before assembler wiring.",
+          updatedAt: "2026-06-06T08:02:00.000Z",
+          sourceRefs: [{ type: "workspace_file" as const, path: "Friday-memory/CURRENT.md", line: 55 }],
+        },
+        {
+          entryId: "entry-decision",
+          segmentId: "segment-active",
+          kind: "decision" as const,
+          priority: 10,
+          body: "Keep focus first, session-memory second, fresh tail last.",
+          updatedAt: "2026-06-06T08:01:00.000Z",
+          sourceRefs: [{ type: "focus_brief" as const, briefId: "focus_123" }],
+        },
+        {
+          entryId: "entry-constraint",
+          segmentId: "segment-active",
+          kind: "constraint" as const,
+          priority: 1,
+          body: "Do not create the real session-memory DB.",
+          updatedAt: "2026-06-06T08:03:00.000Z",
+          sourceRefs: [{ type: "lcm_summary" as const, summaryId: "sum_123" }],
+        },
+      ],
+    };
+
+    const rendered = renderSessionMemoryOverlay(lookupResult, {
+      ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+      enabled: true,
+      maxTokens: 800,
+    });
+
+    expect(rendered).toMatchObject({
+      ok: true,
+      source: "session_memory_overlay",
+      tokenCount: expect.any(Number),
+      ordering: "after_focus_before_fresh_tail",
+    });
+    if (!rendered.ok) {
+      throw new Error("expected rendered session-memory overlay");
+    }
+    expect(rendered.content).toContain(
+      '<session_memory source="session_memory" version="session_memory_overlay_v1" session_id="session-active" segment_id="segment-active" entries="3"',
+    );
+    expect(rendered.content.indexOf("Constraints:\n- Do not create the real session-memory DB.")).toBeLessThan(
+      rendered.content.indexOf("Decisions:\n- Keep focus first, session-memory second, fresh tail last."),
+    );
+    expect(rendered.content.indexOf("Decisions:\n- Keep focus first, session-memory second, fresh tail last.")).toBeLessThan(
+      rendered.content.indexOf("Next actions:\n- Add fixture tests before assembler wiring."),
+    );
+    expect(rendered.content).toContain("Source refs:");
+    expect(rendered.content).toContain("entry_id=entry-constraint refs=[lcm_summary:sum_123]");
+    expect(rendered.content).toContain("entry_id=entry-decision refs=[focus_brief:focus_123]");
+    expect(rendered.content).toContain("entry_id=entry-action refs=[workspace_file:Friday-memory/CURRENT.md:55]");
+
+    const overBudget = renderSessionMemoryOverlay(lookupResult, {
+      ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+      enabled: true,
+      maxTokens: 1,
+      truncationEnabled: false,
+    });
+
+    expect(overBudget).toEqual({
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "over_budget",
+    });
   });
 });
 

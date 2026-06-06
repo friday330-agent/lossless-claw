@@ -175,6 +175,24 @@ export type SessionMemoryOverlayLookup = (
   config: SessionMemoryOverlayConfig,
 ) => Promise<SessionMemoryOverlayLookupResult>;
 
+export type SessionMemoryOverlayOrdering = "after_focus_before_fresh_tail";
+
+export type SessionMemoryOverlayRenderResult =
+  | {
+      ok: true;
+      source: "session_memory_overlay";
+      content: string;
+      tokenCount: number;
+      entryCount: number;
+      ordering: SessionMemoryOverlayOrdering;
+      projectionKey: string;
+    }
+  | {
+      ok: false;
+      source: "session_memory_overlay";
+      reason: SessionMemoryOverlaySkipReason;
+    };
+
 export async function resolveSessionMemoryOverlay(params: {
   config?: Partial<SessionMemoryOverlayConfig>;
   request: SessionMemoryOverlayRequest;
@@ -199,6 +217,59 @@ export async function resolveSessionMemoryOverlay(params: {
       ok: false,
       source: "session_memory_overlay",
       reason: "read_error",
+    };
+  }
+}
+
+export function renderSessionMemoryOverlay(
+  lookupResult: SessionMemoryOverlayLookupResult,
+  config: SessionMemoryOverlayConfig = DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+): SessionMemoryOverlayRenderResult {
+  if (!lookupResult.ok) {
+    return lookupResult;
+  }
+  if (lookupResult.entries.length === 0) {
+    return {
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "no_active_entries",
+    };
+  }
+
+  try {
+    let content = "";
+    let tokenCount = 0;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      content = buildSessionMemoryOverlayContent(lookupResult, config, tokenCount);
+      const nextTokenCount = estimateTokens(content);
+      if (nextTokenCount === tokenCount) {
+        break;
+      }
+      tokenCount = nextTokenCount;
+    }
+
+    if (tokenCount > config.maxTokens) {
+      return {
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "over_budget",
+      };
+    }
+
+    return {
+      ok: true,
+      source: "session_memory_overlay",
+      content,
+      tokenCount,
+      entryCount: lookupResult.entries.length,
+      ordering: "after_focus_before_fresh_tail",
+      projectionKey: lookupResult.projectionKey,
+    };
+  } catch {
+    return {
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "render_error",
     };
   }
 }
@@ -634,6 +705,96 @@ function buildSessionMemoryProjectionKey(entries: SessionMemoryOverlayEntry[]): 
   return entries
     .map((entry) => [entry.entryId, entry.updatedAt, entry.bodyHash ?? "", entry.version ?? ""].join(":"))
     .join("|");
+}
+
+function buildSessionMemoryOverlayContent(
+  lookupResult: Extract<SessionMemoryOverlayLookupResult, { ok: true }>,
+  config: SessionMemoryOverlayConfig,
+  tokenCount: number,
+): string {
+  const sections: string[] = [];
+  for (const group of SESSION_MEMORY_RENDER_GROUPS) {
+    const entries = lookupResult.entries
+      .filter((entry) => entry.kind === group.kind)
+      .sort(compareSessionMemoryEntriesForRender);
+    if (entries.length === 0) {
+      continue;
+    }
+    sections.push(`${group.label}:\n${entries.map((entry) => `- ${escapeSessionMemoryText(entry.body)}`).join("\n")}`);
+  }
+
+  const sourceRefs = lookupResult.entries
+    .slice()
+    .sort(compareSessionMemoryEntriesForRender)
+    .map((entry) => {
+      return `- entry_id=${escapeSessionMemoryText(entry.entryId)} refs=[${entry.sourceRefs
+        .map(renderSessionMemorySourceRef)
+        .join(", ")}]`;
+    });
+  if (sourceRefs.length > 0) {
+    sections.push(`Source refs:\n${sourceRefs.join("\n")}`);
+  }
+
+  const body = sections.join("\n\n");
+  return [
+    `<session_memory source="session_memory" version="${escapeSessionMemoryAttribute(
+      config.renderVersion,
+    )}" session_id="${escapeSessionMemoryAttribute(lookupResult.sessionId)}" segment_id="${escapeSessionMemoryAttribute(
+      lookupResult.segmentId,
+    )}" entries="${lookupResult.entries.length}" tokens="${tokenCount}">`,
+    body,
+    "</session_memory>",
+  ].join("\n");
+}
+
+const SESSION_MEMORY_RENDER_GROUPS: Array<{ kind: SessionMemoryOverlayEntryKind; label: string }> = [
+  { kind: "constraint", label: "Constraints" },
+  { kind: "decision", label: "Decisions" },
+  { kind: "next_action", label: "Next actions" },
+  { kind: "open_question", label: "Open questions" },
+  { kind: "fact", label: "Facts" },
+  { kind: "risk", label: "Risks" },
+  { kind: "evidence", label: "Evidence" },
+];
+
+function compareSessionMemoryEntriesForRender(
+  left: SessionMemoryOverlayEntry,
+  right: SessionMemoryOverlayEntry,
+): number {
+  return (
+    right.priority - left.priority ||
+    Date.parse(right.updatedAt) - Date.parse(left.updatedAt) ||
+    left.entryId.localeCompare(right.entryId)
+  );
+}
+
+function renderSessionMemorySourceRef(ref: SessionMemorySourceRef): string {
+  if (ref.type === "lcm_summary") {
+    return `lcm_summary:${escapeSessionMemoryText(ref.summaryId)}`;
+  }
+  if (ref.type === "lcm_message_range") {
+    const sessionKey = ref.sessionKey ? `:${escapeSessionMemoryText(ref.sessionKey)}` : "";
+    return `lcm_message_range:${ref.conversationId}:${ref.startSeq}-${ref.endSeq}${sessionKey}`;
+  }
+  if (ref.type === "focus_brief") {
+    return `focus_brief:${escapeSessionMemoryText(ref.briefId)}`;
+  }
+  if (ref.type === "workspace_file") {
+    const line = typeof ref.line === "number" ? `:${ref.line}` : "";
+    return `workspace_file:${escapeSessionMemoryText(ref.path)}${line}`;
+  }
+  if (ref.type === "checkpoint") {
+    return `checkpoint:${escapeSessionMemoryText(ref.checkpointId)}`;
+  }
+  return `sidecar_sample:${escapeSessionMemoryText(ref.path)}`;
+}
+
+function escapeSessionMemoryAttribute(value: string): string {
+  return escapeSessionMemoryText(value).replace(/"/g, "&quot;");
+}
+
+function escapeSessionMemoryText(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 export function parseSessionMemorySidecar(params: {
