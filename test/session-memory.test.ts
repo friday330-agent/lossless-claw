@@ -1,5 +1,12 @@
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { parseSessionMemorySidecar } from "../src/session-memory.js";
+import {
+  DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+  parseSessionMemorySidecar,
+  resolveSessionMemoryOverlay,
+} from "../src/session-memory.js";
 
 const VALID_SIDECAR = [
   "current topic: Lossless latest adaptation",
@@ -92,5 +99,47 @@ describe("session-memory parser-only adapter", () => {
       source: "session_memory_candidate",
       reason: "over_budget",
     });
+  });
+});
+
+describe("session-memory read-only overlay boundary", () => {
+  it("skips disabled overlay lookup before any DB side effect", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-disabled-"));
+    const dbPath = join(tempDir, "session-memory.db");
+    let lookupCalled = false;
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: false,
+          dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionId: "session-disabled",
+          sessionKey: "agent:main:test",
+        },
+        lookup: async () => {
+          lookupCalled = true;
+          writeFileSync(dbPath, "must not be created");
+          return {
+            ok: false,
+            source: "session_memory_overlay",
+            reason: "read_error",
+          };
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "disabled",
+      });
+      expect(lookupCalled).toBe(false);
+      expect(existsSync(dbPath)).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
