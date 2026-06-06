@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { estimateTokens } from "./estimate-tokens.js";
 import { resolveOpenclawStateDir } from "./db/config.js";
@@ -145,7 +146,7 @@ export type SessionMemoryOverlayLookup = (
 export async function resolveSessionMemoryOverlay(params: {
   config?: Partial<SessionMemoryOverlayConfig>;
   request: SessionMemoryOverlayRequest;
-  lookup: SessionMemoryOverlayLookup;
+  lookup?: SessionMemoryOverlayLookup;
 }): Promise<SessionMemoryOverlayLookupResult> {
   const config = {
     ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
@@ -158,7 +159,35 @@ export async function resolveSessionMemoryOverlay(params: {
       reason: "disabled",
     };
   }
-  return params.lookup(params.request, config);
+  const lookup = params.lookup ?? lookupSessionMemoryOverlay;
+  try {
+    return await lookup(params.request, config);
+  } catch {
+    return {
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "read_error",
+    };
+  }
+}
+
+export async function lookupSessionMemoryOverlay(
+  request: SessionMemoryOverlayRequest,
+  config: SessionMemoryOverlayConfig,
+): Promise<SessionMemoryOverlayLookupResult> {
+  void request;
+  if (!existsSync(config.dbPath)) {
+    return {
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "db_absent",
+    };
+  }
+  return {
+    ok: false,
+    source: "session_memory_overlay",
+    reason: "schema_missing",
+  };
 }
 
 export function parseSessionMemorySidecar(params: {

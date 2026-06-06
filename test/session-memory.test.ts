@@ -142,4 +142,65 @@ describe("session-memory read-only overlay boundary", () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("skips enabled default lookup when the DB is absent without creating it", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-absent-"));
+    const dbPath = join(tempDir, "session-memory.db");
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionId: "session-absent",
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "db_absent",
+      });
+      expect(existsSync(dbPath)).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("converts enabled lookup failures into read_error without DB side effects", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-read-error-"));
+    const dbPath = join(tempDir, "session-memory.db");
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionId: "session-read-error",
+          sessionKey: "agent:main:test",
+        },
+        lookup: async () => {
+          throw new Error("read-only open failed");
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "read_error",
+      });
+      expect(existsSync(dbPath)).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
