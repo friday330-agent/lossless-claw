@@ -59,6 +59,7 @@ function createTestConfig(databasePath: string): LcmConfig {
     focusSubagentModelOverrideEnabled: false,
     sessionMemoryOverlay: {
       enabled: false,
+      killSwitchEnabled: false,
       dbPath: join(databasePath, "..", "session-memory.db"),
       lcmDbPath: databasePath,
       maxTokens: 800,
@@ -6227,6 +6228,49 @@ describe("LcmContextEngine.assemble canonical path", () => {
       .join("\n");
     expect(secondJoined).toContain("Session memory decision version two.");
     expect(second.contextProjection?.epoch).not.toBe(first.contextProjection?.epoch);
+  });
+
+  it("logs disabled session-memory skipped state through the engine default path without creating a DB", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-session-memory-disabled-"));
+    tempDirs.push(tempDir);
+    const config = createTestConfig(join(tempDir, "lcm.db"));
+    config.sessionMemoryOverlay = {
+      ...config.sessionMemoryOverlay,
+      enabled: false,
+      dbPath: join(tempDir, "session-memory.db"),
+      lcmDbPath: config.databasePath,
+    };
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const engine = new LcmContextEngine(
+      createTestDeps(config, { log }),
+      createLcmDatabaseConnection(config.databasePath),
+    );
+    const sessionId = "session-memory-disabled-default-path";
+
+    await engine.ingest({
+      sessionId,
+      message: { role: "user", content: "persisted message one" } as AgentMessage,
+    });
+    const assembled = await engine.assemble({
+      sessionId,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+    const infoLog = log.info.mock.calls
+      .map((call) => String(call[0]))
+      .find((message) => message.includes("[lcm] assemble: done"));
+
+    expect(assembled.messages.map((message) => String(message.content)).join("\n")).toContain(
+      "persisted message one",
+    );
+    expect(infoLog).toContain("sessionMemoryOverlay=skipped");
+    expect(infoLog).toContain("sessionMemoryOverlaySkippedReason=disabled");
+    expect(existsSync(config.sessionMemoryOverlay.dbPath)).toBe(false);
   });
 
   it("respects token budget in assembled output", async () => {

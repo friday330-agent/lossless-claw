@@ -49,6 +49,7 @@ describe("resolveLcmConfig", () => {
     expect(config.focusBriefTargetTokens).toBeUndefined();
     expect(config.sessionMemoryOverlay).toEqual({
       enabled: false,
+      killSwitchEnabled: false,
       dbPath: join(homedir(), ".openclaw", "session-memory.db"),
       lcmDbPath: join(homedir(), ".openclaw", "lcm.db"),
       maxTokens: 800,
@@ -163,6 +164,7 @@ describe("resolveLcmConfig", () => {
     expect(config.focusBriefTargetTokens).toBe(1200);
     expect(config.sessionMemoryOverlay).toEqual({
       enabled: true,
+      killSwitchEnabled: false,
       dbPath: "/tmp/session-memory-plugin.db",
       lcmDbPath: "/tmp/lcm-plugin.db",
       maxTokens: 1200,
@@ -296,6 +298,7 @@ describe("resolveLcmConfig", () => {
     expect(config.focusBriefTargetTokens).toBe(1600);
     expect(config.sessionMemoryOverlay).toEqual({
       enabled: false,
+      killSwitchEnabled: false,
       dbPath: "/tmp/session-memory-env.db",
       lcmDbPath: "/tmp/lcm-env.db",
       maxTokens: 1600,
@@ -333,6 +336,27 @@ describe("resolveLcmConfig", () => {
     expect(config.dynamicLeafChunkTokens).toEqual({
       enabled: true,
       max: 60000,
+    });
+  });
+
+  it("lets the env kill switch override all session-memory enablement", () => {
+    const config = resolveLcmConfig(
+      {
+        LCM_SESSION_MEMORY_OVERLAY: "0",
+        LCM_SESSION_MEMORY_OVERLAY_ENABLED: "true",
+      } as NodeJS.ProcessEnv,
+      {
+        sessionMemoryOverlay: {
+          enabled: true,
+          dbPath: "/tmp/session-memory-plugin.db",
+        },
+      },
+    );
+
+    expect(config.sessionMemoryOverlay).toMatchObject({
+      enabled: false,
+      killSwitchEnabled: true,
+      dbPath: "/tmp/session-memory-plugin.db",
     });
   });
 

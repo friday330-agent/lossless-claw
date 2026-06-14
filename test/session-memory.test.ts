@@ -146,6 +146,47 @@ describe("session-memory read-only overlay boundary", () => {
     }
   });
 
+  it("lets the kill switch skip before lookup or DB side effects", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-kill-switch-"));
+    const dbPath = join(tempDir, "session-memory.db");
+    let lookupCalled = false;
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          killSwitchEnabled: true,
+          dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionId: "session-kill-switch",
+          sessionKey: "agent:main:test",
+        },
+        lookup: async () => {
+          lookupCalled = true;
+          writeFileSync(dbPath, "must not be created");
+          return {
+            ok: false,
+            source: "session_memory_overlay",
+            reason: "read_error",
+          };
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "kill_switch",
+      });
+      expect(lookupCalled).toBe(false);
+      expect(existsSync(dbPath)).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("skips enabled default lookup when the DB is absent without creating it", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-absent-"));
     const dbPath = join(tempDir, "session-memory.db");

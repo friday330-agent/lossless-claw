@@ -54,6 +54,7 @@ export type AutoRotateSessionFilesConfig = {
 
 export type SessionMemoryOverlayConfig = {
   enabled: boolean;
+  killSwitchEnabled: boolean;
   dbPath: string;
   lcmDbPath: string;
   maxTokens: number;
@@ -234,6 +235,16 @@ function toBool(value: unknown): boolean | undefined {
   if (value === "true") return true;
   if (value === "false") return false;
   return undefined;
+}
+
+function isEnvKillSwitchEnabled(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return (
+    normalized === "0" ||
+    normalized === "false" ||
+    normalized === "off" ||
+    normalized === "disabled"
+  );
 }
 
 /** Safely coerce an unknown value to a trimmed non-empty string, or return undefined. */
@@ -548,10 +559,12 @@ export function resolveLcmConfigWithDiagnostics(
           ?? toNumber(pc.focusBriefTargetTokens),
       ),
       sessionMemoryOverlay: {
-        enabled:
-          env.LCM_SESSION_MEMORY_OVERLAY_ENABLED !== undefined
+        enabled: isEnvKillSwitchEnabled(env.LCM_SESSION_MEMORY_OVERLAY)
+          ? false
+          : env.LCM_SESSION_MEMORY_OVERLAY_ENABLED !== undefined
             ? env.LCM_SESSION_MEMORY_OVERLAY_ENABLED === "true"
             : toBool(sessionMemoryOverlay?.enabled) ?? false,
+        killSwitchEnabled: isEnvKillSwitchEnabled(env.LCM_SESSION_MEMORY_OVERLAY),
         dbPath:
           env.LCM_SESSION_MEMORY_OVERLAY_DB_PATH?.trim()
           ?? toStr(sessionMemoryOverlay?.dbPath)

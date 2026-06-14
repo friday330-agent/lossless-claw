@@ -74,6 +74,7 @@ export type ParseSessionMemorySidecarResult =
 
 export type SessionMemoryOverlaySkipReason =
   | "disabled"
+  | "kill_switch"
   | "db_absent"
   | "read_error"
   | "schema_missing"
@@ -97,6 +98,7 @@ export type SessionMemoryOverlaySkipReason =
 
 export type SessionMemoryOverlayConfig = {
   enabled: boolean;
+  killSwitchEnabled: boolean;
   dbPath: string;
   lcmDbPath: string;
   maxTokens: number;
@@ -107,6 +109,7 @@ export type SessionMemoryOverlayConfig = {
 
 export const DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG: SessionMemoryOverlayConfig = {
   enabled: false,
+  killSwitchEnabled: false,
   dbPath: DEFAULT_OVERLAY_DB_PATH,
   lcmDbPath: DEFAULT_OVERLAY_LCM_DB_PATH,
   maxTokens: DEFAULT_MAX_TOKENS,
@@ -218,6 +221,13 @@ export async function resolveSessionMemoryOverlay(params: {
     ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
     ...params.config,
   };
+  if (config.killSwitchEnabled) {
+    return {
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "kill_switch",
+    };
+  }
   if (!config.enabled) {
     return {
       ok: false,
