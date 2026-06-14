@@ -492,7 +492,9 @@ function readActiveSessionMemoryEntries(
     .prepare(
       `SELECT
          s.session_id AS session_id,
+         s.updated_at AS session_updated_at,
          sg.segment_id AS segment_id,
+         sg.updated_at AS segment_updated_at,
          e.entry_id AS entry_id,
          e.kind AS kind,
          e.priority AS priority,
@@ -511,7 +513,9 @@ function readActiveSessionMemoryEntries(
     )
     .all(request.conversationId, request.sessionKey ?? null, request.sessionKey ?? null) as Array<{
     session_id: unknown;
+    session_updated_at: unknown;
     segment_id: unknown;
+    segment_updated_at: unknown;
     entry_id: unknown;
     kind: unknown;
     priority: unknown;
@@ -522,6 +526,21 @@ function readActiveSessionMemoryEntries(
 
   if (rows.length === 0) {
     return readNoActiveEntriesResult();
+  }
+  const projectionUpdatedAt = resolveFreshestSessionMemoryProjectionTimestamp(rows);
+  if (projectionUpdatedAt === null) {
+    return {
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "malformed_rows",
+    };
+  }
+  if (Date.now() - projectionUpdatedAt > config.staleAfterMs) {
+    return {
+      ok: false,
+      source: "session_memory_overlay",
+      reason: "stale_projection",
+    };
   }
 
   const entries: SessionMemoryOverlayEntry[] = [];
@@ -574,6 +593,38 @@ function readActiveSessionMemoryEntries(
     entries,
     projectionKey: buildSessionMemoryProjectionKey(entries),
   };
+}
+
+function resolveFreshestSessionMemoryProjectionTimestamp(
+  rows: Array<{
+    session_updated_at?: unknown;
+    segment_updated_at?: unknown;
+    updated_at?: unknown;
+  }>,
+): number | null {
+  let freshest = -Infinity;
+  for (const row of rows) {
+    const timestamps = [
+      parseSessionMemoryTimestamp(row.session_updated_at),
+      parseSessionMemoryTimestamp(row.segment_updated_at),
+      parseSessionMemoryTimestamp(row.updated_at),
+    ];
+    for (const timestamp of timestamps) {
+      if (timestamp === null) {
+        return null;
+      }
+      freshest = Math.max(freshest, timestamp);
+    }
+  }
+  return Number.isFinite(freshest) ? freshest : null;
+}
+
+function parseSessionMemoryTimestamp(value: unknown): number | null {
+  if (typeof value !== "string" || value.trim() === "") {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function validateLcmSourceRefs(

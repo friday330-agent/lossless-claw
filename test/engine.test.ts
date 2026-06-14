@@ -290,14 +290,14 @@ function createSessionMemoryOverlayFixture(params: {
       session_id, conversation_id, session_key, status, title, started_at, ended_at, created_at, updated_at, metadata_json
     ) VALUES (
       'session-active', ${params.conversationId}, NULL, 'active', NULL, '2026-06-07T00:00:00.000Z', NULL,
-      '2026-06-07T00:00:00.000Z', '2026-06-07T00:00:00.000Z', NULL
+      '2026-06-07T00:00:00.000Z', '2999-01-01T00:00:00.000Z', NULL
     );
     INSERT INTO segments (
       segment_id, session_id, seq, status, start_ref_json, end_ref_json, token_estimate, entry_count,
       opened_at, closed_at, created_at, updated_at
     ) VALUES (
       'segment-active', 'session-active', 1, 'active', NULL, NULL, 42, 1,
-      '2026-06-07T00:00:00.000Z', NULL, '2026-06-07T00:00:00.000Z', '2026-06-07T00:00:00.000Z'
+      '2026-06-07T00:00:00.000Z', NULL, '2026-06-07T00:00:00.000Z', '2999-01-01T00:00:00.000Z'
     );
   `);
   db.prepare(
@@ -306,7 +306,7 @@ function createSessionMemoryOverlayFixture(params: {
       origin_entry_id, superseded_by_entry_id, created_at, updated_at, settled_at
     ) VALUES (
       'entry-active', 'session-active', 'segment-active', 'decision', 'active', 0.9, 10, NULL,
-      ?, '[]', NULL, NULL, '2026-06-07T00:00:00.000Z', '2026-06-07T00:00:00.000Z', NULL
+      ?, '[]', NULL, NULL, '2026-06-07T00:00:00.000Z', '2999-01-01T00:00:00.000Z', NULL
     )`,
   ).run(params.body);
   db.close();
@@ -316,7 +316,7 @@ function createSessionMemoryOverlayFixture(params: {
       const update = updateDb.prepare(
         "UPDATE entries SET body = ?, updated_at = ? WHERE entry_id = 'entry-active'",
       );
-      update.run(body, "2026-06-07T00:01:00.000Z");
+      update.run(body, "2999-01-01T00:01:00.000Z");
       updateDb.close();
     },
   };

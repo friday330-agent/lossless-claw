@@ -434,6 +434,79 @@ describe("session-memory read-only overlay boundary", () => {
     }
   });
 
+  it("skips active entries when the DB overlay projection is stale", async () => {
+    const fixture = createCompatibleSessionMemoryFixture();
+    const db = new DatabaseSync(fixture.dbPath);
+    insertActiveSessionMemoryEntry(db, {
+      sessionUpdatedAt: "2000-01-01T00:00:00.000Z",
+      segmentUpdatedAt: "2000-01-01T00:00:00.000Z",
+      entryUpdatedAt: "2000-01-01T00:00:00.000Z",
+    });
+    db.close();
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          staleAfterMs: 1,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "stale_projection",
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("keeps old active entries when the active segment has a fresh projection timestamp", async () => {
+    const fixture = createCompatibleSessionMemoryFixture();
+    const db = new DatabaseSync(fixture.dbPath);
+    insertActiveSessionMemoryEntry(db, {
+      sessionUpdatedAt: "2999-01-01T00:00:00.000Z",
+      segmentUpdatedAt: "2999-01-01T00:00:00.000Z",
+      entryUpdatedAt: "2000-01-01T00:00:00.000Z",
+    });
+    db.close();
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          staleAfterMs: 1,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        source: "session_memory_overlay",
+        entries: [
+          {
+            entryId: "entry-1",
+            updatedAt: "2000-01-01T00:00:00.000Z",
+          },
+        ],
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("skips active entries when the lcm provenance DB schema is incompatible", async () => {
     const fixture = createCompatibleSessionMemoryFixture();
     const lcmFixture = createLcmFixture({ compatibleSchema: false });
@@ -613,7 +686,7 @@ describe("session-memory read-only overlay boundary", () => {
             kind: "decision",
             priority: 10,
             body: "Keep session-memory read-only until assembler wiring is separately approved.",
-            updatedAt: "2026-06-06T08:04:00.000Z",
+            updatedAt: "2999-01-01T00:00:00.000Z",
             sourceRefs: [
               { type: "lcm_summary", summaryId: "sum_example" },
               { type: "focus_brief", briefId: "focus_example" },
@@ -817,21 +890,27 @@ function insertActiveSessionMemoryEntry(
   options?: {
     body?: string;
     sourceRefsJson?: string;
+    sessionUpdatedAt?: string;
+    segmentUpdatedAt?: string;
+    entryUpdatedAt?: string;
   },
 ): void {
+  const sessionUpdatedAt = options?.sessionUpdatedAt ?? "2999-01-01T00:00:00.000Z";
+  const segmentUpdatedAt = options?.segmentUpdatedAt ?? "2999-01-01T00:00:00.000Z";
+  const entryUpdatedAt = options?.entryUpdatedAt ?? "2999-01-01T00:00:00.000Z";
   db.exec(`
     INSERT INTO sessions (
       session_id, conversation_id, session_key, status, title, started_at, ended_at, created_at, updated_at, metadata_json
     ) VALUES (
       'session-active', 123, 'agent:main:test', 'active', NULL, '2026-06-06T08:00:00.000Z', NULL,
-      '2026-06-06T08:00:00.000Z', '2026-06-06T08:05:00.000Z', NULL
+      '2026-06-06T08:00:00.000Z', '${sessionUpdatedAt}', NULL
     );
     INSERT INTO segments (
       segment_id, session_id, seq, status, start_ref_json, end_ref_json, token_estimate, entry_count,
       opened_at, closed_at, created_at, updated_at
     ) VALUES (
       'segment-active', 'session-active', 1, 'active', NULL, NULL, 42, 1,
-      '2026-06-06T08:00:00.000Z', NULL, '2026-06-06T08:00:00.000Z', '2026-06-06T08:05:00.000Z'
+      '2026-06-06T08:00:00.000Z', NULL, '2026-06-06T08:00:00.000Z', '${segmentUpdatedAt}'
     );
   `);
   db.prepare(
@@ -840,11 +919,12 @@ function insertActiveSessionMemoryEntry(
       origin_entry_id, superseded_by_entry_id, created_at, updated_at, settled_at
     ) VALUES (
       'entry-1', 'session-active', 'segment-active', 'decision', 'active', 0.9, 10, NULL,
-      ?, ?, NULL, NULL, '2026-06-06T08:03:00.000Z', '2026-06-06T08:04:00.000Z', NULL
+      ?, ?, NULL, NULL, '2026-06-06T08:03:00.000Z', ?, NULL
     )`,
   ).run(
     options?.body ?? "Keep session-memory read-only until assembler wiring is separately approved.",
     options?.sourceRefsJson ?? "[]",
+    entryUpdatedAt,
   );
 }
 
