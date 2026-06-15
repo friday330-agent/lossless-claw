@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -431,5 +431,93 @@ describe("session-memory writer", () => {
       status: "refused",
       reason: "real_db_refused",
     });
+  });
+
+  it("writes to a real DB path only with explicit Gate 8 approval", () => {
+    const realDir = join(process.cwd(), ".session-memory-writer-real");
+    const realDbPath = join(realDir, "session-memory.db");
+    rmSync(realDir, { recursive: true, force: true });
+    mkdirSync(realDir, { recursive: true });
+    try {
+      const config = resolveLcmConfig(
+        {},
+        {
+          sessionMemoryOverlay: {
+            dbPath: realDbPath,
+          },
+        },
+      );
+      const dryRun = buildSessionMemorySchemaMaintenanceText({
+        config,
+        command: {
+          action: "apply",
+          execute: false,
+          allowRealDb: true,
+        },
+      });
+      const confirmation = dryRun.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+      if (!confirmation) {
+        throw new Error("expected real DB schema confirmation token");
+      }
+      const created = buildSessionMemorySchemaMaintenanceText({
+        config,
+        command: {
+          action: "apply",
+          execute: true,
+          allowRealDb: true,
+          confirm: confirmation,
+        },
+      });
+      expect(created).toContain("status: created");
+
+      const refused = writeSessionMemorySeedPacket({
+        dbPath: realDbPath,
+        lcmDbPath: join(realDir, "missing-lcm.db"),
+        packet: basePacket(),
+      });
+      expect(refused).toEqual({
+        ok: false,
+        status: "refused",
+        reason: "real_db_refused",
+      });
+
+      const written = writeSessionMemorySeedPacket({
+        dbPath: realDbPath,
+        lcmDbPath: join(realDir, "missing-lcm.db"),
+        allowRealDb: true,
+        now: new Date("2026-06-15T17:30:00.000Z"),
+        packet: basePacket({
+          session: {
+            sessionId: "session-gate8",
+            conversationId: 123,
+            sessionKey: "agent:main:test",
+          },
+          segment: {
+            segmentId: "segment-gate8",
+            seq: 1,
+          },
+          entries: [
+            {
+              entryId: "entry-gate8-seed",
+              kind: "fact",
+              confidence: 0.9,
+              body: "Gate 8 allows an explicitly approved manual seed write to the real DB path.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+            },
+          ],
+        }),
+      });
+      expect(written).toMatchObject({
+        ok: true,
+        status: "written",
+        sessionId: "session-gate8",
+        segmentId: "segment-gate8",
+        entryCount: 1,
+        linkCount: 0,
+      });
+      expect(countRows(realDbPath, "entries")).toBe(1);
+    } finally {
+      rmSync(realDir, { recursive: true, force: true });
+    }
   });
 });

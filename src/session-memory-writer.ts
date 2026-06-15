@@ -114,9 +114,10 @@ export function writeSessionMemorySeedPacket(params: {
   dbPath: string;
   lcmDbPath: string;
   packet: SessionMemorySeedPacket;
+  allowRealDb?: boolean;
   now?: Date;
 }): SessionMemoryWriteResult {
-  if (!isTempPath(params.dbPath)) {
+  if (!params.allowRealDb && !isTempPath(params.dbPath)) {
     return { ok: false, status: "refused", reason: "real_db_refused" };
   }
   if (!existsSync(params.dbPath)) {
