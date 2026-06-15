@@ -20,6 +20,36 @@ const REQUIRED_OVERLAY_TABLES = [
   "carry_forward",
   "links",
 ];
+const REQUIRED_OVERLAY_TABLE_COLUMNS = {
+  schema_migrations: ["migration_id", "schema_version", "applied_at", "checksum", "description"],
+  sessions: ["session_id", "conversation_id", "session_key", "status", "started_at", "updated_at"],
+  segments: ["segment_id", "session_id", "seq", "status", "opened_at", "updated_at"],
+  entries: [
+    "entry_id",
+    "session_id",
+    "segment_id",
+    "kind",
+    "status",
+    "confidence",
+    "priority",
+    "body",
+    "source_refs_json",
+    "origin_entry_id",
+    "superseded_by_entry_id",
+    "updated_at",
+  ],
+  checkpoints: [
+    "checkpoint_id",
+    "session_id",
+    "from_segment_id",
+    "to_segment_id",
+    "reason",
+    "trigger_snapshot_json",
+    "created_at",
+  ],
+  carry_forward: ["carry_id", "checkpoint_id", "from_entry_id", "to_entry_id", "priority", "reason", "created_at"],
+  links: ["link_id", "src_type", "src_id", "relation", "dst_type", "dst_id", "confidence", "source_refs_json", "created_at"],
+};
 const REQUIRED_OVERLAY_INDEXES = [
   { tableName: "sessions", columns: ["status", "updated_at"] },
   { tableName: "segments", columns: ["session_id", "status", "seq"] },
@@ -33,10 +63,13 @@ const REQUIRED_OVERLAY_UNIQUE_CONSTRAINTS = [
   { tableName: "links", columns: ["src_type", "src_id", "relation", "dst_type", "dst_id"] },
 ];
 const REQUIRED_LCM_TABLE_COLUMNS = {
-  conversations: ["conversation_id", "session_key"],
-  summaries: ["summary_id"],
-  messages: ["conversation_id", "seq"],
-  focus_briefs: ["brief_id"],
+  conversations: ["conversation_id", "session_id", "session_key"],
+  messages: ["message_id", "conversation_id", "seq"],
+  summaries: ["summary_id", "conversation_id"],
+  context_items: ["conversation_id", "ordinal"],
+  summary_messages: ["summary_id", "message_id"],
+  focus_briefs: ["brief_id", "conversation_id", "session_key"],
+  focus_brief_sources: ["brief_id", "summary_id"],
 };
 
 const REQUIRED_FIELDS = [
@@ -395,6 +428,16 @@ function checkSessionMemorySchemaCompatibility(db: DatabaseSync): SessionMemoryS
     }
   }
 
+  for (const [tableName, columns] of Object.entries(REQUIRED_OVERLAY_TABLE_COLUMNS)) {
+    if (!hasRequiredColumns(db, tableName, columns)) {
+      return {
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "schema_missing",
+      };
+    }
+  }
+
   const pragmaUserVersion = db.prepare("PRAGMA user_version").get() as { user_version?: unknown } | undefined;
   const userVersion = Number(pragmaUserVersion?.user_version ?? 0);
   if (userVersion < SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION) {
@@ -445,6 +488,15 @@ function checkSessionMemorySchemaCompatibility(db: DatabaseSync): SessionMemoryS
   }
 
   return { ok: true };
+}
+
+function hasRequiredColumns(db: DatabaseSync, tableName: string, columns: string[]): boolean {
+  const tableColumns = new Set(
+    db.prepare(`PRAGMA table_info(${quoteSqliteIdentifier(tableName)})`).all().map((row) => {
+      return String((row as { name: unknown }).name);
+    }),
+  );
+  return columns.every((column) => tableColumns.has(column));
 }
 
 function hasIndexWithColumns(

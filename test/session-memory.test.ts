@@ -382,6 +382,52 @@ describe("session-memory read-only overlay boundary", () => {
     }
   });
 
+  it("skips fixture DBs with missing required columns", async () => {
+    const cases = [
+      {
+        name: "sessions.updated_at",
+        fixture: createCompatibleSessionMemoryFixture({
+          includeIndexes: false,
+          omitColumns: { sessions: ["updated_at"] },
+        }),
+      },
+      {
+        name: "entries.body",
+        fixture: createCompatibleSessionMemoryFixture({ omitColumns: { entries: ["body"] } }),
+      },
+      {
+        name: "schema_migrations.schema_version",
+        fixture: createCompatibleSessionMemoryFixture({ omitColumns: { schema_migrations: ["schema_version"] } }),
+      },
+    ];
+
+    try {
+      for (const { name, fixture } of cases) {
+        const result = await resolveSessionMemoryOverlay({
+          config: {
+            ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+            enabled: true,
+            dbPath: fixture.dbPath,
+          },
+          request: {
+            conversationId: 123,
+            sessionKey: "agent:main:test",
+          },
+        });
+
+        expect(result, name).toEqual({
+          ok: false,
+          source: "session_memory_overlay",
+          reason: "schema_missing",
+        });
+      }
+    } finally {
+      for (const { fixture } of cases) {
+        fixture.cleanup();
+      }
+    }
+  });
+
   it("skips fixture DBs with missing required unique constraints", async () => {
     const fixture = createCompatibleSessionMemoryFixture({ includeUniqueConstraints: false });
 
@@ -538,6 +584,117 @@ describe("session-memory read-only overlay boundary", () => {
     } finally {
       fixture.cleanup();
       lcmFixture.cleanup();
+    }
+  });
+
+  it("skips lcm-backed entries when required lcm anchor tables are missing", async () => {
+    const fixture = createCompatibleSessionMemoryFixture();
+    const lcmFixture = createLcmFixture({ summaries: ["sum_example"], omitTables: ["context_items"] });
+    const db = new DatabaseSync(fixture.dbPath);
+    insertActiveSessionMemoryEntry(db, {
+      sourceRefsJson: '[{"type":"lcm_summary","summary_id":"sum_example"}]',
+    });
+    db.close();
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          lcmDbPath: lcmFixture.dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "lcm_schema_incompatible",
+      });
+    } finally {
+      fixture.cleanup();
+      lcmFixture.cleanup();
+    }
+  });
+
+  it("skips lcm-backed entries when required lcm anchor columns are missing", async () => {
+    const fixture = createCompatibleSessionMemoryFixture();
+    const lcmFixture = createLcmFixture({
+      focusBriefs: ["focus_example"],
+      omitColumns: { focus_brief_sources: ["summary_id"] },
+    });
+    const db = new DatabaseSync(fixture.dbPath);
+    insertActiveSessionMemoryEntry(db, {
+      sourceRefsJson: '[{"type":"focus_brief","brief_id":"focus_example"}]',
+    });
+    db.close();
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          lcmDbPath: lcmFixture.dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "lcm_schema_incompatible",
+      });
+    } finally {
+      fixture.cleanup();
+      lcmFixture.cleanup();
+    }
+  });
+
+  it("keeps local-only source refs independent from lcm DB availability", async () => {
+    const fixture = createCompatibleSessionMemoryFixture();
+    const db = new DatabaseSync(fixture.dbPath);
+    insertActiveSessionMemoryEntry(db, {
+      sourceRefsJson:
+        '[{"type":"workspace_file","path":"Friday-memory/CURRENT.md","line":1},{"type":"checkpoint","checkpoint_id":"checkpoint-1"}]',
+    });
+    db.close();
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        source: "session_memory_overlay",
+        entries: [
+          {
+            sourceRefs: [
+              { type: "workspace_file", path: "Friday-memory/CURRENT.md", line: 1 },
+              { type: "checkpoint", checkpointId: "checkpoint-1" },
+            ],
+          },
+        ],
+      });
+    } finally {
+      fixture.cleanup();
     }
   });
 
@@ -933,20 +1090,27 @@ function createCompatibleSessionMemoryFixture(options?: {
   migrationVersion?: number;
   includeIndexes?: boolean;
   includeUniqueConstraints?: boolean;
+  omitColumns?: Record<string, string[]>;
 }): { tempDir: string; dbPath: string; cleanup: () => void } {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-compatible-"));
   const dbPath = join(tempDir, "session-memory.db");
   const userVersion = options?.userVersion ?? 1;
   const migrationVersion = options?.migrationVersion ?? 1;
+  const shouldIncludeColumn = (tableName: string, columnName: string): boolean => {
+    return !(options?.omitColumns?.[tableName] ?? []).includes(columnName);
+  };
+  const columnLine = (tableName: string, columnName: string, ddl: string): string => {
+    return shouldIncludeColumn(tableName, columnName) ? `${ddl},` : "";
+  };
   const db = new DatabaseSync(dbPath);
   db.exec(`
     PRAGMA user_version = ${userVersion};
     CREATE TABLE schema_migrations (
-      migration_id TEXT PRIMARY KEY,
-      schema_version INTEGER NOT NULL,
-      applied_at TEXT NOT NULL,
-      checksum TEXT NOT NULL,
-      description TEXT NOT NULL
+      ${columnLine("schema_migrations", "migration_id", "migration_id TEXT PRIMARY KEY")}
+      ${columnLine("schema_migrations", "schema_version", "schema_version INTEGER NOT NULL")}
+      ${columnLine("schema_migrations", "applied_at", "applied_at TEXT NOT NULL")}
+      ${columnLine("schema_migrations", "checksum", "checksum TEXT NOT NULL")}
+      ${shouldIncludeColumn("schema_migrations", "description") ? "description TEXT NOT NULL" : "fixture_tail TEXT NULL"}
     );
     CREATE TABLE sessions (
       session_id TEXT PRIMARY KEY,
@@ -957,7 +1121,7 @@ function createCompatibleSessionMemoryFixture(options?: {
       started_at TEXT NOT NULL,
       ended_at TEXT NULL,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
+      ${columnLine("sessions", "updated_at", "updated_at TEXT NOT NULL")}
       metadata_json TEXT NULL
     );
     CREATE TABLE segments (
@@ -983,7 +1147,7 @@ function createCompatibleSessionMemoryFixture(options?: {
       confidence REAL NOT NULL,
       priority INTEGER NOT NULL DEFAULT 0,
       title TEXT NULL,
-      body TEXT NOT NULL,
+      ${columnLine("entries", "body", "body TEXT NOT NULL")}
       source_refs_json TEXT NULL,
       origin_entry_id TEXT NULL,
       superseded_by_entry_id TEXT NULL,
@@ -1021,12 +1185,21 @@ function createCompatibleSessionMemoryFixture(options?: {
       source_refs_json TEXT NULL,
       created_at TEXT NOT NULL
     );
-    INSERT INTO schema_migrations (
-      migration_id, schema_version, applied_at, checksum, description
-    ) VALUES (
-      'fixture-schema', ${migrationVersion}, '2026-06-06T08:00:00.000Z', 'fixture', 'fixture schema'
-    );
   `);
+  const migrationColumns = [
+    ["migration_id", "fixture-schema"],
+    ["schema_version", migrationVersion],
+    ["applied_at", "2026-06-06T08:00:00.000Z"],
+    ["checksum", "fixture"],
+    ["description", "fixture schema"],
+  ].filter(([column]) => shouldIncludeColumn("schema_migrations", String(column)));
+  db
+    .prepare(
+      `INSERT INTO schema_migrations (${migrationColumns.map(([column]) => column).join(", ")}) VALUES (${migrationColumns
+        .map(() => "?")
+        .join(", ")})`,
+    )
+    .run(...migrationColumns.map(([, value]) => value));
   if (options?.includeIndexes !== false) {
     db.exec(`
       CREATE INDEX sessions_status_updated_at_idx ON sessions (status, updated_at);
@@ -1057,10 +1230,16 @@ function createLcmFixture(options?: {
   summaries?: string[];
   focusBriefs?: string[];
   messages?: Array<{ conversationId: number; seq: number }>;
+  omitTables?: string[];
+  omitColumns?: Record<string, string[]>;
 }): { dbPath: string; cleanup: () => void } {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-lcm-"));
   const dbPath = join(tempDir, "lcm.db");
   const db = new DatabaseSync(dbPath);
+  const shouldIncludeTable = (tableName: string): boolean => !(options?.omitTables ?? []).includes(tableName);
+  const shouldIncludeColumn = (tableName: string, columnName: string): boolean => {
+    return !(options?.omitColumns?.[tableName] ?? []).includes(columnName);
+  };
   if (options?.compatibleSchema === false) {
     db.exec("CREATE TABLE unrelated (id TEXT PRIMARY KEY)");
   } else {
@@ -1104,6 +1283,27 @@ function createLcmFixture(options?: {
         large_content TEXT,
         UNIQUE (conversation_id, seq)
       );
+      ${
+        shouldIncludeTable("context_items")
+          ? `
+      CREATE TABLE context_items (
+        conversation_id INTEGER NOT NULL,
+        ordinal INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        PRIMARY KEY (conversation_id, ordinal)
+      );`
+          : ""
+      }
+      ${
+        shouldIncludeTable("summary_messages")
+          ? `
+      CREATE TABLE summary_messages (
+        summary_id TEXT NOT NULL,
+        message_id INTEGER NOT NULL,
+        PRIMARY KEY (summary_id, message_id)
+      );`
+          : ""
+      }
       CREATE TABLE focus_briefs (
         brief_id TEXT PRIMARY KEY,
         conversation_id INTEGER NOT NULL,
@@ -1124,6 +1324,16 @@ function createLcmFixture(options?: {
         updated_at TEXT NOT NULL DEFAULT (datetime('now')),
         superseded_at TEXT
       );
+      ${
+        shouldIncludeTable("focus_brief_sources")
+          ? `
+      CREATE TABLE focus_brief_sources (
+        brief_id TEXT NOT NULL,
+        ${shouldIncludeColumn("focus_brief_sources", "summary_id") ? "summary_id TEXT NOT NULL," : ""}
+        source_kind TEXT NOT NULL DEFAULT 'summary'
+      );`
+          : ""
+      }
       INSERT INTO conversations (
         conversation_id, session_id, session_key, title, created_at, updated_at, active
       ) VALUES (
