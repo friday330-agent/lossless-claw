@@ -18,6 +18,7 @@ export type SessionMemorySchemaCommand = {
   dbPath?: string;
   execute: boolean;
   confirm?: string;
+  allowRealDb: boolean;
 };
 
 type DbState =
@@ -322,12 +323,21 @@ function buildApplyExecuteText(config: LcmConfig, command: SessionMemorySchemaCo
       statLine("reason", "session-memory overlay is enabled"),
     ].join("\n");
   }
-  if (!command.dbPath || !isTempPath(dbPath)) {
+  const isExplicitTempTarget = Boolean(command.dbPath) && isTempPath(dbPath);
+  if (!isExplicitTempTarget && !command.allowRealDb) {
     return [
       "Session Memory Schema Maintenance",
       statLine("status", "refused"),
       statLine("target db", dbPath),
-      statLine("reason", "execute requires an explicit temp DB path in Gate 4"),
+      statLine("reason", "execute requires an explicit temp DB path or --allow-real-db"),
+    ].join("\n");
+  }
+  if (command.allowRealDb && command.dbPath && !isTempPath(dbPath)) {
+    return [
+      "Session Memory Schema Maintenance",
+      statLine("status", "refused"),
+      statLine("target db", dbPath),
+      statLine("reason", "--allow-real-db uses the resolved session-memory DB path; omit --db"),
     ].join("\n");
   }
 

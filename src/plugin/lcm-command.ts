@@ -255,6 +255,7 @@ function parseSessionMemorySchemaArgs(tokens: string[]):
   let dbPath: string | undefined;
   let execute = false;
   let confirm: string | undefined;
+  let allowRealDb = false;
   const rest = tokens.slice(2);
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index];
@@ -284,13 +285,17 @@ function parseSessionMemorySchemaArgs(tokens: string[]):
       index += 1;
       continue;
     }
+    if (token === "--allow-real-db") {
+      allowRealDb = true;
+      continue;
+    }
     return { ok: false, error: `Unknown session-memory schema option \`${token}\`.` };
   }
 
-  if (action !== "apply" && (execute || confirm)) {
+  if (action !== "apply" && (execute || confirm || allowRealDb)) {
     return {
       ok: false,
-      error: "`--execute` and `--confirm` are only valid for `session-memory schema apply`.",
+      error: "`--execute`, `--confirm`, and `--allow-real-db` are only valid for `session-memory schema apply`.",
     };
   }
 
@@ -301,6 +306,7 @@ function parseSessionMemorySchemaArgs(tokens: string[]):
       dbPath,
       execute: action === "apply" ? execute : false,
       confirm,
+      allowRealDb,
     },
   };
 }
@@ -806,7 +812,7 @@ function buildHelpText(error?: string): string {
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor apply`), "Repair broken summaries in the current conversation."),
       buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory schema plan|check|apply`),
-        "Plan or test the gated session-memory schema maintenance path.",
+        "Plan or run gated session-memory schema maintenance.",
       ),
     ]),
     "",
