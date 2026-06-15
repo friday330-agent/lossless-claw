@@ -410,7 +410,7 @@ type SessionMemorySchemaCompatibilityResult =
       reason: SessionMemoryOverlaySkipReason;
     };
 
-function checkSessionMemorySchemaCompatibility(db: DatabaseSync): SessionMemorySchemaCompatibilityResult {
+export function checkSessionMemorySchemaCompatibility(db: DatabaseSync): SessionMemorySchemaCompatibilityResult {
   const tableNames = new Set(
     db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")

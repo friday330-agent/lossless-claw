@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runLcmMigrations } from "../src/db/migration.js";
 import { getLcmDbFeatures } from "../src/db/features.js";
@@ -1819,6 +1820,90 @@ describe("lcm command", () => {
     expect(result.text).toContain("💾 Lossless Claw Backup");
     expect(result.text).toContain("status: failed");
     expect(result.text).toContain("reason: disk full");
+  });
+
+  it("keeps session-memory schema apply dry-run by default and only creates an explicit temp DB with confirmation", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDir = join(fixture.tempDir, "session-memory-maintenance");
+    const sessionMemoryDbPath = join(sessionMemoryDir, "session-memory.db");
+    const config = resolveLcmConfig({}, {
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const runCommand = async (args: string): Promise<{ text: string }> => {
+      return await command.handler!(createCommandContext(args)) as { text: string };
+    };
+
+    const dryRun = await runCommand(`session-memory schema apply --db ${sessionMemoryDbPath}`);
+    const confirmation = dryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+
+    expect(dryRun.text).toContain("Session Memory Schema Maintenance");
+    expect(dryRun.text).toContain("status: dry_run");
+    expect(dryRun.text).toContain(`target db: ${sessionMemoryDbPath}`);
+    expect(dryRun.text).toContain("db state: absent");
+    expect(dryRun.text).toContain("backup required: no");
+    expect(confirmation).toBeTruthy();
+    expect(existsSync(sessionMemoryDir)).toBe(false);
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+
+    const badConfirmation = await runCommand(
+      `session-memory schema apply --execute --confirm wrong --db ${sessionMemoryDbPath}`,
+    );
+    expect(badConfirmation.text).toContain("status: refused");
+    expect(badConfirmation.text).toContain("reason: confirmation token mismatch");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+
+    const executed = await runCommand(
+      `session-memory schema apply --execute --confirm ${confirmation} --db ${sessionMemoryDbPath}`,
+    );
+    expect(executed.text).toContain("status: created");
+    expect(executed.text).toContain("post-check: compatible");
+    expect(existsSync(sessionMemoryDbPath)).toBe(true);
+
+    const db = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      const userVersion = db.prepare("PRAGMA user_version").get() as { user_version?: unknown };
+      const migration = db
+        .prepare("SELECT schema_version FROM schema_migrations ORDER BY applied_at DESC LIMIT 1")
+        .get() as { schema_version?: unknown } | undefined;
+      expect(Number(userVersion.user_version)).toBe(1);
+      expect(Number(migration?.schema_version)).toBe(1);
+    } finally {
+      db.close();
+    }
+
+    const check = await runCommand(`session-memory schema check --db ${sessionMemoryDbPath}`);
+    expect(check.text).toContain("Session Memory Schema Check");
+    expect(check.text).toContain("status: compatible");
+  });
+
+  it("refuses session-memory schema execute against the resolved real DB path in Gate 4", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const realDbPath = resolveLcmConfig({}, {}).sessionMemoryOverlay.dbPath;
+    const config = resolveLcmConfig({}, {});
+    const command = createLcmCommand({ db: fixture.db, config });
+    const runCommand = async (args: string): Promise<{ text: string }> => {
+      return await command.handler!(createCommandContext(args)) as { text: string };
+    };
+
+    const dryRun = await runCommand("session-memory schema apply");
+    const confirmation = dryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(confirmation).toBeTruthy();
+
+    const result = await runCommand(`session-memory schema apply --execute --confirm ${confirmation}`);
+    expect(result.text).toContain("status: refused");
+    expect(result.text).toContain("reason: execute requires an explicit temp DB path in Gate 4");
+    expect(existsSync(realDbPath)).toBe(false);
+    expect(existsSync(`${realDbPath}-wal`)).toBe(false);
+    expect(existsSync(`${realDbPath}-shm`)).toBe(false);
   });
 
   it("rotates the current session and replaces the latest rotate backup", async () => {

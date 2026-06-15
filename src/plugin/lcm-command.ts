@@ -34,6 +34,10 @@ import {
 import { CompactionTelemetryStore } from "../store/compaction-telemetry-store.js";
 import { FocusBriefStore, hashFocusSourceContext } from "../store/focus-brief-store.js";
 import { assemblySourceTelemetry } from "../assembly-source-telemetry.js";
+import {
+  buildSessionMemorySchemaMaintenanceText,
+  type SessionMemorySchemaCommand,
+} from "../session-memory-maintenance.js";
 
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
@@ -83,6 +87,7 @@ type ParsedLcmCommand =
   | { kind: "unfocus" }
   | { kind: "doctor"; apply: boolean }
   | { kind: "doctor_cleaners"; apply: boolean; filterId?: DoctorCleanerId; vacuum: boolean }
+  | { kind: "session_memory_schema"; command: SessionMemorySchemaCommand }
   | { kind: "help"; error?: string };
 
 type RotateCommandEngine = {
@@ -230,6 +235,76 @@ function parseDoctorCleanerApplyArgs(tokens: string[]):
   return { ok: true, filterId, vacuum };
 }
 
+function parseSessionMemorySchemaArgs(tokens: string[]):
+  | { ok: true; command: SessionMemorySchemaCommand }
+  | { ok: false; error: string } {
+  if (tokens[0]?.toLowerCase() !== "schema") {
+    return {
+      ok: false,
+      error: `\`${VISIBLE_COMMAND} session-memory\` currently supports \`schema plan|check|apply\`.`,
+    };
+  }
+  const action = tokens[1]?.toLowerCase();
+  if (action !== "plan" && action !== "check" && action !== "apply") {
+    return {
+      ok: false,
+      error: `\`${VISIBLE_COMMAND} session-memory schema\` accepts \`plan\`, \`check\`, or \`apply\`.`,
+    };
+  }
+
+  let dbPath: string | undefined;
+  let execute = false;
+  let confirm: string | undefined;
+  const rest = tokens.slice(2);
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (token === "--db") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--db` requires a path." };
+      }
+      dbPath = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--execute") {
+      execute = true;
+      continue;
+    }
+    if (token === "--dry-run") {
+      execute = false;
+      continue;
+    }
+    if (token === "--confirm") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--confirm` requires a token." };
+      }
+      confirm = value;
+      index += 1;
+      continue;
+    }
+    return { ok: false, error: `Unknown session-memory schema option \`${token}\`.` };
+  }
+
+  if (action !== "apply" && (execute || confirm)) {
+    return {
+      ok: false,
+      error: "`--execute` and `--confirm` are only valid for `session-memory schema apply`.",
+    };
+  }
+
+  return {
+    ok: true,
+    command: {
+      action,
+      dbPath,
+      execute: action === "apply" ? execute : false,
+      confirm,
+    },
+  };
+}
+
 function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
   const raw = (rawArgs ?? "").trim();
   if (raw === "") {
@@ -292,12 +367,18 @@ function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
         error:
           `\`${VISIBLE_COMMAND} doctor\` accepts no arguments, \`clean\` for global high-confidence junk diagnostics, \`clean apply [filter-id] [vacuum]\` for cleanup, or \`apply\` for the scoped summary repair path.`,
       };
+    case "session-memory": {
+      const parsed = parseSessionMemorySchemaArgs(rest);
+      return parsed.ok
+        ? { kind: "session_memory_schema", command: parsed.command }
+        : { kind: "help", error: parsed.error };
+    }
     case "help":
       return { kind: "help" };
     default:
       return {
         kind: "help",
-        error: `Unknown subcommand \`${head}\`. Supported: status, focus, refocus, unfocus, backup, rotate, doctor, doctor clean, doctor apply, help.`,
+        error: `Unknown subcommand \`${head}\`. Supported: status, focus, refocus, unfocus, backup, rotate, doctor, doctor clean, doctor apply, session-memory schema, help.`,
       };
   }
 }
@@ -723,6 +804,10 @@ function buildHelpText(error?: string): string {
         "Delete approved high-confidence cleaner matches after creating a DB backup.",
       ),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor apply`), "Repair broken summaries in the current conversation."),
+      buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} session-memory schema plan|check|apply`),
+        "Plan or test the gated session-memory schema maintenance path.",
+      ),
     ]),
     "",
     buildSection("🧭 Notes", [
@@ -2444,6 +2529,13 @@ export function createLcmCommand(params: {
                 }),
               }
             : { text: await buildDoctorCleanersText({ db: await getDb() }) };
+        case "session_memory_schema":
+          return {
+            text: buildSessionMemorySchemaMaintenanceText({
+              config: params.config,
+              command: parsed.command,
+            }),
+          };
         case "help":
           return { text: buildHelpText(parsed.error) };
       }
@@ -2453,6 +2545,7 @@ export function createLcmCommand(params: {
 
 export const __testing = {
   parseLcmCommand,
+  parseSessionMemorySchemaArgs,
   detectDoctorMarker,
   getDoctorSummaryStats,
   getLcmStatusStats,
