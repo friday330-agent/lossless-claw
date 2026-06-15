@@ -10,7 +10,11 @@ import {
   renderSessionMemoryOverlay,
 } from "../src/session-memory.js";
 import { buildSessionMemorySchemaMaintenanceText } from "../src/session-memory-maintenance.js";
-import { type SessionMemorySeedPacket, writeSessionMemorySeedPacket } from "../src/session-memory-writer.js";
+import {
+  rejectSessionMemoryEntries,
+  type SessionMemorySeedPacket,
+  writeSessionMemorySeedPacket,
+} from "../src/session-memory-writer.js";
 
 function createSchemaFixture(): { tempDir: string; dbPath: string; cleanup: () => void } {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-writer-"));
@@ -285,6 +289,22 @@ describe("session-memory writer", () => {
   it("rejects invalid packet fields and source-ref shapes before writing rows", () => {
     const fixture = createSchemaFixture();
     try {
+      const missingConversationId = writeSessionMemorySeedPacket({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        packet: basePacket({
+          session: {
+            sessionId: "session-missing-conversation-id",
+            conversationId: undefined as never,
+          },
+        }),
+      });
+      expect(missingConversationId).toMatchObject({
+        ok: false,
+        reason: "invalid_packet",
+        detail: "session.conversationId is required",
+      });
+
       const invalidKind = writeSessionMemorySeedPacket({
         dbPath: fixture.dbPath,
         lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
@@ -335,6 +355,68 @@ describe("session-memory writer", () => {
       });
       expect(invalidSourceRef).toMatchObject({ ok: false, reason: "invalid_packet" });
       expect(countRows(fixture.dbPath, "entries")).toBe(0);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("marks active entries rejected through an explicit maintenance writer action", () => {
+    const fixture = createSchemaFixture();
+    try {
+      const written = writeSessionMemorySeedPacket({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        packet: basePacket({
+          entries: [
+            {
+              entryId: "entry-to-reject",
+              kind: "fact",
+              confidence: 0.9,
+              body: "This reviewed seed entry will be rejected by a maintenance action.",
+            },
+          ],
+        }),
+      });
+      expect(written).toMatchObject({ ok: true, entryCount: 1 });
+
+      const realPathRefusal = rejectSessionMemoryEntries({
+        dbPath: join(process.cwd(), ".session-memory-writer-real", "session-memory.db"),
+        entryIds: ["entry-to-reject"],
+      });
+      expect(realPathRefusal).toEqual({
+        ok: false,
+        status: "refused",
+        reason: "real_db_refused",
+      });
+
+      const rejected = rejectSessionMemoryEntries({
+        dbPath: fixture.dbPath,
+        entryIds: ["entry-to-reject"],
+        now: new Date("2026-06-15T18:10:00.000Z"),
+      });
+      expect(rejected).toEqual({
+        ok: true,
+        status: "rejected",
+        entryCount: 1,
+        sessionCount: 1,
+        segmentCount: 1,
+        updatedAt: "2026-06-15T18:10:00.000Z",
+      });
+
+      const db = new DatabaseSync(fixture.dbPath, { readOnly: true });
+      try {
+        expect(
+          (db.prepare("SELECT status, settled_at FROM entries WHERE entry_id = ?").get("entry-to-reject") as {
+            status: string;
+            settled_at: string;
+          }),
+        ).toEqual({
+          status: "rejected",
+          settled_at: "2026-06-15T18:10:00.000Z",
+        });
+      } finally {
+        db.close();
+      }
     } finally {
       fixture.cleanup();
     }

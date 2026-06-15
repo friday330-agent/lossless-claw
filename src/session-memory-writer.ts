@@ -110,6 +110,23 @@ export type SessionMemoryWriteResult =
       schemaReason?: SessionMemoryOverlaySkipReason;
     };
 
+export type SessionMemoryRejectEntriesResult =
+  | {
+      ok: true;
+      status: "rejected";
+      entryCount: number;
+      sessionCount: number;
+      segmentCount: number;
+      updatedAt: string;
+    }
+  | {
+      ok: false;
+      status: "refused" | "failed";
+      reason: "real_db_refused" | "db_absent" | "schema_incompatible" | "invalid_packet" | "write_failed";
+      detail?: string;
+      schemaReason?: SessionMemoryOverlaySkipReason;
+    };
+
 export function writeSessionMemorySeedPacket(params: {
   dbPath: string;
   lcmDbPath: string;
@@ -213,11 +230,117 @@ export function writeSessionMemorySeedPacket(params: {
   }
 }
 
+export function rejectSessionMemoryEntries(params: {
+  dbPath: string;
+  entryIds: string[];
+  allowRealDb?: boolean;
+  now?: Date;
+}): SessionMemoryRejectEntriesResult {
+  if (!params.allowRealDb && !isTempPath(params.dbPath)) {
+    return { ok: false, status: "refused", reason: "real_db_refused" };
+  }
+  if (!existsSync(params.dbPath)) {
+    return { ok: false, status: "refused", reason: "db_absent" };
+  }
+  const entryIds = Array.from(new Set(params.entryIds));
+  if (entryIds.length === 0 || entryIds.some((entryId) => !isNonEmptyString(entryId))) {
+    return { ok: false, status: "refused", reason: "invalid_packet", detail: "entryIds must be non-empty strings" };
+  }
+
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(params.dbPath);
+    db.exec("PRAGMA foreign_keys = ON");
+    const compatibility = checkSessionMemorySchemaCompatibility(db);
+    if (!compatibility.ok) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "schema_incompatible",
+        schemaReason: compatibility.reason,
+      };
+    }
+
+    const placeholders = entryIds.map(() => "?").join(", ");
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT session_id, segment_id
+         FROM entries
+         WHERE entry_id IN (${placeholders})
+           AND status = 'active'`,
+      )
+      .all(...entryIds) as Array<{ session_id: unknown; segment_id: unknown }>;
+    if (rows.length !== entryIds.length) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "invalid_packet",
+        detail: "all entryIds must refer to active entries",
+      };
+    }
+
+    const sessionIds = Array.from(new Set(rows.map((row) => String(row.session_id))));
+    const segmentIds = Array.from(new Set(rows.map((row) => String(row.segment_id))));
+    const updatedAt = (params.now ?? new Date()).toISOString();
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      db
+        .prepare(
+          `UPDATE entries
+           SET status = 'rejected', updated_at = ?, settled_at = ?
+           WHERE entry_id IN (${placeholders})
+             AND status = 'active'`,
+        )
+        .run(updatedAt, updatedAt, ...entryIds);
+      updateRowsByIds(db, "segments", "segment_id", segmentIds, updatedAt);
+      updateRowsByIds(db, "sessions", "session_id", sessionIds, updatedAt);
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original write failure.
+      }
+      return {
+        ok: false,
+        status: "failed",
+        reason: "write_failed",
+        detail: error instanceof Error ? error.message : "session-memory reject entries failed",
+      };
+    }
+
+    return {
+      ok: true,
+      status: "rejected",
+      entryCount: entryIds.length,
+      sessionCount: sessionIds.length,
+      segmentCount: segmentIds.length,
+      updatedAt,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: "failed",
+      reason: "write_failed",
+      detail: error instanceof Error ? error.message : "session-memory reject entries failed",
+    };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Best-effort cleanup after a bounded maintenance write.
+    }
+  }
+}
+
 function validateSeedPacketShape(packet: SessionMemorySeedPacket):
   | { ok: true }
   | { ok: false; result: Extract<SessionMemoryWriteResult, { ok: false }> } {
   if (!isNonEmptyString(packet.session?.sessionId)) {
     return invalidPacket("session.sessionId is required");
+  }
+  if (!Number.isInteger(packet.session.conversationId)) {
+    return invalidPacket("session.conversationId is required");
   }
   if (!isNonEmptyString(packet.segment?.segmentId)) {
     return invalidPacket("segment.segmentId is required");
@@ -466,6 +589,20 @@ function insertLink(db: DatabaseSync, link: NonNullable<SessionMemorySeedPacket[
       serializeSourceRefs(link.sourceRefs ?? []),
       updatedAt,
     );
+}
+
+function updateRowsByIds(
+  db: DatabaseSync,
+  tableName: "sessions" | "segments",
+  idColumn: "session_id" | "segment_id",
+  ids: string[],
+  updatedAt: string,
+): void {
+  if (ids.length === 0) {
+    return;
+  }
+  const placeholders = ids.map(() => "?").join(", ");
+  db.prepare(`UPDATE ${tableName} SET updated_at = ? WHERE ${idColumn} IN (${placeholders})`).run(updatedAt, ...ids);
 }
 
 function serializeSourceRefs(refs: SessionMemorySourceRef[]): string {
