@@ -374,10 +374,16 @@ describe("session-memory writer", () => {
               confidence: 0.9,
               body: "This reviewed seed entry will be rejected by a maintenance action.",
             },
+            {
+              entryId: "entry-to-reject-second",
+              kind: "constraint",
+              confidence: 0.9,
+              body: "This second entry shares the same segment and must reject in the same action.",
+            },
           ],
         }),
       });
-      expect(written).toMatchObject({ ok: true, entryCount: 1 });
+      expect(written).toMatchObject({ ok: true, entryCount: 2 });
 
       const realPathRefusal = rejectSessionMemoryEntries({
         dbPath: join(process.cwd(), ".session-memory-writer-real", "session-memory.db"),
@@ -391,13 +397,13 @@ describe("session-memory writer", () => {
 
       const rejected = rejectSessionMemoryEntries({
         dbPath: fixture.dbPath,
-        entryIds: ["entry-to-reject"],
+        entryIds: ["entry-to-reject", "entry-to-reject-second"],
         now: new Date("2026-06-15T18:10:00.000Z"),
       });
       expect(rejected).toEqual({
         ok: true,
         status: "rejected",
-        entryCount: 1,
+        entryCount: 2,
         sessionCount: 1,
         segmentCount: 1,
         updatedAt: "2026-06-15T18:10:00.000Z",
@@ -407,6 +413,15 @@ describe("session-memory writer", () => {
       try {
         expect(
           (db.prepare("SELECT status, settled_at FROM entries WHERE entry_id = ?").get("entry-to-reject") as {
+            status: string;
+            settled_at: string;
+          }),
+        ).toEqual({
+          status: "rejected",
+          settled_at: "2026-06-15T18:10:00.000Z",
+        });
+        expect(
+          (db.prepare("SELECT status, settled_at FROM entries WHERE entry_id = ?").get("entry-to-reject-second") as {
             status: string;
             settled_at: string;
           }),

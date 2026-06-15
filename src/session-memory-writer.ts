@@ -262,6 +262,24 @@ export function rejectSessionMemoryEntries(params: {
     }
 
     const placeholders = entryIds.map(() => "?").join(", ");
+    const activeEntryCount = (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS count
+           FROM entries
+           WHERE entry_id IN (${placeholders})
+             AND status = 'active'`,
+        )
+        .get(...entryIds) as { count: unknown }
+    ).count;
+    if (Number(activeEntryCount) !== entryIds.length) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "invalid_packet",
+        detail: "all entryIds must refer to active entries",
+      };
+    }
     const rows = db
       .prepare(
         `SELECT DISTINCT session_id, segment_id
@@ -270,14 +288,6 @@ export function rejectSessionMemoryEntries(params: {
            AND status = 'active'`,
       )
       .all(...entryIds) as Array<{ session_id: unknown; segment_id: unknown }>;
-    if (rows.length !== entryIds.length) {
-      return {
-        ok: false,
-        status: "refused",
-        reason: "invalid_packet",
-        detail: "all entryIds must refer to active entries",
-      };
-    }
 
     const sessionIds = Array.from(new Set(rows.map((row) => String(row.session_id))));
     const segmentIds = Array.from(new Set(rows.map((row) => String(row.segment_id))));
