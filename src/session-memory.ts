@@ -614,7 +614,7 @@ function readActiveSessionMemoryEntries(
       };
     }
     const body = String(row.body);
-    if (containsRawTranscript(body)) {
+    if (isRawTranscriptShapedSessionMemoryBody(body)) {
       return {
         ok: false,
         source: "session_memory_overlay",
@@ -679,12 +679,12 @@ function parseSessionMemoryTimestamp(value: unknown): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function validateLcmSourceRefs(
-  entries: SessionMemoryOverlayEntry[],
-  config: SessionMemoryOverlayConfig,
+export function validateSessionMemorySourceRefs(
+  refs: SessionMemorySourceRef[],
+  config: Pick<SessionMemoryOverlayConfig, "lcmDbPath">,
 ): SessionMemorySchemaCompatibilityResult {
-  const refs = entries.flatMap((entry) => entry.sourceRefs).filter(isLcmBackedSourceRef);
-  if (refs.length === 0) {
+  const lcmBackedRefs = refs.filter(isLcmBackedSourceRef);
+  if (lcmBackedRefs.length === 0) {
     return { ok: true };
   }
   if (!existsSync(config.lcmDbPath)) {
@@ -705,7 +705,7 @@ function validateLcmSourceRefs(
         reason: "lcm_schema_incompatible",
       };
     }
-    for (const ref of refs) {
+    for (const ref of lcmBackedRefs) {
       if (!sourceRefExists(lcmDb, ref)) {
         return {
           ok: false,
@@ -728,6 +728,16 @@ function validateLcmSourceRefs(
       // Best-effort cleanup only; callers already get a fail-closed result.
     }
   }
+}
+
+function validateLcmSourceRefs(
+  entries: SessionMemoryOverlayEntry[],
+  config: Pick<SessionMemoryOverlayConfig, "lcmDbPath">,
+): SessionMemorySchemaCompatibilityResult {
+  return validateSessionMemorySourceRefs(
+    entries.flatMap((entry) => entry.sourceRefs),
+    config,
+  );
 }
 
 type LcmBackedSourceRef = Extract<
@@ -783,7 +793,7 @@ function sourceRefExists(db: DatabaseSync, ref: LcmBackedSourceRef): boolean {
   return startExists && endExists;
 }
 
-function containsRawTranscript(body: string): boolean {
+export function isRawTranscriptShapedSessionMemoryBody(body: string): boolean {
   const roleLineCount = body
     .split(/\r?\n/)
     .filter((line) => /^(system|user|assistant|tool)\s*:/i.test(line.trim())).length;
