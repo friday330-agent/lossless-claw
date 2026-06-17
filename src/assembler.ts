@@ -217,6 +217,8 @@ export interface AssembleContextInput {
    * Default: false (full v4.1 behavior).
    */
   stubLargeToolPayloads?: boolean;
+  /** Session-local volatile override for read-only session-memory overlay mode. */
+  sessionMemoryOverlayConfig?: Partial<SessionMemoryOverlayConfig>;
 }
 
 export interface AssembleContextResult {
@@ -1372,6 +1374,7 @@ export class ContextAssembler {
       focusResolved,
       freshTailCount,
       input.freshTailMaxTokens,
+      input.sessionMemoryOverlayConfig,
     );
     const resolved = sessionMemoryOverlay.resolved;
 
@@ -1693,10 +1696,12 @@ export class ContextAssembler {
     resolved: ResolvedItem[],
     freshTailCount: number,
     freshTailMaxTokens?: number,
+    sessionMemoryOverlayConfig?: Partial<SessionMemoryOverlayConfig>,
   ): Promise<{ resolved: ResolvedItem[]; telemetry: SessionMemoryOverlayTelemetry }> {
     const config: SessionMemoryOverlayConfig = {
       ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
       ...this.sessionMemoryOverlay?.config,
+      ...sessionMemoryOverlayConfig,
     };
     let sessionId: string | undefined;
     let sessionKey: string | undefined;
@@ -1712,7 +1717,7 @@ export class ContextAssembler {
       lookup: this.sessionMemoryOverlay?.lookup,
     });
     const renderResult = renderSessionMemoryOverlay(lookupResult, config);
-    const telemetry = buildSessionMemoryOverlayTelemetry(renderResult);
+    const telemetry = buildSessionMemoryOverlayTelemetry(renderResult, config);
     if (!renderResult.ok) {
       return { resolved, telemetry };
     }

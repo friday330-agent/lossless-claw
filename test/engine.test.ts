@@ -6273,6 +6273,159 @@ describe("LcmContextEngine.assemble canonical path", () => {
     expect(existsSync(config.sessionMemoryOverlay.dbPath)).toBe(false);
   });
 
+  it("enables read-only session-memory overlay through a session-local runtime override", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-session-memory-override-"));
+    tempDirs.push(tempDir);
+    const config = createTestConfig(join(tempDir, "lcm.db"));
+    config.sessionMemoryOverlay = {
+      ...config.sessionMemoryOverlay,
+      enabled: false,
+      dbPath: join(tempDir, "session-memory.db"),
+      lcmDbPath: config.databasePath,
+    };
+    const engine = createEngineWithConfig(config);
+    const sessionId = "session-memory-overlay-override";
+    const sessionKey = "agent:main:webchat:session-memory-overlay-override";
+
+    await engine.ingest({
+      sessionId,
+      sessionKey,
+      message: { role: "user", content: "persisted message one" } as AgentMessage,
+    });
+    const conversation = await engine.getConversationStore().getConversationBySessionKey(sessionKey);
+    expect(conversation).not.toBeNull();
+    createSessionMemoryOverlayFixture({
+      dbPath: config.sessionMemoryOverlay.dbPath,
+      conversationId: conversation!.conversationId,
+      body: "Session-local overlay memory is active.",
+    });
+
+    expect(engine.getSessionMemoryOverlayMode({ sessionId, sessionKey })).toMatchObject({
+      effectiveMode: "native",
+      overrideMode: undefined,
+    });
+    engine.setSessionMemoryOverlayMode({ sessionId, sessionKey, mode: "overlay-readonly" });
+    const assembled = await engine.assemble({
+      sessionId,
+      sessionKey,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+
+    expect(assembled.messages.map((message) => String(message.content)).join("\n")).toContain(
+      "Session-local overlay memory is active.",
+    );
+    expect(engine.getSessionMemoryOverlayMode({ sessionId, sessionKey })).toMatchObject({
+      effectiveMode: "overlay-readonly",
+      overrideMode: "overlay-readonly",
+    });
+    expect(config.sessionMemoryOverlay.enabled).toBe(false);
+  });
+
+  it("session-local native mode forces session-memory overlay off even when config enables it", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-session-memory-native-"));
+    tempDirs.push(tempDir);
+    const config = createTestConfig(join(tempDir, "lcm.db"));
+    config.sessionMemoryOverlay = {
+      ...config.sessionMemoryOverlay,
+      enabled: true,
+      dbPath: join(tempDir, "session-memory.db"),
+      lcmDbPath: config.databasePath,
+    };
+    const engine = createEngineWithConfig(config);
+    const sessionId = "session-memory-native-force-off";
+    const sessionKey = "agent:main:webchat:session-memory-native-force-off";
+
+    await engine.ingest({
+      sessionId,
+      sessionKey,
+      message: { role: "user", content: "persisted message one" } as AgentMessage,
+    });
+    const conversation = await engine.getConversationStore().getConversationBySessionKey(sessionKey);
+    expect(conversation).not.toBeNull();
+    createSessionMemoryOverlayFixture({
+      dbPath: config.sessionMemoryOverlay.dbPath,
+      conversationId: conversation!.conversationId,
+      body: "This overlay should be hidden by native mode.",
+    });
+
+    engine.setSessionMemoryOverlayMode({ sessionId, sessionKey, mode: "native" });
+    const assembled = await engine.assemble({
+      sessionId,
+      sessionKey,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+
+    const joined = assembled.messages.map((message) => String(message.content)).join("\n");
+    expect(joined).toContain("persisted message one");
+    expect(joined).not.toContain("This overlay should be hidden by native mode.");
+    expect(engine.getSessionMemoryOverlayMode({ sessionId, sessionKey })).toMatchObject({
+      effectiveMode: "native",
+      overrideMode: "native",
+    });
+  });
+
+  it("keeps the session-memory kill switch above overlay-readonly overrides", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-session-memory-kill-"));
+    tempDirs.push(tempDir);
+    const config = createTestConfig(join(tempDir, "lcm.db"));
+    config.sessionMemoryOverlay = {
+      ...config.sessionMemoryOverlay,
+      enabled: false,
+      killSwitchEnabled: true,
+      dbPath: join(tempDir, "session-memory.db"),
+      lcmDbPath: config.databasePath,
+    };
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    const engine = new LcmContextEngine(
+      createTestDeps(config, { log }),
+      createLcmDatabaseConnection(config.databasePath),
+    );
+    const sessionId = "session-memory-kill-switch";
+    const sessionKey = "agent:main:webchat:session-memory-kill-switch";
+
+    await engine.ingest({
+      sessionId,
+      sessionKey,
+      message: { role: "user", content: "persisted message one" } as AgentMessage,
+    });
+    const conversation = await engine.getConversationStore().getConversationBySessionKey(sessionKey);
+    expect(conversation).not.toBeNull();
+    createSessionMemoryOverlayFixture({
+      dbPath: config.sessionMemoryOverlay.dbPath,
+      conversationId: conversation!.conversationId,
+      body: "This overlay should be blocked by the kill switch.",
+    });
+
+    engine.setSessionMemoryOverlayMode({ sessionId, sessionKey, mode: "overlay-readonly" });
+    const assembled = await engine.assemble({
+      sessionId,
+      sessionKey,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+    const infoLog = log.info.mock.calls
+      .map((call) => String(call[0]))
+      .find((message) => message.includes("[lcm] assemble: done"));
+
+    expect(assembled.messages.map((message) => String(message.content)).join("\n")).not.toContain(
+      "This overlay should be blocked by the kill switch.",
+    );
+    expect(engine.getSessionMemoryOverlayMode({ sessionId, sessionKey })).toMatchObject({
+      effectiveMode: "native",
+      overrideMode: "overlay-readonly",
+      killSwitchEnabled: true,
+    });
+    expect(infoLog).toContain("sessionMemoryOverlaySkippedReason=kill_switch");
+    expect(infoLog).toContain("sessionMemoryOverlayMode=native");
+  });
+
   it("respects token budget in assembled output", async () => {
     const engine = createEngine();
     const sessionId = "session-budget";

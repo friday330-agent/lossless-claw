@@ -140,6 +140,8 @@ export type SessionMemoryOverlayConfig = {
   truncationEnabled: boolean;
 };
 
+export type SessionMemoryOverlayMode = "native" | "overlay-readonly";
+
 export const DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG: SessionMemoryOverlayConfig = {
   enabled: false,
   killSwitchEnabled: false,
@@ -192,6 +194,10 @@ export type SessionMemoryOverlayEntry = {
   version?: number;
 };
 
+// Contract boundary: Lossless consumes only the stable projection fields above
+// plus source refs and render/schema versions. Future writer-owned fields such
+// as title, confidence, review status, expiry, owner, evidence quality, or
+// replacement links should be additive and must not be required to render v1.
 export type SessionMemoryOverlayLookupResult =
   | {
       ok: true;
@@ -243,7 +249,15 @@ export type SessionMemoryOverlayTelemetry = {
   segmentId?: string;
   sourceRefsCount: number;
   projectionKey?: string;
+  effectiveMode: SessionMemoryOverlayMode;
+  renderVersion: string;
 };
+
+export function resolveSessionMemoryOverlayMode(
+  config: Pick<SessionMemoryOverlayConfig, "enabled" | "killSwitchEnabled">,
+): SessionMemoryOverlayMode {
+  return config.killSwitchEnabled || !config.enabled ? "native" : "overlay-readonly";
+}
 
 export async function resolveSessionMemoryOverlay(params: {
   config?: Partial<SessionMemoryOverlayConfig>;
@@ -337,7 +351,9 @@ export function renderSessionMemoryOverlay(
 
 export function buildSessionMemoryOverlayTelemetry(
   result: SessionMemoryOverlayRenderResult,
+  config: SessionMemoryOverlayConfig = DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
 ): SessionMemoryOverlayTelemetry {
+  const effectiveMode = result.ok ? "overlay-readonly" : resolveSessionMemoryOverlayMode(config);
   if (!result.ok) {
     return {
       surface: "session_memory",
@@ -350,6 +366,8 @@ export function buildSessionMemoryOverlayTelemetry(
       segmentId: undefined,
       sourceRefsCount: 0,
       projectionKey: undefined,
+      effectiveMode,
+      renderVersion: config.renderVersion,
     };
   }
 
@@ -364,6 +382,8 @@ export function buildSessionMemoryOverlayTelemetry(
     segmentId: result.segmentId,
     sourceRefsCount: result.sourceRefsCount,
     projectionKey: result.projectionKey,
+    effectiveMode,
+    renderVersion: config.renderVersion,
   };
 }
 

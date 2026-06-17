@@ -998,6 +998,8 @@ describe("session-memory read-only overlay boundary", () => {
       segmentId: "segment-active",
       sourceRefsCount: 1,
       projectionKey: rendered.projectionKey,
+      effectiveMode: "overlay-readonly",
+      renderVersion: "session_memory_overlay_v1",
     });
     expect(JSON.stringify(telemetry)).not.toContain("raw_only");
     expect(JSON.stringify(telemetry)).not.toContain("dag_summary");
@@ -1038,6 +1040,8 @@ describe("session-memory read-only overlay boundary", () => {
       segmentId: undefined,
       sourceRefsCount: 0,
       projectionKey: undefined,
+      effectiveMode: "native",
+      renderVersion: "session_memory_overlay_v1",
     });
   });
 });

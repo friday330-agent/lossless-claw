@@ -75,6 +75,7 @@ import { SummaryStore, type ContextItemRecord } from "./store/summary-store.js";
 import { createLcmSummarizeFromLegacyParams, LcmProviderAuthError } from "./summarize.js";
 import type { LcmDependencies, StartupSessionFileCandidate } from "./types.js";
 import { estimateTokens } from "./estimate-tokens.js";
+import type { SessionMemoryOverlayConfig, SessionMemoryOverlayMode } from "./session-memory.js";
 import { createLcmDatabaseBackup } from "./plugin/lcm-db-backup.js";
 import {
   DatabaseTransactionTimeoutError,
@@ -120,6 +121,17 @@ type PromptCacheSnapshot = {
   lastCacheTouchAt?: Date;
   provider?: string;
   model?: string;
+};
+
+export type SessionMemoryOverlaySessionStatus = {
+  sessionId?: string;
+  sessionKey?: string;
+  overrideMode?: SessionMemoryOverlayMode;
+  effectiveMode: SessionMemoryOverlayMode;
+  killSwitchEnabled: boolean;
+  renderVersion: string;
+  dbPath: string;
+  maxTokens: number;
 };
 type TranscriptRewriteReplacement = {
   entryId: string;
@@ -2832,6 +2844,7 @@ export class LcmContextEngine implements ContextEngine {
   private previousAssembledMessagesByConversation = new Map<number, AssemblePrefixSnapshot>();
   private recentBootstrapImportsByConversation = new Map<number, BootstrapImportObservation>();
   private oversizedAutoRotateCheckpointByQueueKey = new Map<string, number>();
+  private sessionMemoryOverlayModeBySession = new Map<string, SessionMemoryOverlayMode>();
   private largeFileTextSummarizerResolved = false;
   private largeFileTextSummarizer?: (prompt: string) => Promise<string | null>;
   private deps: LcmDependencies;
@@ -3159,6 +3172,71 @@ export class LcmContextEngine implements ContextEngine {
     const normalizedSessionKey = sessionKey?.trim();
     const normalizedSessionId = sessionId?.trim();
     return normalizedSessionKey || normalizedSessionId || "__lcm__";
+  }
+
+  private resolveSessionMemoryOverlayOverrideKey(params: {
+    sessionId?: string;
+    sessionKey?: string;
+  }): string {
+    return this.resolveSessionQueueKey(params.sessionId, params.sessionKey);
+  }
+
+  private resolveSessionMemoryOverlayEffectiveConfig(params: {
+    sessionId?: string;
+    sessionKey?: string;
+  }): SessionMemoryOverlayConfig {
+    const overrideMode = this.sessionMemoryOverlayModeBySession.get(
+      this.resolveSessionMemoryOverlayOverrideKey(params),
+    );
+    const enabled = overrideMode === "overlay-readonly"
+      ? true
+      : overrideMode === "native"
+        ? false
+        : this.config.sessionMemoryOverlay.enabled;
+    return {
+      ...this.config.sessionMemoryOverlay,
+      enabled: this.config.sessionMemoryOverlay.killSwitchEnabled ? false : enabled,
+    };
+  }
+
+  getSessionMemoryOverlayMode(params: {
+    sessionId?: string;
+    sessionKey?: string;
+  }): SessionMemoryOverlaySessionStatus {
+    const key = this.resolveSessionMemoryOverlayOverrideKey(params);
+    const overrideMode = this.sessionMemoryOverlayModeBySession.get(key);
+    const effectiveConfig = this.resolveSessionMemoryOverlayEffectiveConfig(params);
+    return {
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      overrideMode,
+      effectiveMode: effectiveConfig.enabled && !effectiveConfig.killSwitchEnabled
+        ? "overlay-readonly"
+        : "native",
+      killSwitchEnabled: effectiveConfig.killSwitchEnabled,
+      renderVersion: effectiveConfig.renderVersion,
+      dbPath: effectiveConfig.dbPath,
+      maxTokens: effectiveConfig.maxTokens,
+    };
+  }
+
+  setSessionMemoryOverlayMode(params: {
+    sessionId?: string;
+    sessionKey?: string;
+    mode: SessionMemoryOverlayMode;
+  }): SessionMemoryOverlaySessionStatus {
+    const key = this.resolveSessionMemoryOverlayOverrideKey(params);
+    this.sessionMemoryOverlayModeBySession.set(key, params.mode);
+    return this.getSessionMemoryOverlayMode(params);
+  }
+
+  clearSessionMemoryOverlayMode(params: {
+    sessionId?: string;
+    sessionKey?: string;
+  }): SessionMemoryOverlaySessionStatus {
+    const key = this.resolveSessionMemoryOverlayOverrideKey(params);
+    this.sessionMemoryOverlayModeBySession.delete(key);
+    return this.getSessionMemoryOverlayMode(params);
   }
 
   /** Normalize optional live token estimates supplied by runtime callers. */
@@ -7327,6 +7405,10 @@ export class LcmContextEngine implements ContextEngine {
         // Off-by-default so v4.1 behavior is preserved until the migration
         // tool has populated `messages.large_content` for the running DB.
         stubLargeToolPayloads: this.config.stubLargeToolPayloads,
+        sessionMemoryOverlayConfig: this.resolveSessionMemoryOverlayEffectiveConfig({
+          sessionId: params.sessionId,
+          sessionKey: params.sessionKey,
+        }),
       });
 
       // If assembly produced no messages for a non-empty live session,
@@ -7389,6 +7471,8 @@ export class LcmContextEngine implements ContextEngine {
               ? `sessionMemoryOverlaySkippedReason=${assembled.debug.sessionMemoryOverlay.skippedReason}`
               : undefined,
             `sessionMemoryOverlayTokens=${assembled.debug.sessionMemoryOverlay.renderedTokens}`,
+            `sessionMemoryOverlayMode=${assembled.debug.sessionMemoryOverlay.effectiveMode}`,
+            `sessionMemoryOverlayRenderVersion=${assembled.debug.sessionMemoryOverlay.renderVersion}`,
           ]
             .filter((part): part is string => Boolean(part))
             .join(" ")

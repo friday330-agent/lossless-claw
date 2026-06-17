@@ -227,6 +227,7 @@ describe("session-memory writer", () => {
           enabled: true,
           dbPath: fixture.dbPath,
           lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+          staleAfterMs: 7 * 24 * 60 * 60 * 1000,
         },
       );
       expect(lookup).toMatchObject({
@@ -241,6 +242,7 @@ describe("session-memory writer", () => {
         enabled: true,
         dbPath: fixture.dbPath,
         lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        staleAfterMs: 7 * 24 * 60 * 60 * 1000,
       });
       expect(rendered).toMatchObject({
         ok: true,

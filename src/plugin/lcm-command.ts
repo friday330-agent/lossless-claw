@@ -3,7 +3,10 @@ import type { DatabaseSync } from "node:sqlite";
 import packageJson from "../../package.json" with { type: "json" };
 import { formatTimestamp } from "../compaction.js";
 import type { LcmConfig } from "../db/config.js";
-import type { RotateSessionStorageWithBackupResult } from "../engine.js";
+import type {
+  RotateSessionStorageWithBackupResult,
+  SessionMemoryOverlaySessionStatus,
+} from "../engine.js";
 import { runDelegatedFocusBrief, runDelegatedRefocusBrief } from "../focus-briefs.js";
 import type { LcmSummarizeFn } from "../summarize.js";
 import type { LcmDependencies } from "../types.js";
@@ -38,6 +41,7 @@ import {
   buildSessionMemorySchemaMaintenanceText,
   type SessionMemorySchemaCommand,
 } from "../session-memory-maintenance.js";
+import type { SessionMemoryOverlayMode } from "../session-memory.js";
 
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
@@ -87,6 +91,7 @@ type ParsedLcmCommand =
   | { kind: "unfocus" }
   | { kind: "doctor"; apply: boolean }
   | { kind: "doctor_cleaners"; apply: boolean; filterId?: DoctorCleanerId; vacuum: boolean }
+  | { kind: "session_memory_mode"; action: "status" | "clear" | SessionMemoryOverlayMode }
   | { kind: "session_memory_schema"; command: SessionMemorySchemaCommand }
   | { kind: "help"; error?: string };
 
@@ -113,6 +118,24 @@ type FocusCompactionCommandEngine = {
 };
 
 type RuntimeCommandEngine = RotateCommandEngine & Partial<FocusCompactionCommandEngine>;
+
+type SessionMemoryOverlayCommandEngine = {
+  getSessionMemoryOverlayMode(params: {
+    sessionId?: string;
+    sessionKey?: string;
+  }): SessionMemoryOverlaySessionStatus;
+  setSessionMemoryOverlayMode(params: {
+    sessionId?: string;
+    sessionKey?: string;
+    mode: SessionMemoryOverlayMode;
+  }): SessionMemoryOverlaySessionStatus;
+  clearSessionMemoryOverlayMode(params: {
+    sessionId?: string;
+    sessionKey?: string;
+  }): SessionMemoryOverlaySessionStatus;
+};
+
+type LcmCommandEngine = RuntimeCommandEngine & Partial<SessionMemoryOverlayCommandEngine>;
 
 const DOCTOR_CLEANER_IDS = new Set<DoctorCleanerId>(getDoctorCleanerFilterIds());
 
@@ -311,6 +334,30 @@ function parseSessionMemorySchemaArgs(tokens: string[]):
   };
 }
 
+function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
+  const action = tokens[0]?.toLowerCase();
+  if (!action || action === "status") {
+    return tokens.length <= 1
+      ? { kind: "session_memory_mode", action: "status" }
+      : { kind: "help", error: `\`${VISIBLE_COMMAND} session-memory status\` does not accept extra arguments.` };
+  }
+  if (action === "native" || action === "overlay-readonly" || action === "clear") {
+    return tokens.length === 1
+      ? { kind: "session_memory_mode", action }
+      : { kind: "help", error: `\`${VISIBLE_COMMAND} session-memory ${action}\` does not accept extra arguments.` };
+  }
+  if (action === "schema") {
+    const parsed = parseSessionMemorySchemaArgs(tokens);
+    return parsed.ok
+      ? { kind: "session_memory_schema", command: parsed.command }
+      : { kind: "help", error: parsed.error };
+  }
+  return {
+    kind: "help",
+    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, and \`schema plan|check|apply\`.`,
+  };
+}
+
 function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
   const raw = (rawArgs ?? "").trim();
   if (raw === "") {
@@ -374,17 +421,14 @@ function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
           `\`${VISIBLE_COMMAND} doctor\` accepts no arguments, \`clean\` for global high-confidence junk diagnostics, \`clean apply [filter-id] [vacuum]\` for cleanup, or \`apply\` for the scoped summary repair path.`,
       };
     case "session-memory": {
-      const parsed = parseSessionMemorySchemaArgs(rest);
-      return parsed.ok
-        ? { kind: "session_memory_schema", command: parsed.command }
-        : { kind: "help", error: parsed.error };
+      return parseSessionMemoryArgs(rest);
     }
     case "help":
       return { kind: "help" };
     default:
       return {
         kind: "help",
-        error: `Unknown subcommand \`${head}\`. Supported: status, focus, refocus, unfocus, backup, rotate, doctor, doctor clean, doctor apply, session-memory schema, help.`,
+        error: `Unknown subcommand \`${head}\`. Supported: status, focus, refocus, unfocus, backup, rotate, doctor, doctor clean, doctor apply, session-memory, session-memory schema, help.`,
       };
   }
 }
@@ -654,7 +698,7 @@ function resolveLifecycleCompactionTokenBudget(config: LcmConfig): number {
 async function runFocusLifecycleCompaction(params: {
   ctx: PluginCommandContext;
   deps?: LcmDependencies;
-  getLcm?: () => Promise<RuntimeCommandEngine>;
+  getLcm?: () => Promise<LcmCommandEngine>;
   config: LcmConfig;
   current: Extract<CurrentConversationResolution, { kind: "resolved" }>;
   sessionKey?: string;
@@ -811,6 +855,10 @@ function buildHelpText(error?: string): string {
       ),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor apply`), "Repair broken summaries in the current conversation."),
       buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} session-memory status|native|overlay-readonly|clear`),
+        "Inspect or set the current session's volatile read-only session-memory overlay mode.",
+      ),
+      buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory schema plan|check|apply`),
         "Plan or run gated session-memory schema maintenance.",
       ),
@@ -820,6 +868,7 @@ function buildHelpText(error?: string): string {
       buildStatLine("subcommands", `Discover them with ${formatCommand(`${VISIBLE_COMMAND} help`)}.`),
       buildStatLine("alias", `${formatCommand(HIDDEN_ALIAS)} is accepted as a shorter alias.`),
       buildStatLine("current conversation", "Uses the active LCM session when the host exposes session identity."),
+      buildStatLine("session-memory mode", "Session-local and in-memory only; it is not written to openclaw.json."),
       buildStatLine("`/new`", "Prunes context for the current LCM conversation. It does not split storage."),
       buildStatLine("`/reset`", "Resets OpenClaw session flow. Use rotate when you only want transcript compaction."),
     ]),
@@ -986,6 +1035,117 @@ async function buildStatusText(params: {
     );
   }
 
+  return lines.join("\n");
+}
+
+function formatSessionMemoryModeStatus(status: SessionMemoryOverlaySessionStatus): string[] {
+  return [
+    buildStatLine("effective mode", status.effectiveMode),
+    buildStatLine("override", status.overrideMode ?? "unset"),
+    buildStatLine("kill switch", formatBoolean(status.killSwitchEnabled)),
+    buildStatLine("render version", status.renderVersion),
+    buildStatLine("max tokens", formatNumber(status.maxTokens)),
+    buildStatLine("db path", status.dbPath),
+  ];
+}
+
+async function buildSessionMemoryModeText(params: {
+  ctx: PluginCommandContext;
+  db: DatabaseSync;
+  getLcm?: () => Promise<LcmCommandEngine>;
+  action: "status" | "clear" | SessionMemoryOverlayMode;
+}): Promise<string> {
+  const current = await resolveCurrentConversation({ ctx: params.ctx, db: params.db });
+  const sessionId = normalizeIdentity(params.ctx.sessionId)
+    ?? (current.kind === "resolved" ? normalizeIdentity(current.stats.sessionId) : undefined);
+  const sessionKey = normalizeIdentity(params.ctx.sessionKey)
+    ?? (current.kind === "resolved" ? normalizeIdentity(current.stats.sessionKey ?? undefined) : undefined);
+
+  const lines = [
+    ...buildHeaderLines(),
+    "",
+    "🧠 Session Memory",
+    "",
+  ];
+
+  if (!sessionId && !sessionKey) {
+    lines.push(
+      buildSection("📍 Current session", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine(
+          "reason",
+          current.kind === "unavailable"
+            ? current.reason
+            : "OpenClaw did not expose an active session id or session key.",
+        ),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(
+    buildSection("📍 Current session", [
+      buildStatLine("session id", sessionId ? formatCommand(truncateMiddle(sessionId, 44)) : "missing"),
+      buildStatLine("session key", sessionKey ? formatCommand(truncateMiddle(sessionKey, 44)) : "missing"),
+      buildStatLine("scope", "this runtime session only"),
+      buildStatLine("persistence", "volatile; not written to openclaw.json"),
+    ]),
+    "",
+  );
+
+  if (!params.getLcm) {
+    lines.push(
+      buildSection("⚙️ Mode", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", "The runtime-backed LCM engine is not available to commands."),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const engine = await params.getLcm();
+  if (
+    typeof engine.getSessionMemoryOverlayMode !== "function" ||
+    typeof engine.setSessionMemoryOverlayMode !== "function" ||
+    typeof engine.clearSessionMemoryOverlayMode !== "function"
+  ) {
+    lines.push(
+      buildSection("⚙️ Mode", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", "The runtime-backed LCM engine does not expose session-memory mode controls."),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const status = params.action === "clear"
+    ? engine.clearSessionMemoryOverlayMode({ sessionId, sessionKey })
+    : params.action === "status"
+      ? engine.getSessionMemoryOverlayMode({ sessionId, sessionKey })
+      : engine.setSessionMemoryOverlayMode({ sessionId, sessionKey, mode: params.action });
+  const actionLabel = params.action === "status"
+    ? "status"
+    : params.action === "clear"
+      ? "cleared"
+      : "updated";
+  lines.push(
+    buildSection("⚙️ Mode", [
+      buildStatLine("status", actionLabel),
+      ...formatSessionMemoryModeStatus(status),
+      buildStatLine(
+        "contract",
+        "Lossless consumes stable projection fields only; writer-owned schema quality can evolve independently.",
+      ),
+    ]),
+  );
+  if (status.killSwitchEnabled && params.action === "overlay-readonly") {
+    lines.push(
+      "",
+      buildSection("⚠️ Kill switch", [
+        buildStatLine("result", "overlay-readonly was recorded, but the env kill switch forces native mode"),
+      ]),
+    );
+  }
   return lines.join("\n");
 }
 
@@ -1201,7 +1361,7 @@ async function buildRotateText(params: {
   db: DatabaseSync;
   config: LcmConfig;
   deps?: LcmDependencies;
-  getLcm?: () => Promise<RuntimeCommandEngine>;
+  getLcm?: () => Promise<LcmCommandEngine>;
 }): Promise<string> {
   const lines = [
     ...buildHeaderLines(),
@@ -1659,7 +1819,7 @@ async function buildFocusGenerateText(params: {
   db: DatabaseSync;
   config: LcmConfig;
   deps?: LcmDependencies;
-  getLcm?: () => Promise<RuntimeCommandEngine>;
+  getLcm?: () => Promise<LcmCommandEngine>;
   prompt: string;
 }): Promise<string> {
   const lines = [
@@ -1892,7 +2052,7 @@ async function buildRefocusText(params: {
   db: DatabaseSync;
   config: LcmConfig;
   deps?: LcmDependencies;
-  getLcm?: () => Promise<RuntimeCommandEngine>;
+  getLcm?: () => Promise<LcmCommandEngine>;
 }): Promise<string> {
   const lines = [
     ...buildHeaderLines(),
@@ -2129,7 +2289,7 @@ async function buildUnfocusText(params: {
   db: DatabaseSync;
   config: LcmConfig;
   deps?: LcmDependencies;
-  getLcm?: () => Promise<RuntimeCommandEngine>;
+  getLcm?: () => Promise<LcmCommandEngine>;
 }): Promise<string> {
   const lines = [
     ...buildHeaderLines(),
@@ -2441,7 +2601,7 @@ export function createLcmCommand(params: {
   config: LcmConfig;
   deps?: LcmDependencies;
   summarize?: LcmSummarizeFn;
-  getLcm?: () => Promise<RuntimeCommandEngine>;
+  getLcm?: () => Promise<LcmCommandEngine>;
 }): OpenClawPluginCommandDefinition {
   const getDb = async (): Promise<DatabaseSync> =>
     typeof params.db === "function" ? await params.db() : params.db;
@@ -2535,6 +2695,15 @@ export function createLcmCommand(params: {
                 }),
               }
             : { text: await buildDoctorCleanersText({ db: await getDb() }) };
+        case "session_memory_mode":
+          return {
+            text: await buildSessionMemoryModeText({
+              ctx,
+              db: await getDb(),
+              getLcm: params.getLcm,
+              action: parsed.action,
+            }),
+          };
         case "session_memory_schema":
           return {
             text: buildSessionMemorySchemaMaintenanceText({

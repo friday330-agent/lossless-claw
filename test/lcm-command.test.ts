@@ -1882,6 +1882,70 @@ describe("lcm command", () => {
     expect(check.text).toContain("status: compatible");
   });
 
+  it("sets and clears volatile session-memory overlay mode through /lossless", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    let overrideMode: "native" | "overlay-readonly" | undefined;
+    const engine = {
+      getSessionMemoryOverlayMode: vi.fn(() => ({
+        sessionId: "session-memory-command-session",
+        sessionKey: "agent:main:webchat:session-memory-command",
+        overrideMode,
+        effectiveMode: overrideMode === "overlay-readonly" ? "overlay-readonly" : "native",
+        killSwitchEnabled: false,
+        renderVersion: config.sessionMemoryOverlay.renderVersion,
+        dbPath: config.sessionMemoryOverlay.dbPath,
+        maxTokens: config.sessionMemoryOverlay.maxTokens,
+      })),
+      setSessionMemoryOverlayMode: vi.fn((params: { mode: "native" | "overlay-readonly" }) => {
+        overrideMode = params.mode;
+        return engine.getSessionMemoryOverlayMode();
+      }),
+      clearSessionMemoryOverlayMode: vi.fn(() => {
+        overrideMode = undefined;
+        return engine.getSessionMemoryOverlayMode();
+      }),
+    };
+    const command = createLcmCommand({
+      db: fixture.db,
+      config,
+      getLcm: async () => engine,
+    });
+    const ctx = (args: string) =>
+      createCommandContext(args, {
+        sessionId: "session-memory-command-session",
+        sessionKey: "agent:main:webchat:session-memory-command",
+      });
+
+    const status = await command.handler!(ctx("session-memory status")) as { text: string };
+    expect(status.text).toContain("Session Memory");
+    expect(status.text).toContain("effective mode: native");
+    expect(status.text).toContain("override: unset");
+
+    const enabled = await command.handler!(ctx("session-memory overlay-readonly")) as { text: string };
+    expect(enabled.text).toContain("status: updated");
+    expect(enabled.text).toContain("effective mode: overlay-readonly");
+    expect(enabled.text).toContain("persistence: volatile; not written to openclaw.json");
+
+    const forcedNative = await command.handler!(ctx("session-memory native")) as { text: string };
+    expect(forcedNative.text).toContain("effective mode: native");
+    expect(forcedNative.text).toContain("override: native");
+
+    const cleared = await command.handler!(ctx("session-memory clear")) as { text: string };
+    expect(cleared.text).toContain("status: cleared");
+    expect(cleared.text).toContain("override: unset");
+    expect(config.sessionMemoryOverlay.enabled).toBe(false);
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("refuses session-memory schema execute against the resolved real DB path in Gate 4", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
