@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, sep } from "node:path";
@@ -127,6 +128,47 @@ export type SessionMemoryRejectEntriesResult =
       schemaReason?: SessionMemoryOverlaySkipReason;
     };
 
+export type SessionMemoryCarryForwardResult =
+  | {
+      ok: true;
+      status: "written";
+      fromConversationId: number;
+      toConversationId: number;
+      sessionId: string;
+      segmentId: string;
+      entryCount: number;
+      linkCount: number;
+      carriedEntryIds: Array<{ fromEntryId: string; toEntryId: string }>;
+      updatedAt: string;
+    }
+  | {
+      ok: false;
+      status: "refused" | "failed";
+      reason:
+        | "real_db_refused"
+        | "db_absent"
+        | "schema_incompatible"
+        | "invalid_packet"
+        | "malformed_rows"
+        | "raw_transcript_detected"
+        | "lcm_schema_incompatible"
+        | "source_ref_missing"
+        | "no_active_entries"
+        | "write_failed";
+      detail?: string;
+      schemaReason?: SessionMemoryOverlaySkipReason;
+    };
+
+type CarryForwardSourceEntry = {
+  entryId: string;
+  kind: SessionMemoryOverlayEntryKind;
+  confidence: number;
+  priority: number;
+  title?: string;
+  body: string;
+  sourceRefs: SessionMemorySourceRef[];
+};
+
 export function writeSessionMemorySeedPacket(params: {
   dbPath: string;
   lcmDbPath: string;
@@ -228,6 +270,137 @@ export function writeSessionMemorySeedPacket(params: {
       // Best-effort cleanup after a bounded maintenance write.
     }
   }
+}
+
+export function carryForwardSessionMemoryEntries(params: {
+  dbPath: string;
+  lcmDbPath: string;
+  fromConversationId: number;
+  fromSessionKey?: string;
+  to: {
+    sessionId: string;
+    conversationId: number;
+    sessionKey?: string;
+    title?: string;
+    segmentId?: string;
+  };
+  allowRealDb?: boolean;
+  maxEntries?: number;
+  now?: Date;
+}): SessionMemoryCarryForwardResult {
+  if (!params.allowRealDb && !isTempPath(params.dbPath)) {
+    return { ok: false, status: "refused", reason: "real_db_refused" };
+  }
+  if (!existsSync(params.dbPath)) {
+    return { ok: false, status: "refused", reason: "db_absent" };
+  }
+  if (!Number.isInteger(params.fromConversationId) || !Number.isInteger(params.to.conversationId)) {
+    return {
+      ok: false,
+      status: "refused",
+      reason: "invalid_packet",
+      detail: "fromConversationId and to.conversationId are required integers",
+    };
+  }
+  if (params.fromConversationId === params.to.conversationId) {
+    return {
+      ok: false,
+      status: "refused",
+      reason: "invalid_packet",
+      detail: "carry-forward target conversation must differ from source conversation",
+    };
+  }
+  if (!isNonEmptyString(params.to.sessionId)) {
+    return {
+      ok: false,
+      status: "refused",
+      reason: "invalid_packet",
+      detail: "to.sessionId is required",
+    };
+  }
+
+  const maxEntries =
+    typeof params.maxEntries === "number" && Number.isFinite(params.maxEntries)
+      ? Math.floor(params.maxEntries)
+      : 12;
+  if (maxEntries < 1) {
+    return {
+      ok: false,
+      status: "refused",
+      reason: "invalid_packet",
+      detail: "maxEntries must be >= 1",
+    };
+  }
+
+  let db: DatabaseSync | undefined;
+  let sourceEntries: CarryForwardSourceEntry[];
+  try {
+    db = new DatabaseSync(params.dbPath);
+    db.exec("PRAGMA foreign_keys = ON");
+    const compatibility = checkSessionMemorySchemaCompatibility(db);
+    if (!compatibility.ok) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "schema_incompatible",
+        schemaReason: compatibility.reason,
+      };
+    }
+    const read = readCarryForwardSourceEntries(db, {
+      conversationId: params.fromConversationId,
+      sessionKey: params.fromSessionKey,
+      maxEntries,
+    });
+    if (!read.ok) {
+      return read.result;
+    }
+    sourceEntries = read.entries;
+  } catch (error) {
+    return {
+      ok: false,
+      status: "failed",
+      reason: "write_failed",
+      detail: error instanceof Error ? error.message : "session-memory carry-forward read failed",
+    };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Best-effort cleanup after a bounded maintenance read.
+    }
+  }
+
+  const packet = buildCarryForwardPacket({
+    fromConversationId: params.fromConversationId,
+    to: params.to,
+    entries: sourceEntries,
+  });
+  const written = writeSessionMemorySeedPacket({
+    dbPath: params.dbPath,
+    lcmDbPath: params.lcmDbPath,
+    packet,
+    allowRealDb: params.allowRealDb,
+    now: params.now,
+  });
+  if (!written.ok) {
+    return written;
+  }
+
+  return {
+    ok: true,
+    status: "written",
+    fromConversationId: params.fromConversationId,
+    toConversationId: params.to.conversationId,
+    sessionId: written.sessionId,
+    segmentId: written.segmentId,
+    entryCount: written.entryCount,
+    linkCount: written.linkCount,
+    carriedEntryIds: sourceEntries.map((entry) => ({
+      fromEntryId: entry.entryId,
+      toEntryId: buildCarryForwardEntryId(params.to.conversationId, entry.entryId),
+    })),
+    updatedAt: written.updatedAt,
+  };
 }
 
 export function rejectSessionMemoryEntries(params: {
@@ -438,6 +611,136 @@ function validateSeedPacketShape(packet: SessionMemorySeedPacket):
   }
 
   return { ok: true };
+}
+
+function readCarryForwardSourceEntries(
+  db: DatabaseSync,
+  params: {
+    conversationId: number;
+    sessionKey?: string;
+    maxEntries: number;
+  },
+):
+  | { ok: true; entries: CarryForwardSourceEntry[] }
+  | { ok: false; result: Extract<SessionMemoryCarryForwardResult, { ok: false }> } {
+  const rows = db
+    .prepare(
+      `SELECT
+         e.entry_id AS entry_id,
+         e.kind AS kind,
+         e.confidence AS confidence,
+         e.priority AS priority,
+         e.title AS title,
+         e.body AS body,
+         e.source_refs_json AS source_refs_json
+       FROM sessions s
+       JOIN segments sg ON sg.session_id = s.session_id
+       JOIN entries e ON e.segment_id = sg.segment_id
+       WHERE s.conversation_id = ?
+         AND s.status = 'active'
+         AND sg.status = 'active'
+         AND e.status = 'active'
+         AND (? IS NULL OR s.session_key IS NULL OR s.session_key = ?)
+       ORDER BY e.priority DESC, e.updated_at DESC, e.entry_id ASC
+       LIMIT ?`,
+    )
+    .all(params.conversationId, params.sessionKey ?? null, params.sessionKey ?? null, params.maxEntries) as Array<{
+    entry_id: unknown;
+    kind: unknown;
+    confidence: unknown;
+    priority: unknown;
+    title: unknown;
+    body: unknown;
+    source_refs_json: unknown;
+  }>;
+
+  if (rows.length === 0) {
+    return { ok: false, result: { ok: false, status: "refused", reason: "no_active_entries" } };
+  }
+
+  const entries: CarryForwardSourceEntry[] = [];
+  for (const row of rows) {
+    const entryId = String(row.entry_id ?? "");
+    const kind = String(row.kind ?? "");
+    const body = String(row.body ?? "");
+    if (!isNonEmptyString(entryId) || !ENTRY_KINDS.has(kind as SessionMemoryOverlayEntryKind)) {
+      return { ok: false, result: { ok: false, status: "refused", reason: "malformed_rows" } };
+    }
+    if (isRawTranscriptShapedSessionMemoryBody(body)) {
+      return { ok: false, result: { ok: false, status: "refused", reason: "raw_transcript_detected" } };
+    }
+    const sourceRefs = parseStoredSourceRefs(row.source_refs_json);
+    if (!sourceRefs) {
+      return { ok: false, result: { ok: false, status: "refused", reason: "malformed_rows" } };
+    }
+    entries.push({
+      entryId,
+      kind: kind as SessionMemoryOverlayEntryKind,
+      confidence: Number(row.confidence ?? 0),
+      priority: Number(row.priority ?? 0),
+      title: typeof row.title === "string" && row.title.trim() ? row.title : undefined,
+      body,
+      sourceRefs,
+    });
+  }
+  return { ok: true, entries };
+}
+
+function buildCarryForwardPacket(params: {
+  fromConversationId: number;
+  to: {
+    sessionId: string;
+    conversationId: number;
+    sessionKey?: string;
+    title?: string;
+    segmentId?: string;
+  };
+  entries: CarryForwardSourceEntry[];
+}): SessionMemorySeedPacket {
+  const segmentId = params.to.segmentId ?? `carry:${params.to.conversationId}:segment:${hashShort(params.to.sessionId)}`;
+  const entryIdBySource = new Map<string, string>();
+  for (const entry of params.entries) {
+    entryIdBySource.set(entry.entryId, buildCarryForwardEntryId(params.to.conversationId, entry.entryId));
+  }
+
+  return {
+    session: {
+      sessionId: params.to.sessionId,
+      conversationId: params.to.conversationId,
+      sessionKey: params.to.sessionKey,
+      title: params.to.title ?? "Carried-forward session memory seed",
+      metadata: {
+        carryForward: {
+          fromConversationId: params.fromConversationId,
+          toConversationId: params.to.conversationId,
+          policy: "new_defaults_to_continue_previous_workline",
+        },
+      },
+    },
+    segment: {
+      segmentId,
+      seq: 1,
+    },
+    entries: params.entries.map((entry) => ({
+      entryId: entryIdBySource.get(entry.entryId) ?? buildCarryForwardEntryId(params.to.conversationId, entry.entryId),
+      kind: entry.kind,
+      confidence: entry.confidence,
+      priority: entry.priority,
+      title: entry.title,
+      body: entry.body,
+      sourceRefs: entry.sourceRefs,
+      originEntryId: entry.entryId,
+    })),
+    links: params.entries.map((entry) => ({
+      linkId: `carry:${params.to.conversationId}:link:${hashShort(entry.entryId)}`,
+      srcType: "entry",
+      srcId: entry.entryId,
+      relation: "carried_to",
+      dstType: "entry",
+      dstId: entryIdBySource.get(entry.entryId) ?? buildCarryForwardEntryId(params.to.conversationId, entry.entryId),
+      confidence: 1,
+    })),
+  };
 }
 
 function invalidPacket(detail: string): { ok: false; result: Extract<SessionMemoryWriteResult, { ok: false }> } {
@@ -669,6 +972,68 @@ function serializeRequiredOptionalJson(value: unknown): string | null {
     throw new Error(`Invalid JSON payload: ${serialized.reason}`);
   }
   return serialized.value;
+}
+
+function parseStoredSourceRefs(raw: unknown): SessionMemorySourceRef[] | null {
+  if (raw === null || raw === undefined || raw === "") {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(raw));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) {
+    return null;
+  }
+  const refs: SessionMemorySourceRef[] = [];
+  for (const ref of parsed) {
+    if (!ref || typeof ref !== "object") {
+      return null;
+    }
+    const candidate = ref as Record<string, unknown>;
+    const type = String(candidate.type);
+    if (type === "lcm_summary" && typeof candidate.summary_id === "string") {
+      refs.push({ type, summaryId: candidate.summary_id });
+    } else if (
+      type === "lcm_message_range" &&
+      typeof candidate.conversation_id === "number" &&
+      typeof candidate.start_seq === "number" &&
+      typeof candidate.end_seq === "number"
+    ) {
+      refs.push({
+        type,
+        conversationId: candidate.conversation_id,
+        sessionKey: typeof candidate.session_key === "string" ? candidate.session_key : undefined,
+        startSeq: candidate.start_seq,
+        endSeq: candidate.end_seq,
+      });
+    } else if (type === "focus_brief" && typeof candidate.brief_id === "string") {
+      refs.push({ type, briefId: candidate.brief_id });
+    } else if (type === "workspace_file" && typeof candidate.path === "string") {
+      refs.push({
+        type,
+        path: candidate.path,
+        line: typeof candidate.line === "number" ? candidate.line : undefined,
+      });
+    } else if (type === "checkpoint" && typeof candidate.checkpoint_id === "string") {
+      refs.push({ type, checkpointId: candidate.checkpoint_id });
+    } else if (type === "sidecar_sample" && typeof candidate.path === "string") {
+      refs.push({ type, path: candidate.path });
+    } else {
+      return null;
+    }
+  }
+  return refs;
+}
+
+function buildCarryForwardEntryId(toConversationId: number, sourceEntryId: string): string {
+  return `carry:${toConversationId}:entry:${hashShort(sourceEntryId)}`;
+}
+
+function hashShort(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
 function isTempPath(dbPath: string): boolean {

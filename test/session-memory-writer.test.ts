@@ -11,6 +11,7 @@ import {
 } from "../src/session-memory.js";
 import { buildSessionMemorySchemaMaintenanceText } from "../src/session-memory-maintenance.js";
 import {
+  carryForwardSessionMemoryEntries,
   rejectSessionMemoryEntries,
   type SessionMemorySeedPacket,
   writeSessionMemorySeedPacket,
@@ -439,6 +440,176 @@ describe("session-memory writer", () => {
     }
   });
 
+  it("carries active reviewed entries forward to a new conversation in a temp DB", async () => {
+    const fixture = createSchemaFixture();
+    try {
+      const seeded = writeSessionMemorySeedPacket({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        now: new Date("2026-06-19T06:20:00.000Z"),
+        packet: basePacket({
+          session: {
+            sessionId: "session-old",
+            conversationId: 2520,
+            sessionKey: "agent:main:dashboard:old",
+          },
+          segment: {
+            segmentId: "segment-old",
+            seq: 1,
+          },
+          entries: [
+            {
+              entryId: "entry-old-constraint",
+              kind: "constraint",
+              confidence: 0.95,
+              priority: 30,
+              body: "Do not enable session-memory runtime without a separate approval gate.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md", line: 46 }],
+            },
+            {
+              entryId: "entry-old-next",
+              kind: "next_action",
+              confidence: 0.9,
+              priority: 20,
+              body: "On normal /new, carry reviewed seed forward to the new conversation.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-gate15-new-seed-lifecycle-policy-2026-06-19.md" }],
+            },
+          ],
+        }),
+      });
+      expect(seeded).toMatchObject({ ok: true, entryCount: 2 });
+
+      const carried = carryForwardSessionMemoryEntries({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        fromConversationId: 2520,
+        fromSessionKey: "agent:main:dashboard:old",
+        to: {
+          sessionId: "session-new",
+          conversationId: 2521,
+          sessionKey: "agent:main:dashboard:new",
+        },
+        now: new Date("2026-06-19T06:30:00.000Z"),
+      });
+      expect(carried).toMatchObject({
+        ok: true,
+        status: "written",
+        fromConversationId: 2520,
+        toConversationId: 2521,
+        sessionId: "session-new",
+        entryCount: 2,
+        linkCount: 2,
+        updatedAt: "2026-06-19T06:30:00.000Z",
+      });
+      expect(carried.ok && carried.carriedEntryIds).toEqual([
+        {
+          fromEntryId: "entry-old-constraint",
+          toEntryId: "carry:2521:entry:0d9452a64838e034",
+        },
+        {
+          fromEntryId: "entry-old-next",
+          toEntryId: "carry:2521:entry:a373a1a3c9d82813",
+        },
+      ]);
+
+      const db = new DatabaseSync(fixture.dbPath, { readOnly: true });
+      try {
+        expect((db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number }).count).toBe(2);
+        expect((db.prepare("SELECT COUNT(*) AS count FROM segments").get() as { count: number }).count).toBe(2);
+        expect((db.prepare("SELECT COUNT(*) AS count FROM entries").get() as { count: number }).count).toBe(4);
+        expect((db.prepare("SELECT COUNT(*) AS count FROM links WHERE relation = 'carried_to'").get() as { count: number }).count).toBe(2);
+        expect(
+          db
+            .prepare("SELECT origin_entry_id, updated_at FROM entries WHERE entry_id = ?")
+            .get("carry:2521:entry:0d9452a64838e034"),
+        ).toEqual({
+          origin_entry_id: "entry-old-constraint",
+          updated_at: "2026-06-19T06:30:00.000Z",
+        });
+      } finally {
+        db.close();
+      }
+
+      const lookup = await lookupSessionMemoryOverlay(
+        {
+          conversationId: 2521,
+          sessionKey: "agent:main:dashboard:new",
+        },
+        {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+          staleAfterMs: 7 * 24 * 60 * 60 * 1000,
+        },
+      );
+      expect(lookup).toMatchObject({
+        ok: true,
+        source: "session_memory_overlay",
+        sessionId: "session-new",
+      });
+
+      const rendered = renderSessionMemoryOverlay(lookup, {
+        ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+        enabled: true,
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        staleAfterMs: 7 * 24 * 60 * 60 * 1000,
+      });
+      expect(rendered).toMatchObject({
+        ok: true,
+        source: "session_memory_overlay",
+        entryCount: 2,
+      });
+      expect(rendered.ok && rendered.content).toContain("Constraints:");
+      expect(rendered.ok && rendered.content).toContain("Next actions:");
+
+      const unrelatedLookup = await lookupSessionMemoryOverlay(
+        {
+          conversationId: 999999,
+          sessionKey: "agent:main:dashboard:new",
+        },
+        {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+          staleAfterMs: 7 * 24 * 60 * 60 * 1000,
+        },
+      );
+      expect(unrelatedLookup).toEqual({
+        ok: false,
+        source: "session_memory_overlay",
+        reason: "no_active_entries",
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("fails closed when carry-forward has no active source entries", () => {
+    const fixture = createSchemaFixture();
+    try {
+      const carried = carryForwardSessionMemoryEntries({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        fromConversationId: 2520,
+        to: {
+          sessionId: "session-new",
+          conversationId: 2521,
+        },
+      });
+      expect(carried).toEqual({
+        ok: false,
+        status: "refused",
+        reason: "no_active_entries",
+      });
+      expect(countRows(fixture.dbPath, "sessions")).toBe(0);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("fails closed when an LCM-backed source ref is missing", () => {
     const fixture = createSchemaFixture();
     try {
@@ -526,6 +697,21 @@ describe("session-memory writer", () => {
     });
 
     expect(result).toEqual({
+      ok: false,
+      status: "refused",
+      reason: "real_db_refused",
+    });
+
+    const carried = carryForwardSessionMemoryEntries({
+      dbPath: realDbPath,
+      lcmDbPath: join(tmpdir(), "missing-lcm.db"),
+      fromConversationId: 2520,
+      to: {
+        sessionId: "session-new",
+        conversationId: 2521,
+      },
+    });
+    expect(carried).toEqual({
       ok: false,
       status: "refused",
       reason: "real_db_refused",
