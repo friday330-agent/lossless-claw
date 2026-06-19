@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -60,6 +60,7 @@ function createTestConfig(databasePath: string): LcmConfig {
     sessionMemoryOverlay: {
       enabled: false,
       killSwitchEnabled: false,
+      lifecycleCarryForwardEnabled: false,
       dbPath: join(databasePath, "..", "session-memory.db"),
       lcmDbPath: databasePath,
       maxTokens: 800,
@@ -1442,6 +1443,136 @@ describe("LcmContextEngine session_end lifecycle", () => {
       });
     } finally {
       sessionMemoryDb.close();
+    }
+  });
+
+  it("keeps real DB lifecycle carry-forward refused until explicitly enabled", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
+    tempDirs.push(tempDir);
+    const realDir = join(process.cwd(), ".session-memory-lifecycle-real-refused");
+    const realDbPath = join(realDir, "session-memory.db");
+    rmSync(realDir, { recursive: true, force: true });
+    mkdirSync(realDir, { recursive: true });
+    try {
+      const config = createTestConfig(join(tempDir, "lcm.db"));
+      config.sessionMemoryOverlay = {
+        ...config.sessionMemoryOverlay,
+        dbPath: realDbPath,
+        lifecycleCarryForwardEnabled: false,
+      };
+      const db = createLcmDatabaseConnection(config.databasePath);
+      const engine = new LcmContextEngine(createTestDeps(config), db);
+      (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
+      const store = engine.getConversationStore();
+
+      const original = await store.getOrCreateConversation("uuid-1", {
+        sessionKey: "agent:main:main",
+      });
+      await store.createMessage({
+        conversationId: original.conversationId,
+        seq: 1,
+        role: "user",
+        content: "seed",
+        tokenCount: 5,
+      });
+      createSessionMemoryOverlayFixture({
+        dbPath: realDbPath,
+        conversationId: original.conversationId,
+        body: "This real DB seed must not carry without the lifecycle gate.",
+      });
+
+      await engine.handleSessionEnd({
+        reason: "new",
+        sessionId: "uuid-1",
+        sessionKey: "agent:main:main",
+        nextSessionId: "uuid-2",
+      });
+
+      const active = await store.getConversationBySessionKey("agent:main:main");
+      const sessionMemoryDb = new DatabaseSync(realDbPath, { readOnly: true });
+      try {
+        expect(active?.conversationId).not.toBe(original.conversationId);
+        const targetEntries = sessionMemoryDb
+          .prepare("SELECT COUNT(*) AS count FROM sessions WHERE conversation_id = ?")
+          .get(active?.conversationId) as { count: number };
+        expect(targetEntries.count).toBe(0);
+      } finally {
+        sessionMemoryDb.close();
+      }
+    } finally {
+      rmSync(realDir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows real DB lifecycle carry-forward only when the explicit gate is enabled", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
+    tempDirs.push(tempDir);
+    const realDir = join(process.cwd(), ".session-memory-lifecycle-real-enabled");
+    const realDbPath = join(realDir, "session-memory.db");
+    rmSync(realDir, { recursive: true, force: true });
+    mkdirSync(realDir, { recursive: true });
+    try {
+      const config = createTestConfig(join(tempDir, "lcm.db"));
+      config.sessionMemoryOverlay = {
+        ...config.sessionMemoryOverlay,
+        dbPath: realDbPath,
+        lifecycleCarryForwardEnabled: true,
+      };
+      const db = createLcmDatabaseConnection(config.databasePath);
+      const engine = new LcmContextEngine(createTestDeps(config), db);
+      (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
+      const store = engine.getConversationStore();
+
+      const original = await store.getOrCreateConversation("uuid-1", {
+        sessionKey: "agent:main:main",
+      });
+      await store.createMessage({
+        conversationId: original.conversationId,
+        seq: 1,
+        role: "user",
+        content: "seed",
+        tokenCount: 5,
+      });
+      createSessionMemoryOverlayFixture({
+        dbPath: realDbPath,
+        conversationId: original.conversationId,
+        body: "This real DB seed may carry only with the lifecycle gate.",
+      });
+
+      await engine.handleSessionEnd({
+        reason: "new",
+        sessionId: "uuid-1",
+        sessionKey: "agent:main:main",
+        nextSessionId: "uuid-2",
+      });
+
+      const active = await store.getConversationBySessionKey("agent:main:main");
+      const sessionMemoryDb = new DatabaseSync(realDbPath, { readOnly: true });
+      try {
+        const carried = sessionMemoryDb
+          .prepare(
+            `SELECT s.session_id AS session_id, s.conversation_id AS conversation_id, e.body AS body, e.origin_entry_id AS origin_entry_id
+             FROM sessions s
+             JOIN entries e ON e.session_id = s.session_id
+             WHERE s.conversation_id = ?`,
+          )
+          .get(active?.conversationId) as {
+          session_id: string;
+          conversation_id: number;
+          body: string;
+          origin_entry_id: string | null;
+        } | undefined;
+        expect(carried).toEqual({
+          session_id: "uuid-2",
+          conversation_id: active?.conversationId,
+          body: "This real DB seed may carry only with the lifecycle gate.",
+          origin_entry_id: "entry-active",
+        });
+      } finally {
+        sessionMemoryDb.close();
+      }
+    } finally {
+      rmSync(realDir, { recursive: true, force: true });
     }
   });
 

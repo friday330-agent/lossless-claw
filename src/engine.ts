@@ -7826,6 +7826,7 @@ export class LcmContextEngine implements ContextEngine {
           conversationId: freshConversation.conversationId,
           ...(freshConversation.sessionKey ? { sessionKey: freshConversation.sessionKey } : {}),
         },
+        allowRealDb: this.config.sessionMemoryOverlay.lifecycleCarryForwardEnabled,
       });
       if (carried.ok) {
         this.deps.log.info(

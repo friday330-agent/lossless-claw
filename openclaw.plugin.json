@@ -172,6 +172,10 @@
       "label": "Session Memory Overlay",
       "help": "Disabled-by-default read-only session-memory overlay insertion. Keep off unless an explicit fixture or rollout approval enables it."
     },
+    "sessionMemoryOverlay.lifecycleCarryForwardEnabled": {
+      "label": "Session Memory Lifecycle Carry-Forward",
+      "help": "Disabled-by-default writer gate for carrying active reviewed session-memory entries during normal /new lifecycle. Requires explicit rollout approval."
+    },
     "sessionMemoryOverlay.dbPath": {
       "label": "Session Memory DB Path",
       "help": "Path to the read-only session-memory SQLite database (default: <OPENCLAW_STATE_DIR>/session-memory.db). Ordinary assembly must not create this file."
@@ -446,6 +450,9 @@
         "additionalProperties": false,
         "properties": {
           "enabled": {
+            "type": "boolean"
+          },
+          "lifecycleCarryForwardEnabled": {
             "type": "boolean"
           },
           "dbPath": {

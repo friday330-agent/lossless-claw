@@ -55,6 +55,7 @@ export type AutoRotateSessionFilesConfig = {
 export type SessionMemoryOverlayConfig = {
   enabled: boolean;
   killSwitchEnabled: boolean;
+  lifecycleCarryForwardEnabled: boolean;
   dbPath: string;
   lcmDbPath: string;
   maxTokens: number;
@@ -565,6 +566,11 @@ export function resolveLcmConfigWithDiagnostics(
             ? env.LCM_SESSION_MEMORY_OVERLAY_ENABLED === "true"
             : toBool(sessionMemoryOverlay?.enabled) ?? false,
         killSwitchEnabled: isEnvKillSwitchEnabled(env.LCM_SESSION_MEMORY_OVERLAY),
+        lifecycleCarryForwardEnabled: isEnvKillSwitchEnabled(env.LCM_SESSION_MEMORY_OVERLAY)
+          ? false
+          : env.LCM_SESSION_MEMORY_LIFECYCLE_CARRY_FORWARD_ENABLED !== undefined
+            ? env.LCM_SESSION_MEMORY_LIFECYCLE_CARRY_FORWARD_ENABLED === "true"
+            : toBool(sessionMemoryOverlay?.lifecycleCarryForwardEnabled) ?? false,
         dbPath:
           env.LCM_SESSION_MEMORY_OVERLAY_DB_PATH?.trim()
           ?? toStr(sessionMemoryOverlay?.dbPath)

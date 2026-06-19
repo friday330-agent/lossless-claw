@@ -50,6 +50,7 @@ describe("resolveLcmConfig", () => {
     expect(config.sessionMemoryOverlay).toEqual({
       enabled: false,
       killSwitchEnabled: false,
+      lifecycleCarryForwardEnabled: false,
       dbPath: join(homedir(), ".openclaw", "session-memory.db"),
       lcmDbPath: join(homedir(), ".openclaw", "lcm.db"),
       maxTokens: 800,
@@ -108,6 +109,7 @@ describe("resolveLcmConfig", () => {
       focusBriefTargetTokens: 1200,
       sessionMemoryOverlay: {
         enabled: true,
+        lifecycleCarryForwardEnabled: true,
         dbPath: "/tmp/session-memory-plugin.db",
         lcmDbPath: "/tmp/lcm-plugin.db",
         maxTokens: 1200,
@@ -165,6 +167,7 @@ describe("resolveLcmConfig", () => {
     expect(config.sessionMemoryOverlay).toEqual({
       enabled: true,
       killSwitchEnabled: false,
+      lifecycleCarryForwardEnabled: true,
       dbPath: "/tmp/session-memory-plugin.db",
       lcmDbPath: "/tmp/lcm-plugin.db",
       maxTokens: 1200,
@@ -222,6 +225,7 @@ describe("resolveLcmConfig", () => {
       LCM_PROACTIVE_THRESHOLD_COMPACTION_MODE: "inline",
       LCM_FOCUS_BRIEF_TARGET_TOKENS: "1600",
       LCM_SESSION_MEMORY_OVERLAY_ENABLED: "false",
+      LCM_SESSION_MEMORY_LIFECYCLE_CARRY_FORWARD_ENABLED: "true",
       LCM_SESSION_MEMORY_OVERLAY_DB_PATH: "/tmp/session-memory-env.db",
       LCM_SESSION_MEMORY_OVERLAY_LCM_DB_PATH: "/tmp/lcm-env.db",
       LCM_SESSION_MEMORY_OVERLAY_MAX_TOKENS: "1600",
@@ -254,6 +258,7 @@ describe("resolveLcmConfig", () => {
       focusBriefTargetTokens: 1200,
       sessionMemoryOverlay: {
         enabled: true,
+        lifecycleCarryForwardEnabled: false,
         dbPath: "/tmp/session-memory-plugin.db",
         lcmDbPath: "/tmp/lcm-plugin.db",
         maxTokens: 1200,
@@ -299,6 +304,7 @@ describe("resolveLcmConfig", () => {
     expect(config.sessionMemoryOverlay).toEqual({
       enabled: false,
       killSwitchEnabled: false,
+      lifecycleCarryForwardEnabled: true,
       dbPath: "/tmp/session-memory-env.db",
       lcmDbPath: "/tmp/lcm-env.db",
       maxTokens: 1600,
@@ -356,6 +362,7 @@ describe("resolveLcmConfig", () => {
     expect(config.sessionMemoryOverlay).toMatchObject({
       enabled: false,
       killSwitchEnabled: true,
+      lifecycleCarryForwardEnabled: false,
       dbPath: "/tmp/session-memory-plugin.db",
     });
   });

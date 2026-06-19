@@ -132,6 +132,7 @@ export type SessionMemoryOverlaySkipReason =
 export type SessionMemoryOverlayConfig = {
   enabled: boolean;
   killSwitchEnabled: boolean;
+  lifecycleCarryForwardEnabled: boolean;
   dbPath: string;
   lcmDbPath: string;
   maxTokens: number;
@@ -145,6 +146,7 @@ export type SessionMemoryOverlayMode = "native" | "overlay-readonly";
 export const DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG: SessionMemoryOverlayConfig = {
   enabled: false,
   killSwitchEnabled: false,
+  lifecycleCarryForwardEnabled: false,
   dbPath: DEFAULT_OVERLAY_DB_PATH,
   lcmDbPath: DEFAULT_OVERLAY_LCM_DB_PATH,
   maxTokens: DEFAULT_MAX_TOKENS,
