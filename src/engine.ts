@@ -42,6 +42,7 @@ import {
   resolveDelegatedExpansionGrantId,
   revokeDelegatedExpansionGrantForSession,
 } from "./expansion-auth.js";
+import { carryForwardSessionMemoryEntries } from "./session-memory-writer.js";
 import {
   extensionFromNameOrMime,
   formatFileReference,
@@ -7777,6 +7778,7 @@ export class LcmContextEngine implements ContextEngine {
     nextSessionKey?: string;
     createReplacement: boolean;
     createReplacementWhenMissing?: boolean;
+    carryForwardSessionMemory?: boolean;
   }): Promise<void> {
     const current = await this.conversationStore.getConversationForSession({
       sessionId: params.sessionId,
@@ -7813,6 +7815,28 @@ export class LcmContextEngine implements ContextEngine {
       sessionId: nextSessionId,
       ...(nextSessionKey ? { sessionKey: nextSessionKey } : {}),
     });
+    if (params.carryForwardSessionMemory && current) {
+      const carried = carryForwardSessionMemoryEntries({
+        dbPath: this.config.sessionMemoryOverlay.dbPath,
+        lcmDbPath: this.config.sessionMemoryOverlay.lcmDbPath,
+        fromConversationId: current.conversationId,
+        fromSessionKey: current.sessionKey ?? params.sessionKey,
+        to: {
+          sessionId: freshConversation.sessionId,
+          conversationId: freshConversation.conversationId,
+          ...(freshConversation.sessionKey ? { sessionKey: freshConversation.sessionKey } : {}),
+        },
+      });
+      if (carried.ok) {
+        this.deps.log.info(
+          `[lcm] ${params.reason} lifecycle carried ${carried.entryCount} session-memory entries from ${carried.fromConversationId} to ${carried.toConversationId}`,
+        );
+      } else if (carried.reason !== "db_absent" && carried.reason !== "no_active_entries" && carried.reason !== "real_db_refused") {
+        this.deps.log.warn(
+          `[lcm] ${params.reason} lifecycle session-memory carry-forward failed: ${carried.reason}`,
+        );
+      }
+    }
     this.deps.log.info(
       `[lcm] ${params.reason} lifecycle archived prior conversation and created ${freshConversation.conversationId}`,
     );
@@ -7882,7 +7906,6 @@ export class LcmContextEngine implements ContextEngine {
     const reason = params.reason?.trim();
     if (
       !reason ||
-      reason === "new" ||
       reason === "unknown" ||
       reason === "restart" ||
       reason === "shutdown"
@@ -7909,6 +7932,7 @@ export class LcmContextEngine implements ContextEngine {
             nextSessionId: params.nextSessionId,
             nextSessionKey: params.nextSessionKey,
             createReplacement,
+            carryForwardSessionMemory: reason === "new",
           });
         }),
     );

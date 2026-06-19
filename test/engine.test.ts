@@ -1369,8 +1369,12 @@ describe("LcmContextEngine before_reset lifecycle", () => {
 });
 
 describe("LcmContextEngine session_end lifecycle", () => {
-  it("ignores session_end new so /new stays a prune-in-place flow", async () => {
-    const engine = createEngine();
+  it("carries active session-memory entries when session_end new creates a replacement conversation", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
+    tempDirs.push(tempDir);
+    const config = createTestConfig(join(tempDir, "lcm.db"));
+    const db = createLcmDatabaseConnection(config.databasePath);
+    const engine = new LcmContextEngine(createTestDeps(config), db);
     (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
     const store = engine.getConversationStore();
 
@@ -1384,6 +1388,11 @@ describe("LcmContextEngine session_end lifecycle", () => {
       content: "seed",
       tokenCount: 5,
     });
+    createSessionMemoryOverlayFixture({
+      dbPath: config.sessionMemoryOverlay.dbPath,
+      conversationId: original.conversationId,
+      body: "Carry this reviewed seed across normal /new.",
+    });
 
     await engine.handleSessionEnd({
       reason: "new",
@@ -1393,8 +1402,47 @@ describe("LcmContextEngine session_end lifecycle", () => {
     });
 
     const active = await store.getConversationBySessionKey("agent:main:main");
-    expect(active?.conversationId).toBe(original.conversationId);
+    const archived = await store.getConversation(original.conversationId);
+
+    expect(active).not.toBeNull();
+    expect(active?.conversationId).not.toBe(original.conversationId);
+    expect(active?.sessionId).toBe("uuid-2");
     expect(active?.active).toBe(true);
+    expect(archived?.active).toBe(false);
+    expect(archived?.archivedAt).not.toBeNull();
+
+    const sessionMemoryDb = new DatabaseSync(config.sessionMemoryOverlay.dbPath, { readOnly: true });
+    try {
+      const carried = sessionMemoryDb
+        .prepare(
+          `SELECT
+             s.session_id AS session_id,
+             s.conversation_id AS conversation_id,
+             s.session_key AS session_key,
+             e.body AS body,
+             e.origin_entry_id AS origin_entry_id
+           FROM sessions s
+           JOIN entries e ON e.session_id = s.session_id
+           WHERE s.conversation_id = ?`,
+        )
+        .get(active?.conversationId) as {
+        session_id: string;
+        conversation_id: number;
+        session_key: string | null;
+        body: string;
+        origin_entry_id: string | null;
+      } | undefined;
+
+      expect(carried).toEqual({
+        session_id: "uuid-2",
+        conversation_id: active?.conversationId,
+        session_key: "agent:main:main",
+        body: "Carry this reviewed seed across normal /new.",
+        origin_entry_id: "entry-active",
+      });
+    } finally {
+      sessionMemoryDb.close();
+    }
   });
 
   for (const reason of ["restart", "shutdown"] as const) {
