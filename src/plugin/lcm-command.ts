@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import packageJson from "../../package.json" with { type: "json" };
 import { formatTimestamp } from "../compaction.js";
@@ -42,6 +45,7 @@ import {
   type SessionMemorySchemaCommand,
 } from "../session-memory-maintenance.js";
 import type { SessionMemoryOverlayMode } from "../session-memory.js";
+import { carryForwardSessionMemoryEntries } from "../session-memory-writer.js";
 
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
@@ -93,7 +97,17 @@ type ParsedLcmCommand =
   | { kind: "doctor_cleaners"; apply: boolean; filterId?: DoctorCleanerId; vacuum: boolean }
   | { kind: "session_memory_mode"; action: "status" | "clear" | SessionMemoryOverlayMode }
   | { kind: "session_memory_schema"; command: SessionMemorySchemaCommand }
+  | { kind: "session_memory_carry_forward"; command: SessionMemoryCarryForwardCommand }
   | { kind: "help"; error?: string };
+
+type SessionMemoryCarryForwardCommand = {
+  fromConversationId: number;
+  fromSessionKey?: string;
+  dbPath?: string;
+  execute: boolean;
+  confirm?: string;
+  maxEntries?: number;
+};
 
 type RotateCommandEngine = {
   rotateSessionStorageWithBackup(params: {
@@ -232,6 +246,32 @@ function splitArgs(rawArgs: string | undefined): string[] {
     .filter(Boolean);
 }
 
+function isTempPath(path: string): boolean {
+  const tempRoot = resolve(tmpdir());
+  const target = resolve(path);
+  return target === tempRoot || target.startsWith(`${tempRoot}${sep}`);
+}
+
+function sessionMemoryCarryForwardConfirmationToken(params: {
+  dbPath: string;
+  fromConversationId: number;
+  toConversationId: number;
+  sessionId: string;
+  sessionKey?: string | null;
+}): string {
+  return `smcf:${createHash("sha256")
+    .update([
+      "session_memory_carry_forward_v1",
+      resolve(params.dbPath),
+      String(params.fromConversationId),
+      String(params.toConversationId),
+      params.sessionId,
+      params.sessionKey ?? "",
+    ].join("\n"))
+    .digest("hex")
+    .slice(0, 12)}`;
+}
+
 function parseDoctorCleanerApplyArgs(tokens: string[]):
   | { ok: true; filterId?: DoctorCleanerId; vacuum: boolean }
   | { ok: false; error: string } {
@@ -334,6 +374,100 @@ function parseSessionMemorySchemaArgs(tokens: string[]):
   };
 }
 
+function parseSessionMemoryCarryForwardArgs(tokens: string[]):
+  | { ok: true; command: SessionMemoryCarryForwardCommand }
+  | { ok: false; error: string } {
+  let fromConversationId: number | undefined;
+  let fromSessionKey: string | undefined;
+  let dbPath: string | undefined;
+  let execute = false;
+  let confirm: string | undefined;
+  let maxEntries: number | undefined;
+
+  const rest = tokens.slice(1);
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (token === "--from") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--from` requires a conversation id." };
+      }
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        return { ok: false, error: "`--from` must be a positive integer conversation id." };
+      }
+      fromConversationId = parsed;
+      index += 1;
+      continue;
+    }
+    if (token === "--from-session-key") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--from-session-key` requires a session key." };
+      }
+      fromSessionKey = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--db") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--db` requires a path." };
+      }
+      dbPath = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--max-entries") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--max-entries` requires a number." };
+      }
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        return { ok: false, error: "`--max-entries` must be a positive integer." };
+      }
+      maxEntries = parsed;
+      index += 1;
+      continue;
+    }
+    if (token === "--execute") {
+      execute = true;
+      continue;
+    }
+    if (token === "--dry-run") {
+      execute = false;
+      continue;
+    }
+    if (token === "--confirm") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--confirm` requires a token." };
+      }
+      confirm = value;
+      index += 1;
+      continue;
+    }
+    return { ok: false, error: `Unknown session-memory carry-forward option \`${token}\`.` };
+  }
+
+  if (!fromConversationId) {
+    return { ok: false, error: "`/lossless session-memory carry-forward` requires `--from <conversation-id>`." };
+  }
+
+  return {
+    ok: true,
+    command: {
+      fromConversationId,
+      fromSessionKey,
+      dbPath,
+      execute,
+      confirm,
+      maxEntries,
+    },
+  };
+}
+
 function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
   const action = tokens[0]?.toLowerCase();
   if (!action || action === "status") {
@@ -352,9 +486,15 @@ function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
       ? { kind: "session_memory_schema", command: parsed.command }
       : { kind: "help", error: parsed.error };
   }
+  if (action === "carry-forward") {
+    const parsed = parseSessionMemoryCarryForwardArgs(tokens);
+    return parsed.ok
+      ? { kind: "session_memory_carry_forward", command: parsed.command }
+      : { kind: "help", error: parsed.error };
+  }
   return {
     kind: "help",
-    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, and \`schema plan|check|apply\`.`,
+    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, \`carry-forward\`, and \`schema plan|check|apply\`.`,
   };
 }
 
@@ -859,6 +999,10 @@ function buildHelpText(error?: string): string {
         "Inspect or set the current session's volatile read-only session-memory overlay mode.",
       ),
       buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} session-memory carry-forward --from <conversation-id>`),
+        "Dry-run or temp-DB execute reviewed seed carry-forward into the current conversation.",
+      ),
+      buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory schema plan|check|apply`),
         "Plan or run gated session-memory schema maintenance.",
       ),
@@ -1146,6 +1290,155 @@ async function buildSessionMemoryModeText(params: {
       ]),
     );
   }
+  return lines.join("\n");
+}
+
+async function buildSessionMemoryCarryForwardText(params: {
+  ctx: PluginCommandContext;
+  db: DatabaseSync;
+  config: LcmConfig;
+  command: SessionMemoryCarryForwardCommand;
+}): Promise<string> {
+  const current = await resolveCurrentConversation({
+    ctx: params.ctx,
+    db: params.db,
+  });
+  const dbPath = params.command.dbPath?.trim() || params.config.sessionMemoryOverlay.dbPath;
+  const lines = [
+    ...buildHeaderLines(),
+    "",
+    "🧠 Session Memory Carry-Forward",
+    "",
+  ];
+
+  if (current.kind === "unavailable") {
+    lines.push(
+      buildSection("📍 Target conversation", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", current.reason),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const confirmation = sessionMemoryCarryForwardConfirmationToken({
+    dbPath,
+    fromConversationId: params.command.fromConversationId,
+    toConversationId: current.stats.conversationId,
+    sessionId: current.stats.sessionId,
+    sessionKey: current.stats.sessionKey,
+  });
+  const maxEntries = params.command.maxEntries ?? 12;
+
+  lines.push(
+    buildSection("📍 Target conversation", [
+      buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
+      buildStatLine("session id", formatCommand(truncateMiddle(current.stats.sessionId, 44))),
+      buildStatLine(
+        "session key",
+        current.stats.sessionKey ? formatCommand(truncateMiddle(current.stats.sessionKey, 44)) : "missing",
+      ),
+    ]),
+    "",
+    buildSection("🧷 Source", [
+      buildStatLine("conversation id", formatNumber(params.command.fromConversationId)),
+      buildStatLine(
+        "session key filter",
+        params.command.fromSessionKey ? formatCommand(truncateMiddle(params.command.fromSessionKey, 44)) : "none",
+      ),
+      buildStatLine("max entries", formatNumber(maxEntries)),
+    ]),
+    "",
+    buildSection("💾 Write target", [
+      buildStatLine("session-memory db", dbPath),
+      buildStatLine("overlay enabled", params.config.sessionMemoryOverlay.enabled ? "yes" : "no"),
+      buildStatLine("mode", params.command.execute ? "execute" : "dry_run"),
+      buildStatLine("execute confirmation", confirmation),
+    ]),
+  );
+
+  if (!params.command.execute) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", "dry_run"),
+        buildStatLine(
+          "next",
+          `rerun with ${formatCommand("--execute")} ${formatCommand("--confirm")} ${confirmation}`,
+        ),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  if (params.command.confirm !== confirmation) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", "refused"),
+        buildStatLine("reason", "confirmation token mismatch"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+  if (params.config.sessionMemoryOverlay.enabled) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", "refused"),
+        buildStatLine("reason", "session-memory overlay is enabled"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+  const isTempTarget = isTempPath(dbPath);
+  if (!isTempTarget) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", "refused"),
+        buildStatLine("reason", "real DB carry-forward requires a separate approved backup gate"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const result = carryForwardSessionMemoryEntries({
+    dbPath,
+    lcmDbPath: params.config.databasePath,
+    fromConversationId: params.command.fromConversationId,
+    fromSessionKey: params.command.fromSessionKey,
+    to: {
+      sessionId: current.stats.sessionId,
+      conversationId: current.stats.conversationId,
+      sessionKey: current.stats.sessionKey ?? undefined,
+    },
+    maxEntries,
+  });
+
+  if (!result.ok) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", result.status),
+        buildStatLine("reason", result.reason),
+        ...(result.detail ? [buildStatLine("detail", result.detail)] : []),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(
+    "",
+    buildSection("🛠️ Result", [
+      buildStatLine("status", result.status),
+      buildStatLine("session id", formatCommand(truncateMiddle(result.sessionId, 44))),
+      buildStatLine("segment id", formatCommand(truncateMiddle(result.segmentId, 44))),
+      buildStatLine("entries carried", formatNumber(result.entryCount)),
+      buildStatLine("links written", formatNumber(result.linkCount)),
+      buildStatLine("updated at", result.updatedAt),
+    ]),
+  );
   return lines.join("\n");
 }
 
@@ -2707,6 +3000,15 @@ export function createLcmCommand(params: {
         case "session_memory_schema":
           return {
             text: buildSessionMemorySchemaMaintenanceText({
+              config: params.config,
+              command: parsed.command,
+            }),
+          };
+        case "session_memory_carry_forward":
+          return {
+            text: await buildSessionMemoryCarryForwardText({
+              ctx,
+              db: await getDb(),
               config: params.config,
               command: parsed.command,
             }),

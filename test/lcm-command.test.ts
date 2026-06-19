@@ -11,6 +11,7 @@ import { ConversationStore } from "../src/store/conversation-store.js";
 import { FocusBriefStore } from "../src/store/focus-brief-store.js";
 import { SummaryStore } from "../src/store/summary-store.js";
 import { createLcmCommand, __testing } from "../src/plugin/lcm-command.js";
+import { writeSessionMemorySeedPacket } from "../src/session-memory-writer.js";
 import type { LcmSummarizeFn } from "../src/summarize.js";
 import type { LcmDependencies } from "../src/types.js";
 import { assemblySourceTelemetry } from "../src/assembly-source-telemetry.js";
@@ -2014,6 +2015,117 @@ describe("lcm command", () => {
     const check = await runCommand("session-memory schema check");
     expect(check.text).toContain("Session Memory Schema Check");
     expect(check.text).toContain("status: compatible");
+  });
+
+  it("carries reviewed session-memory entries into the current conversation only with confirmation", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-carry-forward.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const runCommand = async (args: string): Promise<{ text: string }> => {
+      return await command.handler!(createCommandContext(args, {
+        sessionId: "session-memory-carry-target",
+        sessionKey: "agent:main:webchat:session-memory-carry-target",
+      })) as { text: string };
+    };
+
+    const targetConversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-carry-target",
+      sessionKey: "agent:main:webchat:session-memory-carry-target",
+    });
+
+    const schemaDryRun = await runCommand(`session-memory schema apply --db ${sessionMemoryDbPath}`);
+    const schemaConfirmation = schemaDryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(schemaConfirmation).toBeTruthy();
+    const schemaCreated = await runCommand(
+      `session-memory schema apply --execute --confirm ${schemaConfirmation} --db ${sessionMemoryDbPath}`,
+    );
+    expect(schemaCreated.text).toContain("status: created");
+
+    const seed = writeSessionMemorySeedPacket({
+      dbPath: sessionMemoryDbPath,
+      lcmDbPath: fixture.dbPath,
+      packet: {
+        session: {
+          sessionId: "session-memory-carry-source",
+          conversationId: 2520,
+          sessionKey: "agent:main:webchat:session-memory-carry-source",
+        },
+        segment: {
+          segmentId: "segment-memory-carry-source",
+          seq: 1,
+        },
+        entries: [
+          {
+            entryId: "entry-memory-carry-source-decision",
+            kind: "decision",
+            confidence: 0.95,
+            priority: 30,
+            body: "Normal /new continues the previous workline and carries reviewed seed forward.",
+            sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+          },
+        ],
+      },
+    });
+    expect(seed).toMatchObject({ ok: true, entryCount: 1 });
+
+    const dryRun = await runCommand("session-memory carry-forward --from 2520");
+    const confirmation = dryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(dryRun.text).toContain("Session Memory Carry-Forward");
+    expect(dryRun.text).toContain("status: dry_run");
+    expect(dryRun.text).toContain("conversation id: 2,520");
+    expect(dryRun.text).toContain(`conversation id: ${targetConversation.conversationId}`);
+    expect(confirmation).toBeTruthy();
+    const dryRunDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        (dryRunDb
+          .prepare("SELECT COUNT(*) AS count FROM entries WHERE session_id = ?")
+          .get("session-memory-carry-target") as { count: number }).count,
+      ).toBe(0);
+    } finally {
+      dryRunDb.close();
+    }
+
+    const refused = await runCommand("session-memory carry-forward --from 2520 --execute --confirm wrong");
+    expect(refused.text).toContain("status: refused");
+    expect(refused.text).toContain("reason: confirmation token mismatch");
+
+    const executed = await runCommand(
+      `session-memory carry-forward --from 2520 --execute --confirm ${confirmation}`,
+    );
+    expect(executed.text).toContain("status: written");
+    expect(executed.text).toContain("entries carried: 1");
+    expect(executed.text).toContain("links written: 1");
+
+    const sessionMemoryDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        (sessionMemoryDb
+          .prepare("SELECT COUNT(*) AS count FROM sessions WHERE conversation_id = ?")
+          .get(targetConversation.conversationId) as { count: number }).count,
+      ).toBe(1);
+      expect(
+        (sessionMemoryDb
+          .prepare("SELECT COUNT(*) AS count FROM entries WHERE origin_entry_id = ?")
+          .get("entry-memory-carry-source-decision") as { count: number }).count,
+      ).toBe(1);
+      expect(
+        (sessionMemoryDb
+          .prepare("SELECT COUNT(*) AS count FROM links WHERE relation = 'carried_to'")
+          .get() as { count: number }).count,
+      ).toBe(1);
+    } finally {
+      sessionMemoryDb.close();
+    }
   });
 
   it("rotates the current session and replaces the latest rotate backup", async () => {
