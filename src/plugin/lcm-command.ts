@@ -1436,6 +1436,7 @@ async function buildSessionMemoryCarryForwardText(params: {
       buildStatLine("session id", formatCommand(truncateMiddle(result.sessionId, 44))),
       buildStatLine("segment id", formatCommand(truncateMiddle(result.segmentId, 44))),
       buildStatLine("entries carried", formatNumber(result.entryCount)),
+      buildStatLine("entries skipped", formatNumber(result.skippedEntryIds.length)),
       buildStatLine("links written", formatNumber(result.linkCount)),
       buildStatLine("updated at", result.updatedAt),
     ]),

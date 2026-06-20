@@ -468,10 +468,10 @@ describe("session-memory writer", () => {
             },
             {
               entryId: "entry-old-next",
-              kind: "next_action",
+              kind: "risk",
               confidence: 0.9,
               priority: 20,
-              body: "On normal /new, carry reviewed seed forward to the new conversation.",
+              body: "Conversation-local seed can go stale without a refresh policy.",
               sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-gate15-new-seed-lifecycle-policy-2026-06-19.md" }],
             },
           ],
@@ -562,7 +562,7 @@ describe("session-memory writer", () => {
         entryCount: 2,
       });
       expect(rendered.ok && rendered.content).toContain("Constraints:");
-      expect(rendered.ok && rendered.content).toContain("Next actions:");
+      expect(rendered.ok && rendered.content).toContain("Risks:");
 
       const unrelatedLookup = await lookupSessionMemoryOverlay(
         {
@@ -582,6 +582,120 @@ describe("session-memory writer", () => {
         source: "session_memory_overlay",
         reason: "no_active_entries",
       });
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("does not carry current-state facts or next actions as active entries", async () => {
+    const fixture = createSchemaFixture();
+    try {
+      const seeded = writeSessionMemorySeedPacket({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        now: new Date("2026-06-20T06:00:00.000Z"),
+        packet: basePacket({
+          session: {
+            sessionId: "session-stale-source",
+            conversationId: 2565,
+            sessionKey: "agent:main:dashboard:source",
+          },
+          segment: {
+            segmentId: "segment-stale-source",
+            seq: 1,
+          },
+          entries: [
+            {
+              entryId: "entry-long-constraint",
+              kind: "constraint",
+              confidence: 0.95,
+              priority: 50,
+              body: "Do not enable runtime overlay without a separate named approval gate.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+            },
+            {
+              entryId: "entry-stable-decision",
+              kind: "decision",
+              confidence: 0.9,
+              priority: 40,
+              body: "Normal /new continues the previous workline and may carry reviewed durable seed.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/STARTUP.md" }],
+            },
+            {
+              entryId: "entry-durable-fact",
+              kind: "fact",
+              confidence: 0.85,
+              priority: 30,
+              body: "Session-memory is a reviewed working-memory overlay for facts, decisions, risks, and next steps.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/work/lossless-current.md" }],
+            },
+            {
+              entryId: "entry-current-state-fact",
+              kind: "fact",
+              confidence: 0.8,
+              priority: 20,
+              body: "The real session-memory DB currently has active reviewed seed rows only for older conversations 2331 and 2360; current conversation 2520 has no active seed rows.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/daily/Main-2026-06-19.md" }],
+            },
+            {
+              entryId: "entry-completed-next-action",
+              kind: "next_action",
+              confidence: 0.8,
+              priority: 10,
+              body: "First prove this exact packet on a temp DB before any real DB write.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-current-conversation-seed-carry-forward-2026-06-19.md" }],
+            },
+          ],
+        }),
+      });
+      expect(seeded).toMatchObject({ ok: true, entryCount: 5 });
+
+      const carried = carryForwardSessionMemoryEntries({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        fromConversationId: 2565,
+        fromSessionKey: "agent:main:dashboard:source",
+        to: {
+          sessionId: "session-refresh-target",
+          conversationId: 2566,
+          sessionKey: "agent:main:dashboard:target",
+        },
+        now: new Date("2026-06-20T06:05:00.000Z"),
+      });
+
+      expect(carried).toMatchObject({
+        ok: true,
+        status: "written",
+        entryCount: 3,
+        linkCount: 3,
+        skippedEntryIds: [
+          { entryId: "entry-current-state-fact", reason: "current_state_fact_requires_refresh" },
+          { entryId: "entry-completed-next-action", reason: "next_action_requires_refresh" },
+        ],
+      });
+
+      const db = new DatabaseSync(fixture.dbPath, { readOnly: true });
+      try {
+        const carriedBodies = db
+          .prepare(
+            `SELECT e.origin_entry_id AS origin_entry_id, e.kind AS kind, e.body AS body
+             FROM entries e
+             JOIN sessions s ON s.session_id = e.session_id
+             WHERE s.conversation_id = ? AND e.status = 'active'
+             ORDER BY e.priority DESC`,
+          )
+          .all(2566) as Array<{ origin_entry_id: string; kind: string; body: string }>;
+        expect(carriedBodies.map((entry) => entry.origin_entry_id)).toEqual([
+          "entry-long-constraint",
+          "entry-stable-decision",
+          "entry-durable-fact",
+        ]);
+        expect(carriedBodies.map((entry) => entry.kind)).toEqual(["constraint", "decision", "fact"]);
+        expect(carriedBodies.map((entry) => entry.body).join("\n")).not.toContain("current conversation 2520 has no active seed rows");
+        expect(carriedBodies.map((entry) => entry.body).join("\n")).not.toContain("First prove this exact packet");
+      } finally {
+        db.close();
+      }
     } finally {
       fixture.cleanup();
     }
