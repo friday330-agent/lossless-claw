@@ -13,6 +13,7 @@ import { buildSessionMemorySchemaMaintenanceText } from "../src/session-memory-m
 import {
   carryForwardSessionMemoryEntries,
   rejectSessionMemoryEntries,
+  refreshSessionMemoryEntries,
   type SessionMemorySeedPacket,
   writeSessionMemorySeedPacket,
 } from "../src/session-memory-writer.js";
@@ -894,6 +895,170 @@ describe("session-memory writer", () => {
       } finally {
         db.close();
       }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("refreshes stale current conversation entries in place", async () => {
+    const fixture = createSchemaFixture();
+    try {
+      const seeded = writeSessionMemorySeedPacket({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        now: new Date("2026-06-20T10:20:00.000Z"),
+        packet: basePacket({
+          session: {
+            sessionId: "session-refresh-in-place",
+            conversationId: 2565,
+            sessionKey: "agent:main:dashboard:current",
+          },
+          segment: {
+            segmentId: "segment-refresh-in-place",
+            seq: 1,
+          },
+          entries: [
+            {
+              entryId: "entry-refresh-constraint",
+              kind: "constraint",
+              confidence: 0.97,
+              priority: 50,
+              body: "Do not write the real DB, edit config, restart gateway, or enable runtime overlay without a separately approved named gate.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+            },
+            {
+              entryId: "entry-refresh-stale-fact",
+              kind: "fact",
+              confidence: 0.96,
+              priority: 45,
+              body: "The real session-memory DB currently has active reviewed seed rows only for older conversations 2331 and 2360; current conversation 2520 has no active seed rows.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/STARTUP.md" }],
+            },
+            {
+              entryId: "entry-refresh-decision",
+              kind: "decision",
+              confidence: 0.93,
+              priority: 40,
+              body: "Proceed with practical Lossless integration as a read-only reviewed working-memory overlay.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/work/lossless-current.md" }],
+            },
+            {
+              entryId: "entry-refresh-next-action",
+              kind: "next_action",
+              confidence: 0.94,
+              priority: 35,
+              body: "First prove this exact packet on a temp DB before any real DB write.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-current-conversation-seed-carry-forward-2026-06-19.md" }],
+            },
+            {
+              entryId: "entry-refresh-risk",
+              kind: "risk",
+              confidence: 0.9,
+              priority: 30,
+              body: "Conversation-local seed is insufficient unless reviewed project facts are carried or refreshed.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-gate10-operational-policy-and-effect-validation-2026-06-16.md" }],
+            },
+          ],
+        }),
+      });
+      expect(seeded).toMatchObject({ ok: true, entryCount: 5 });
+
+      const refreshed = refreshSessionMemoryEntries({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        conversationId: 2565,
+        sessionKey: "agent:main:dashboard:current",
+        replacementEntries: [
+          {
+            sourceEntryId: "entry-refresh-stale-fact",
+            entryId: "entry-refresh-current-db-state",
+            body: "The real session-memory DB has active reviewed seed rows for conversations 2331, 2360, 2520, 2538, 2549, and 2565; runtime overlay insertion remains disabled.",
+            confidence: 0.96,
+            priority: 45,
+            sourceRefs: [{ type: "workspace_file", path: "Friday-memory/STARTUP.md" }],
+          },
+        ],
+        now: new Date("2026-06-20T10:25:00.000Z"),
+      });
+
+      expect(refreshed).toMatchObject({
+        ok: true,
+        status: "written",
+        conversationId: 2565,
+        sessionId: "session-refresh-in-place",
+        entryCount: 1,
+        linkCount: 1,
+        skippedEntryIds: [
+          { entryId: "entry-refresh-stale-fact", reason: "current_state_fact_requires_refresh" },
+          { entryId: "entry-refresh-next-action", reason: "next_action_requires_refresh" },
+        ],
+        replacementEntryIds: [
+          { fromEntryId: "entry-refresh-stale-fact", toEntryId: "entry-refresh-current-db-state" },
+        ],
+      });
+
+      const db = new DatabaseSync(fixture.dbPath, { readOnly: true });
+      try {
+        expect(
+          db
+            .prepare("SELECT status, settled_at, superseded_by_entry_id FROM entries WHERE entry_id = ?")
+            .get("entry-refresh-stale-fact"),
+        ).toEqual({
+          status: "superseded",
+          settled_at: "2026-06-20T10:25:00.000Z",
+          superseded_by_entry_id: "entry-refresh-current-db-state",
+        });
+        expect(
+          db
+            .prepare("SELECT status, settled_at, superseded_by_entry_id FROM entries WHERE entry_id = ?")
+            .get("entry-refresh-next-action"),
+        ).toEqual({
+          status: "settled",
+          settled_at: "2026-06-20T10:25:00.000Z",
+          superseded_by_entry_id: null,
+        });
+        expect(
+          db
+            .prepare("SELECT kind, status, origin_entry_id, body FROM entries WHERE entry_id = ?")
+            .get("entry-refresh-current-db-state"),
+        ).toEqual({
+          kind: "fact",
+          status: "active",
+          origin_entry_id: "entry-refresh-stale-fact",
+          body: "The real session-memory DB has active reviewed seed rows for conversations 2331, 2360, 2520, 2538, 2549, and 2565; runtime overlay insertion remains disabled.",
+        });
+        expect(
+          (db
+            .prepare("SELECT COUNT(*) AS count FROM links WHERE relation = 'supersedes' AND src_id = ? AND dst_id = ?")
+            .get("entry-refresh-current-db-state", "entry-refresh-stale-fact") as { count: number }).count,
+        ).toBe(1);
+      } finally {
+        db.close();
+      }
+
+      const lookup = await lookupSessionMemoryOverlay(
+        {
+          conversationId: 2565,
+          sessionKey: "agent:main:dashboard:current",
+        },
+        {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+          staleAfterMs: 7 * 24 * 60 * 60 * 1000,
+        },
+      );
+      expect(lookup).toMatchObject({
+        ok: true,
+        source: "session_memory_overlay",
+        entries: expect.arrayContaining([
+          expect.objectContaining({ entryId: "entry-refresh-current-db-state", kind: "fact" }),
+          expect.objectContaining({ entryId: "entry-refresh-constraint", kind: "constraint" }),
+        ]),
+      });
+      expect(lookup.ok && lookup.entries.map((entry) => entry.entryId)).not.toContain("entry-refresh-stale-fact");
+      expect(lookup.ok && lookup.entries.map((entry) => entry.entryId)).not.toContain("entry-refresh-next-action");
     } finally {
       fixture.cleanup();
     }

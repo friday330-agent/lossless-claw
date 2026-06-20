@@ -172,6 +172,38 @@ export type SessionMemoryCarryForwardResult =
       schemaReason?: SessionMemoryOverlaySkipReason;
     };
 
+export type SessionMemoryRefreshResult =
+  | {
+      ok: true;
+      status: "written";
+      conversationId: number;
+      sessionId: string;
+      segmentId: string;
+      entryCount: number;
+      linkCount: number;
+      skippedEntryIds: Array<{ entryId: string; reason: CarryForwardSkipReason }>;
+      replacementEntryIds: Array<{ fromEntryId: string; toEntryId: string }>;
+      updatedAt: string;
+    }
+  | {
+      ok: false;
+      status: "refused" | "failed";
+      reason:
+        | "real_db_refused"
+        | "db_absent"
+        | "schema_incompatible"
+        | "invalid_packet"
+        | "malformed_rows"
+        | "raw_transcript_detected"
+        | "lcm_schema_incompatible"
+        | "source_ref_missing"
+        | "no_active_entries"
+        | "no_refreshable_entries"
+        | "write_failed";
+      detail?: string;
+      schemaReason?: SessionMemoryOverlaySkipReason;
+    };
+
 type CarryForwardSkipReason = "current_state_fact_requires_refresh" | "next_action_requires_refresh";
 type CarryForwardSourceStatus = "stale" | "settled" | "superseded";
 
@@ -480,6 +512,196 @@ export function carryForwardSessionMemoryEntries(params: {
       status: "failed",
       reason: "write_failed",
       detail: error instanceof Error ? error.message : "session-memory carry-forward failed",
+    };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Best-effort cleanup after a bounded maintenance write.
+    }
+  }
+}
+
+export function refreshSessionMemoryEntries(params: {
+  dbPath: string;
+  lcmDbPath: string;
+  conversationId: number;
+  sessionKey?: string;
+  allowRealDb?: boolean;
+  maxEntries?: number;
+  replacementEntries?: SessionMemoryCarryForwardReplacementEntry[];
+  now?: Date;
+}): SessionMemoryRefreshResult {
+  if (!params.allowRealDb && !isTempPath(params.dbPath)) {
+    return { ok: false, status: "refused", reason: "real_db_refused" };
+  }
+  if (!existsSync(params.dbPath)) {
+    return { ok: false, status: "refused", reason: "db_absent" };
+  }
+  if (!Number.isInteger(params.conversationId)) {
+    return {
+      ok: false,
+      status: "refused",
+      reason: "invalid_packet",
+      detail: "conversationId is required",
+    };
+  }
+
+  const maxEntries =
+    typeof params.maxEntries === "number" && Number.isFinite(params.maxEntries)
+      ? Math.floor(params.maxEntries)
+      : 12;
+  if (maxEntries < 1) {
+    return {
+      ok: false,
+      status: "refused",
+      reason: "invalid_packet",
+      detail: "maxEntries must be >= 1",
+    };
+  }
+
+  let db: DatabaseSync | undefined;
+  const updatedAt = (params.now ?? new Date()).toISOString();
+  try {
+    db = new DatabaseSync(params.dbPath);
+    db.exec("PRAGMA foreign_keys = ON");
+    const compatibility = checkSessionMemorySchemaCompatibility(db);
+    if (!compatibility.ok) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "schema_incompatible",
+        schemaReason: compatibility.reason,
+      };
+    }
+
+    const read = readCarryForwardSourceEntries(db, {
+      conversationId: params.conversationId,
+      sessionKey: params.sessionKey,
+      maxEntries,
+    });
+    if (!read.ok) {
+      return refreshFromCarryForwardFailure(read.result);
+    }
+    const sourceEntries = read.entries;
+    const sessionIds = new Set(sourceEntries.map((entry) => entry.sessionId));
+    if (sessionIds.size !== 1) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "malformed_rows",
+        detail: "refresh requires active source entries from exactly one session",
+      };
+    }
+
+    const selection = selectCarryForwardEntries(sourceEntries);
+    const replacements = validateCarryForwardReplacementEntries({
+      replacements: params.replacementEntries ?? [],
+      skipped: selection.skipped,
+      sourceEntries,
+      toConversationId: params.conversationId,
+    });
+    if (!replacements.ok) {
+      return refreshFromCarryForwardFailure(replacements.result);
+    }
+    if (selection.skipped.length === 0 && replacements.entries.length === 0) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "no_refreshable_entries",
+        detail: "no current-state facts or next actions require refresh",
+      };
+    }
+
+    const refs = replacements.entries.flatMap((entry) => entry.sourceRefs);
+    const lcmValidation = validateSessionMemorySourceRefs(refs, { lcmDbPath: params.lcmDbPath });
+    if (!lcmValidation.ok) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: lcmValidation.reason === "source_ref_missing" ? "source_ref_missing" : "lcm_schema_incompatible",
+        schemaReason: lcmValidation.reason,
+      };
+    }
+    const checkpointValidation = validateCheckpointRefs(db, refs);
+    if (!checkpointValidation.ok) {
+      return refreshFromWriteFailure(checkpointValidation.result);
+    }
+
+    const sessionId = sourceEntries[0]?.sessionId;
+    if (!sessionId) {
+      return { ok: false, status: "refused", reason: "malformed_rows" };
+    }
+    const segmentId = `refresh:${params.conversationId}:segment:${hashShort(`${sessionId}:${updatedAt}`)}`;
+
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      insertRefreshSegment(db, {
+        segmentId,
+        sessionId,
+        seq: nextSegmentSeq(db, sessionId),
+        entryCount: replacements.entries.length,
+        updatedAt,
+      });
+      for (const entry of replacements.entries) {
+        insertRefreshReplacementEntry(db, {
+          entry,
+          sessionId,
+          segmentId,
+          updatedAt,
+        });
+        insertLink(
+          db,
+          {
+            linkId: `refresh:${params.conversationId}:link:${hashShort(entry.sourceEntryId)}`,
+            srcType: "entry",
+            srcId: entry.entryId,
+            relation: "supersedes",
+            dstType: "entry",
+            dstId: entry.sourceEntryId,
+            confidence: entry.confidence,
+          },
+          updatedAt,
+        );
+      }
+      markSkippedCarryForwardSourceEntries(db, selection.skipped, sourceEntries, replacements.entries, updatedAt);
+      db.prepare("UPDATE sessions SET updated_at = ? WHERE session_id = ?").run(updatedAt, sessionId);
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original write failure.
+      }
+      return {
+        ok: false,
+        status: "failed",
+        reason: "write_failed",
+        detail: error instanceof Error ? error.message : "session-memory refresh write failed",
+      };
+    }
+
+    return {
+      ok: true,
+      status: "written",
+      conversationId: params.conversationId,
+      sessionId,
+      segmentId,
+      entryCount: replacements.entries.length,
+      linkCount: replacements.entries.length,
+      skippedEntryIds: selection.skipped,
+      replacementEntryIds: replacements.entries.map((entry) => ({
+        fromEntryId: entry.sourceEntryId,
+        toEntryId: entry.entryId,
+      })),
+      updatedAt,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: "failed",
+      reason: "write_failed",
+      detail: error instanceof Error ? error.message : "session-memory refresh failed",
     };
   } finally {
     try {
@@ -1048,6 +1270,56 @@ function carryForwardInvalidPacket(
   return { ok: false, result: { ok: false, status: "refused", reason: "invalid_packet", detail } };
 }
 
+function refreshFromCarryForwardFailure(
+  result: Extract<SessionMemoryCarryForwardResult, { ok: false }>,
+): Extract<SessionMemoryRefreshResult, { ok: false }> {
+  const reason =
+    result.reason === "no_carryable_entries"
+      ? "no_refreshable_entries"
+      : result.reason === "real_db_refused" ||
+          result.reason === "db_absent" ||
+          result.reason === "schema_incompatible" ||
+          result.reason === "invalid_packet" ||
+          result.reason === "malformed_rows" ||
+          result.reason === "raw_transcript_detected" ||
+          result.reason === "lcm_schema_incompatible" ||
+          result.reason === "source_ref_missing" ||
+          result.reason === "no_active_entries" ||
+          result.reason === "write_failed"
+        ? result.reason
+        : "write_failed";
+  return {
+    ok: false,
+    status: result.status,
+    reason,
+    detail: result.detail,
+    schemaReason: result.schemaReason,
+  };
+}
+
+function refreshFromWriteFailure(
+  result: Extract<SessionMemoryWriteResult, { ok: false }>,
+): Extract<SessionMemoryRefreshResult, { ok: false }> {
+  const reason =
+    result.reason === "real_db_refused" ||
+    result.reason === "db_absent" ||
+    result.reason === "schema_incompatible" ||
+    result.reason === "invalid_packet" ||
+    result.reason === "raw_transcript_detected" ||
+    result.reason === "lcm_schema_incompatible" ||
+    result.reason === "source_ref_missing" ||
+    result.reason === "write_failed"
+      ? result.reason
+      : "write_failed";
+  return {
+    ok: false,
+    status: result.status,
+    reason,
+    detail: result.detail,
+    schemaReason: result.schemaReason,
+  };
+}
+
 function validateSourceRefs(refs: SessionMemorySourceRef[]): { ok: true } | { ok: false; reason: string } {
   if (!Array.isArray(refs)) {
     return { ok: false, reason: "sourceRefs must be an array" };
@@ -1155,6 +1427,37 @@ function insertSegment(db: DatabaseSync, packet: SessionMemorySeedPacket, update
     );
 }
 
+function nextSegmentSeq(db: DatabaseSync, sessionId: string): number {
+  const row = db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM segments WHERE session_id = ?").get(sessionId) as {
+    seq: unknown;
+  };
+  const seq = Number(row.seq);
+  if (!Number.isInteger(seq) || seq < 1) {
+    throw new Error(`Invalid next segment seq for ${sessionId}`);
+  }
+  return seq;
+}
+
+function insertRefreshSegment(
+  db: DatabaseSync,
+  params: {
+    segmentId: string;
+    sessionId: string;
+    seq: number;
+    entryCount: number;
+    updatedAt: string;
+  },
+): void {
+  db
+    .prepare(
+      `INSERT INTO segments (
+        segment_id, session_id, seq, status, start_ref_json, end_ref_json, token_estimate, entry_count,
+        opened_at, closed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 'active', NULL, NULL, NULL, ?, ?, NULL, ?, ?)`,
+    )
+    .run(params.segmentId, params.sessionId, params.seq, params.entryCount, params.updatedAt, params.updatedAt, params.updatedAt);
+}
+
 function insertEntry(
   db: DatabaseSync,
   packet: SessionMemorySeedPacket,
@@ -1182,6 +1485,37 @@ function insertEntry(
       entry.supersededByEntryId ?? null,
       updatedAt,
       updatedAt,
+    );
+}
+
+function insertRefreshReplacementEntry(
+  db: DatabaseSync,
+  params: {
+    entry: NormalizedCarryForwardReplacementEntry;
+    sessionId: string;
+    segmentId: string;
+    updatedAt: string;
+  },
+): void {
+  db
+    .prepare(
+      `INSERT INTO entries (
+        entry_id, session_id, segment_id, kind, status, confidence, priority, title, body, source_refs_json,
+        origin_entry_id, superseded_by_entry_id, created_at, updated_at, settled_at
+      ) VALUES (?, ?, ?, 'fact', 'active', ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)`,
+    )
+    .run(
+      params.entry.entryId,
+      params.sessionId,
+      params.segmentId,
+      params.entry.confidence,
+      params.entry.priority ?? 0,
+      params.entry.title ?? null,
+      params.entry.body,
+      serializeSourceRefs(params.entry.sourceRefs),
+      params.entry.sourceEntryId,
+      params.updatedAt,
+      params.updatedAt,
     );
 }
 
