@@ -44,7 +44,7 @@ import {
   buildSessionMemorySchemaMaintenanceText,
   type SessionMemorySchemaCommand,
 } from "../session-memory-maintenance.js";
-import type { SessionMemoryOverlayMode } from "../session-memory.js";
+import type { SessionMemoryOverlayMode, SessionMemoryOverlayRenderProfile } from "../session-memory.js";
 import {
   carryForwardSessionMemoryEntries,
   type SessionMemoryCarryForwardReplacementEntry,
@@ -99,6 +99,7 @@ type ParsedLcmCommand =
   | { kind: "doctor"; apply: boolean }
   | { kind: "doctor_cleaners"; apply: boolean; filterId?: DoctorCleanerId; vacuum: boolean }
   | { kind: "session_memory_mode"; action: "status" | "clear" | SessionMemoryOverlayMode }
+  | { kind: "session_memory_profile"; action: "clear" | SessionMemoryOverlayRenderProfile }
   | { kind: "session_memory_schema"; command: SessionMemorySchemaCommand }
   | { kind: "session_memory_carry_forward"; command: SessionMemoryCarryForwardCommand }
   | { kind: "help"; error?: string };
@@ -160,6 +161,15 @@ type SessionMemoryOverlayCommandEngine = {
     mode: SessionMemoryOverlayMode;
   }): SessionMemoryOverlaySessionStatus;
   clearSessionMemoryOverlayMode(params: {
+    sessionId?: string;
+    sessionKey?: string;
+  }): SessionMemoryOverlaySessionStatus;
+  setSessionMemoryOverlayRenderProfile(params: {
+    sessionId?: string;
+    sessionKey?: string;
+    renderProfile: SessionMemoryOverlayRenderProfile;
+  }): SessionMemoryOverlaySessionStatus;
+  clearSessionMemoryOverlayRenderProfile(params: {
     sessionId?: string;
     sessionKey?: string;
   }): SessionMemoryOverlaySessionStatus;
@@ -560,6 +570,16 @@ function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
       ? { kind: "session_memory_mode", action }
       : { kind: "help", error: `\`${VISIBLE_COMMAND} session-memory ${action}\` does not accept extra arguments.` };
   }
+  if (action === "profile") {
+    const profileAction = tokens[1]?.toLowerCase();
+    if (tokens.length !== 2 || (profileAction !== "grouped" && profileAction !== "compact" && profileAction !== "clear")) {
+      return {
+        kind: "help",
+        error: `\`${VISIBLE_COMMAND} session-memory profile\` accepts \`grouped\`, \`compact\`, or \`clear\`.`,
+      };
+    }
+    return { kind: "session_memory_profile", action: profileAction };
+  }
   if (action === "schema") {
     const parsed = parseSessionMemorySchemaArgs(tokens);
     return parsed.ok
@@ -574,7 +594,7 @@ function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
   }
   return {
     kind: "help",
-    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, \`carry-forward\`, and \`schema plan|check|apply\`.`,
+    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, \`profile grouped|compact|clear\`, \`carry-forward\`, and \`schema plan|check|apply\`.`,
   };
 }
 
@@ -1079,6 +1099,10 @@ function buildHelpText(error?: string): string {
         "Inspect or set the current session's volatile read-only session-memory overlay mode.",
       ),
       buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} session-memory profile grouped|compact|clear`),
+        "Set or clear the current session's volatile session-memory render profile override.",
+      ),
+      buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory carry-forward --from <conversation-id> [--replacements <json>]`),
         "Dry-run or temp-DB execute reviewed seed carry-forward and explicit replacement facts.",
       ),
@@ -1093,6 +1117,7 @@ function buildHelpText(error?: string): string {
       buildStatLine("alias", `${formatCommand(HIDDEN_ALIAS)} is accepted as a shorter alias.`),
       buildStatLine("current conversation", "Uses the active LCM session when the host exposes session identity."),
       buildStatLine("session-memory mode", "Session-local and in-memory only; it is not written to openclaw.json."),
+      buildStatLine("session-memory profile", "Session-local and in-memory only; it is not written to openclaw.json."),
       buildStatLine("`/new`", "Prunes context for the current LCM conversation. It does not split storage."),
       buildStatLine("`/reset`", "Resets OpenClaw session flow. Use rotate when you only want transcript compaction."),
     ]),
@@ -1269,6 +1294,8 @@ function formatSessionMemoryModeStatus(status: SessionMemoryOverlaySessionStatus
     buildStatLine("kill switch", formatBoolean(status.killSwitchEnabled)),
     buildStatLine("render version", status.renderVersion),
     buildStatLine("render profile", status.renderProfile),
+    buildStatLine("configured profile", status.configuredRenderProfile),
+    buildStatLine("profile override", status.overrideRenderProfile ?? "unset"),
     buildStatLine("max tokens", formatNumber(status.maxTokens)),
     buildStatLine("db path", status.dbPath),
   ];
@@ -1371,6 +1398,86 @@ async function buildSessionMemoryModeText(params: {
       ]),
     );
   }
+  return lines.join("\n");
+}
+
+async function buildSessionMemoryProfileText(params: {
+  ctx: PluginCommandContext;
+  db: DatabaseSync;
+  getLcm?: () => Promise<LcmCommandEngine>;
+  action: "clear" | SessionMemoryOverlayRenderProfile;
+}): Promise<string> {
+  const current = await resolveCurrentConversation({ ctx: params.ctx, db: params.db });
+  const sessionId = normalizeIdentity(params.ctx.sessionId)
+    ?? (current.kind === "resolved" ? normalizeIdentity(current.stats.sessionId) : undefined);
+  const sessionKey = normalizeIdentity(params.ctx.sessionKey)
+    ?? (current.kind === "resolved" ? normalizeIdentity(current.stats.sessionKey ?? undefined) : undefined);
+
+  const lines = [
+    ...buildHeaderLines(),
+    "",
+    "🧠 Session Memory",
+    "",
+  ];
+
+  if (!sessionId && !sessionKey) {
+    lines.push(
+      buildSection("📍 Current session", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine(
+          "reason",
+          current.kind === "unavailable"
+            ? current.reason
+            : "OpenClaw did not expose an active session id or session key.",
+        ),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(
+    buildSection("📍 Current session", [
+      buildStatLine("session id", sessionId ? formatCommand(truncateMiddle(sessionId, 44)) : "missing"),
+      buildStatLine("session key", sessionKey ? formatCommand(truncateMiddle(sessionKey, 44)) : "missing"),
+      buildStatLine("scope", "this runtime session only"),
+      buildStatLine("persistence", "volatile; not written to openclaw.json"),
+    ]),
+    "",
+  );
+
+  if (!params.getLcm) {
+    lines.push(
+      buildSection("🎛️ Render Profile", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", "The runtime-backed LCM engine is not available to commands."),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const engine = await params.getLcm();
+  if (
+    typeof engine.setSessionMemoryOverlayRenderProfile !== "function" ||
+    typeof engine.clearSessionMemoryOverlayRenderProfile !== "function"
+  ) {
+    lines.push(
+      buildSection("🎛️ Render Profile", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", "The runtime-backed LCM engine does not expose session-memory profile controls."),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const status = params.action === "clear"
+    ? engine.clearSessionMemoryOverlayRenderProfile({ sessionId, sessionKey })
+    : engine.setSessionMemoryOverlayRenderProfile({ sessionId, sessionKey, renderProfile: params.action });
+  lines.push(
+    buildSection("🎛️ Render Profile", [
+      buildStatLine("status", params.action === "clear" ? "cleared" : "updated"),
+      ...formatSessionMemoryModeStatus(status),
+    ]),
+  );
   return lines.join("\n");
 }
 
@@ -3093,6 +3200,15 @@ export function createLcmCommand(params: {
         case "session_memory_mode":
           return {
             text: await buildSessionMemoryModeText({
+              ctx,
+              db: await getDb(),
+              getLcm: params.getLcm,
+              action: parsed.action,
+            }),
+          };
+        case "session_memory_profile":
+          return {
+            text: await buildSessionMemoryProfileText({
               ctx,
               db: await getDb(),
               getLcm: params.getLcm,

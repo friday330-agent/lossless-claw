@@ -76,7 +76,11 @@ import { SummaryStore, type ContextItemRecord } from "./store/summary-store.js";
 import { createLcmSummarizeFromLegacyParams, LcmProviderAuthError } from "./summarize.js";
 import type { LcmDependencies, StartupSessionFileCandidate } from "./types.js";
 import { estimateTokens } from "./estimate-tokens.js";
-import type { SessionMemoryOverlayConfig, SessionMemoryOverlayMode } from "./session-memory.js";
+import type {
+  SessionMemoryOverlayConfig,
+  SessionMemoryOverlayMode,
+  SessionMemoryOverlayRenderProfile,
+} from "./session-memory.js";
 import { createLcmDatabaseBackup } from "./plugin/lcm-db-backup.js";
 import {
   DatabaseTransactionTimeoutError,
@@ -128,10 +132,12 @@ export type SessionMemoryOverlaySessionStatus = {
   sessionId?: string;
   sessionKey?: string;
   overrideMode?: SessionMemoryOverlayMode;
+  overrideRenderProfile?: SessionMemoryOverlayRenderProfile;
   effectiveMode: SessionMemoryOverlayMode;
   killSwitchEnabled: boolean;
   renderVersion: string;
-  renderProfile: string;
+  configuredRenderProfile: SessionMemoryOverlayRenderProfile;
+  renderProfile: SessionMemoryOverlayRenderProfile;
   dbPath: string;
   maxTokens: number;
 };
@@ -2847,6 +2853,7 @@ export class LcmContextEngine implements ContextEngine {
   private recentBootstrapImportsByConversation = new Map<number, BootstrapImportObservation>();
   private oversizedAutoRotateCheckpointByQueueKey = new Map<string, number>();
   private sessionMemoryOverlayModeBySession = new Map<string, SessionMemoryOverlayMode>();
+  private sessionMemoryOverlayRenderProfileBySession = new Map<string, SessionMemoryOverlayRenderProfile>();
   private largeFileTextSummarizerResolved = false;
   private largeFileTextSummarizer?: (prompt: string) => Promise<string | null>;
   private deps: LcmDependencies;
@@ -3190,6 +3197,9 @@ export class LcmContextEngine implements ContextEngine {
     const overrideMode = this.sessionMemoryOverlayModeBySession.get(
       this.resolveSessionMemoryOverlayOverrideKey(params),
     );
+    const overrideRenderProfile = this.sessionMemoryOverlayRenderProfileBySession.get(
+      this.resolveSessionMemoryOverlayOverrideKey(params),
+    );
     const enabled = overrideMode === "overlay-readonly"
       ? true
       : overrideMode === "native"
@@ -3198,6 +3208,7 @@ export class LcmContextEngine implements ContextEngine {
     return {
       ...this.config.sessionMemoryOverlay,
       enabled: this.config.sessionMemoryOverlay.killSwitchEnabled ? false : enabled,
+      renderProfile: overrideRenderProfile ?? this.config.sessionMemoryOverlay.renderProfile,
     };
   }
 
@@ -3207,16 +3218,19 @@ export class LcmContextEngine implements ContextEngine {
   }): SessionMemoryOverlaySessionStatus {
     const key = this.resolveSessionMemoryOverlayOverrideKey(params);
     const overrideMode = this.sessionMemoryOverlayModeBySession.get(key);
+    const overrideRenderProfile = this.sessionMemoryOverlayRenderProfileBySession.get(key);
     const effectiveConfig = this.resolveSessionMemoryOverlayEffectiveConfig(params);
     return {
       sessionId: params.sessionId,
       sessionKey: params.sessionKey,
       overrideMode,
+      overrideRenderProfile,
       effectiveMode: effectiveConfig.enabled && !effectiveConfig.killSwitchEnabled
       ? "overlay-readonly"
         : "native",
       killSwitchEnabled: effectiveConfig.killSwitchEnabled,
       renderVersion: effectiveConfig.renderVersion,
+      configuredRenderProfile: this.config.sessionMemoryOverlay.renderProfile,
       renderProfile: effectiveConfig.renderProfile,
       dbPath: effectiveConfig.dbPath,
       maxTokens: effectiveConfig.maxTokens,
@@ -3239,6 +3253,25 @@ export class LcmContextEngine implements ContextEngine {
   }): SessionMemoryOverlaySessionStatus {
     const key = this.resolveSessionMemoryOverlayOverrideKey(params);
     this.sessionMemoryOverlayModeBySession.delete(key);
+    return this.getSessionMemoryOverlayMode(params);
+  }
+
+  setSessionMemoryOverlayRenderProfile(params: {
+    sessionId?: string;
+    sessionKey?: string;
+    renderProfile: SessionMemoryOverlayRenderProfile;
+  }): SessionMemoryOverlaySessionStatus {
+    const key = this.resolveSessionMemoryOverlayOverrideKey(params);
+    this.sessionMemoryOverlayRenderProfileBySession.set(key, params.renderProfile);
+    return this.getSessionMemoryOverlayMode(params);
+  }
+
+  clearSessionMemoryOverlayRenderProfile(params: {
+    sessionId?: string;
+    sessionKey?: string;
+  }): SessionMemoryOverlaySessionStatus {
+    const key = this.resolveSessionMemoryOverlayOverrideKey(params);
+    this.sessionMemoryOverlayRenderProfileBySession.delete(key);
     return this.getSessionMemoryOverlayMode(params);
   }
 

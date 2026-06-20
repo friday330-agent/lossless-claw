@@ -1883,7 +1883,7 @@ describe("lcm command", () => {
     expect(check.text).toContain("status: compatible");
   });
 
-  it("sets and clears volatile session-memory overlay mode through /lossless", async () => {
+  it("sets and clears volatile session-memory overlay mode and render profile through /lossless", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
@@ -1895,15 +1895,18 @@ describe("lcm command", () => {
       },
     });
     let overrideMode: "native" | "overlay-readonly" | undefined;
+    let overrideRenderProfile: "grouped" | "compact" | undefined;
     const engine = {
       getSessionMemoryOverlayMode: vi.fn(() => ({
         sessionId: "session-memory-command-session",
         sessionKey: "agent:main:webchat:session-memory-command",
         overrideMode,
+        overrideRenderProfile,
         effectiveMode: overrideMode === "overlay-readonly" ? "overlay-readonly" : "native",
         killSwitchEnabled: false,
         renderVersion: config.sessionMemoryOverlay.renderVersion,
-        renderProfile: config.sessionMemoryOverlay.renderProfile,
+        configuredRenderProfile: config.sessionMemoryOverlay.renderProfile,
+        renderProfile: overrideRenderProfile ?? config.sessionMemoryOverlay.renderProfile,
         dbPath: config.sessionMemoryOverlay.dbPath,
         maxTokens: config.sessionMemoryOverlay.maxTokens,
       })),
@@ -1913,6 +1916,14 @@ describe("lcm command", () => {
       }),
       clearSessionMemoryOverlayMode: vi.fn(() => {
         overrideMode = undefined;
+        return engine.getSessionMemoryOverlayMode();
+      }),
+      setSessionMemoryOverlayRenderProfile: vi.fn((params: { renderProfile: "grouped" | "compact" }) => {
+        overrideRenderProfile = params.renderProfile;
+        return engine.getSessionMemoryOverlayMode();
+      }),
+      clearSessionMemoryOverlayRenderProfile: vi.fn(() => {
+        overrideRenderProfile = undefined;
         return engine.getSessionMemoryOverlayMode();
       }),
     };
@@ -1936,6 +1947,17 @@ describe("lcm command", () => {
     expect(enabled.text).toContain("status: updated");
     expect(enabled.text).toContain("effective mode: overlay-readonly");
     expect(enabled.text).toContain("persistence: volatile; not written to openclaw.json");
+
+    const compact = await command.handler!(ctx("session-memory profile compact")) as { text: string };
+    expect(compact.text).toContain("status: updated");
+    expect(compact.text).toContain("render profile: compact");
+    expect(compact.text).toContain("profile override: compact");
+    expect(config.sessionMemoryOverlay.renderProfile).toBe("grouped");
+
+    const profileCleared = await command.handler!(ctx("session-memory profile clear")) as { text: string };
+    expect(profileCleared.text).toContain("status: cleared");
+    expect(profileCleared.text).toContain("render profile: grouped");
+    expect(profileCleared.text).toContain("profile override: unset");
 
     const forcedNative = await command.handler!(ctx("session-memory native")) as { text: string };
     expect(forcedNative.text).toContain("effective mode: native");

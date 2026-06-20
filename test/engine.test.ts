@@ -6502,6 +6502,61 @@ describe("LcmContextEngine.assemble canonical path", () => {
     expect(config.sessionMemoryOverlay.enabled).toBe(false);
   });
 
+  it("applies a session-local session-memory render profile override during assembly", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-session-memory-profile-"));
+    tempDirs.push(tempDir);
+    const config = createTestConfig(join(tempDir, "lcm.db"));
+    config.sessionMemoryOverlay = {
+      ...config.sessionMemoryOverlay,
+      enabled: false,
+      renderProfile: "grouped",
+      dbPath: join(tempDir, "session-memory.db"),
+      lcmDbPath: config.databasePath,
+    };
+    const engine = createEngineWithConfig(config);
+    const sessionId = "session-memory-profile-override";
+    const sessionKey = "agent:main:webchat:session-memory-profile-override";
+
+    await engine.ingest({
+      sessionId,
+      sessionKey,
+      message: { role: "user", content: "persisted message one" } as AgentMessage,
+    });
+    const conversation = await engine.getConversationStore().getConversationBySessionKey(sessionKey);
+    expect(conversation).not.toBeNull();
+    createSessionMemoryOverlayFixture({
+      dbPath: config.sessionMemoryOverlay.dbPath,
+      conversationId: conversation!.conversationId,
+      body: "Compact profile overlay memory is active.",
+    });
+
+    engine.setSessionMemoryOverlayMode({ sessionId, sessionKey, mode: "overlay-readonly" });
+    engine.setSessionMemoryOverlayRenderProfile({ sessionId, sessionKey, renderProfile: "compact" });
+    const assembled = await engine.assemble({
+      sessionId,
+      sessionKey,
+      messages: [],
+      tokenBudget: 10_000,
+    });
+
+    const joined = assembled.messages.map((message) => String(message.content)).join("\n");
+    expect(joined).toContain("Compact profile overlay memory is active.");
+    expect(joined).toContain('profile="compact"');
+    expect(engine.getSessionMemoryOverlayMode({ sessionId, sessionKey })).toMatchObject({
+      configuredRenderProfile: "grouped",
+      overrideRenderProfile: "compact",
+      renderProfile: "compact",
+    });
+    expect(config.sessionMemoryOverlay.renderProfile).toBe("grouped");
+
+    engine.clearSessionMemoryOverlayRenderProfile({ sessionId, sessionKey });
+    expect(engine.getSessionMemoryOverlayMode({ sessionId, sessionKey })).toMatchObject({
+      configuredRenderProfile: "grouped",
+      overrideRenderProfile: undefined,
+      renderProfile: "grouped",
+    });
+  });
+
   it("session-local native mode forces session-memory overlay off even when config enables it", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-session-memory-native-"));
     tempDirs.push(tempDir);
