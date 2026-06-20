@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -45,7 +45,10 @@ import {
   type SessionMemorySchemaCommand,
 } from "../session-memory-maintenance.js";
 import type { SessionMemoryOverlayMode } from "../session-memory.js";
-import { carryForwardSessionMemoryEntries } from "../session-memory-writer.js";
+import {
+  carryForwardSessionMemoryEntries,
+  type SessionMemoryCarryForwardReplacementEntry,
+} from "../session-memory-writer.js";
 
 const VISIBLE_COMMAND = "/lossless";
 const HIDDEN_ALIAS = "/lcm";
@@ -107,7 +110,20 @@ type SessionMemoryCarryForwardCommand = {
   execute: boolean;
   confirm?: string;
   maxEntries?: number;
+  replacementsPath?: string;
 };
+
+type SessionMemoryReplacementPacketLoadResult =
+  | {
+      ok: true;
+      path?: string;
+      entries: SessionMemoryCarryForwardReplacementEntry[];
+      digest: string;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
 
 type RotateCommandEngine = {
   rotateSessionStorageWithBackup(params: {
@@ -258,6 +274,7 @@ function sessionMemoryCarryForwardConfirmationToken(params: {
   toConversationId: number;
   sessionId: string;
   sessionKey?: string | null;
+  replacementsDigest?: string;
 }): string {
   return `smcf:${createHash("sha256")
     .update([
@@ -267,9 +284,61 @@ function sessionMemoryCarryForwardConfirmationToken(params: {
       String(params.toConversationId),
       params.sessionId,
       params.sessionKey ?? "",
+      params.replacementsDigest ?? "",
     ].join("\n"))
     .digest("hex")
     .slice(0, 12)}`;
+}
+
+function loadSessionMemoryReplacementPacket(path: string | undefined): SessionMemoryReplacementPacketLoadResult {
+  if (!path) {
+    return {
+      ok: true,
+      entries: [],
+      digest: "none",
+    };
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    return {
+      ok: false,
+      error: `could not read replacements packet: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (raw.length > 64 * 1024) {
+    return { ok: false, error: "replacements packet exceeds 65536 chars" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return {
+      ok: false,
+      error: `replacements packet is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  const maybePacket = asRecord(parsed);
+  const entries = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(maybePacket?.replacementEntries)
+      ? maybePacket.replacementEntries
+      : undefined;
+  if (!entries) {
+    return {
+      ok: false,
+      error: "replacements packet must be an array or an object with replacementEntries array",
+    };
+  }
+
+  return {
+    ok: true,
+    path,
+    entries: entries as SessionMemoryCarryForwardReplacementEntry[],
+    digest: createHash("sha256").update(raw).digest("hex").slice(0, 16),
+  };
 }
 
 function parseDoctorCleanerApplyArgs(tokens: string[]):
@@ -383,6 +452,7 @@ function parseSessionMemoryCarryForwardArgs(tokens: string[]):
   let execute = false;
   let confirm: string | undefined;
   let maxEntries: number | undefined;
+  let replacementsPath: string | undefined;
 
   const rest = tokens.slice(1);
   for (let index = 0; index < rest.length; index += 1) {
@@ -431,6 +501,15 @@ function parseSessionMemoryCarryForwardArgs(tokens: string[]):
       index += 1;
       continue;
     }
+    if (token === "--replacements") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--replacements` requires a JSON file path." };
+      }
+      replacementsPath = value;
+      index += 1;
+      continue;
+    }
     if (token === "--execute") {
       execute = true;
       continue;
@@ -464,6 +543,7 @@ function parseSessionMemoryCarryForwardArgs(tokens: string[]):
       execute,
       confirm,
       maxEntries,
+      replacementsPath,
     },
   };
 }
@@ -999,8 +1079,8 @@ function buildHelpText(error?: string): string {
         "Inspect or set the current session's volatile read-only session-memory overlay mode.",
       ),
       buildStatLine(
-        formatCommand(`${VISIBLE_COMMAND} session-memory carry-forward --from <conversation-id>`),
-        "Dry-run or temp-DB execute reviewed seed carry-forward into the current conversation.",
+        formatCommand(`${VISIBLE_COMMAND} session-memory carry-forward --from <conversation-id> [--replacements <json>]`),
+        "Dry-run or temp-DB execute reviewed seed carry-forward and explicit replacement facts.",
       ),
       buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory schema plan|check|apply`),
@@ -1322,12 +1402,24 @@ async function buildSessionMemoryCarryForwardText(params: {
     return lines.join("\n");
   }
 
+  const replacements = loadSessionMemoryReplacementPacket(params.command.replacementsPath);
+  if (!replacements.ok) {
+    lines.push(
+      buildSection("🧩 Replacement packet", [
+        buildStatLine("status", "invalid"),
+        buildStatLine("reason", replacements.error),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
   const confirmation = sessionMemoryCarryForwardConfirmationToken({
     dbPath,
     fromConversationId: params.command.fromConversationId,
     toConversationId: current.stats.conversationId,
     sessionId: current.stats.sessionId,
     sessionKey: current.stats.sessionKey,
+    replacementsDigest: replacements.digest,
   });
   const maxEntries = params.command.maxEntries ?? 12;
 
@@ -1348,6 +1440,12 @@ async function buildSessionMemoryCarryForwardText(params: {
         params.command.fromSessionKey ? formatCommand(truncateMiddle(params.command.fromSessionKey, 44)) : "none",
       ),
       buildStatLine("max entries", formatNumber(maxEntries)),
+    ]),
+    "",
+    buildSection("🧩 Replacement packet", [
+      buildStatLine("path", replacements.path ?? "none"),
+      buildStatLine("replacement entries", formatNumber(replacements.entries.length)),
+      buildStatLine("digest", replacements.digest),
     ]),
     "",
     buildSection("💾 Write target", [
@@ -1415,6 +1513,7 @@ async function buildSessionMemoryCarryForwardText(params: {
       sessionKey: current.stats.sessionKey ?? undefined,
     },
     maxEntries,
+    replacementEntries: replacements.entries,
   });
 
   if (!result.ok) {
@@ -1437,6 +1536,7 @@ async function buildSessionMemoryCarryForwardText(params: {
       buildStatLine("segment id", formatCommand(truncateMiddle(result.segmentId, 44))),
       buildStatLine("entries carried", formatNumber(result.entryCount)),
       buildStatLine("entries skipped", formatNumber(result.skippedEntryIds.length)),
+      buildStatLine("entries replaced", formatNumber(result.replacementEntryIds.length)),
       buildStatLine("links written", formatNumber(result.linkCount)),
       buildStatLine("updated at", result.updatedAt),
     ]),

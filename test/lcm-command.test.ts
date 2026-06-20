@@ -2129,6 +2129,138 @@ describe("lcm command", () => {
     }
   });
 
+  it("carries reviewed replacement facts from an explicit temp-DB replacement packet", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-carry-replacements.db");
+    const replacementsPath = join(fixture.tempDir, "replacement-packet.json");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const runCommand = async (args: string): Promise<{ text: string }> => {
+      return await command.handler!(createCommandContext(args, {
+        sessionId: "session-memory-replacement-target",
+        sessionKey: "agent:main:webchat:session-memory-replacement-target",
+      })) as { text: string };
+    };
+
+    const targetConversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-replacement-target",
+      sessionKey: "agent:main:webchat:session-memory-replacement-target",
+    });
+
+    const schemaDryRun = await runCommand(`session-memory schema apply --db ${sessionMemoryDbPath}`);
+    const schemaConfirmation = schemaDryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(schemaConfirmation).toBeTruthy();
+    const schemaCreated = await runCommand(
+      `session-memory schema apply --execute --confirm ${schemaConfirmation} --db ${sessionMemoryDbPath}`,
+    );
+    expect(schemaCreated.text).toContain("status: created");
+
+    const seed = writeSessionMemorySeedPacket({
+      dbPath: sessionMemoryDbPath,
+      lcmDbPath: fixture.dbPath,
+      packet: {
+        session: {
+          sessionId: "session-memory-replacement-source",
+          conversationId: 2800,
+          sessionKey: "agent:main:webchat:session-memory-replacement-source",
+        },
+        segment: {
+          segmentId: "segment-memory-replacement-source",
+          seq: 1,
+        },
+        entries: [
+          {
+            entryId: "entry-memory-stale-state",
+            kind: "fact",
+            confidence: 0.82,
+            priority: 20,
+            body: "The current conversation 2565 has active seed rows copied from 2549.",
+            sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-gate24-grouped-vs-compact-readonly-eval-2026-06-20.md" }],
+          },
+        ],
+      },
+    });
+    expect(seed).toMatchObject({ ok: true, entryCount: 1 });
+
+    writeFileSync(replacementsPath, JSON.stringify({
+      replacementEntries: [
+        {
+          sourceEntryId: "entry-memory-stale-state",
+          entryId: "entry-memory-refreshed-state",
+          body: "Gate 28 replacement packets are temp-DB-only; runtime overlay remains disabled.",
+          confidence: 0.91,
+          priority: 25,
+          sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-gate28-replacement-packet-cli-2026-06-20.md" }],
+        },
+      ],
+    }));
+
+    const dryRun = await runCommand(`session-memory carry-forward --from 2800 --replacements ${replacementsPath}`);
+    const confirmation = dryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(dryRun.text).toContain("status: dry_run");
+    expect(dryRun.text).toContain("replacement entries: 1");
+    expect(confirmation).toBeTruthy();
+
+    const dryRunDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        (dryRunDb
+          .prepare("SELECT COUNT(*) AS count FROM entries WHERE session_id = ?")
+          .get("session-memory-replacement-target") as { count: number }).count,
+      ).toBe(0);
+    } finally {
+      dryRunDb.close();
+    }
+
+    const executed = await runCommand(
+      `session-memory carry-forward --from 2800 --replacements ${replacementsPath} --execute --confirm ${confirmation}`,
+    );
+    expect(executed.text).toContain("status: written");
+    expect(executed.text).toContain("entries carried: 1");
+    expect(executed.text).toContain("entries replaced: 1");
+
+    const sessionMemoryDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        sessionMemoryDb
+          .prepare("SELECT status, superseded_by_entry_id FROM entries WHERE entry_id = ?")
+          .get("entry-memory-stale-state"),
+      ).toEqual({
+        status: "superseded",
+        superseded_by_entry_id: "entry-memory-refreshed-state",
+      });
+      expect(
+        sessionMemoryDb
+          .prepare("SELECT status, origin_entry_id, body FROM entries WHERE entry_id = ?")
+          .get("entry-memory-refreshed-state"),
+      ).toEqual({
+        status: "active",
+        origin_entry_id: "entry-memory-stale-state",
+        body: "Gate 28 replacement packets are temp-DB-only; runtime overlay remains disabled.",
+      });
+      expect(
+        (sessionMemoryDb
+          .prepare("SELECT COUNT(*) AS count FROM links WHERE relation = 'supersedes'")
+          .get() as { count: number }).count,
+      ).toBe(1);
+      expect(
+        (sessionMemoryDb
+          .prepare("SELECT COUNT(*) AS count FROM sessions WHERE conversation_id = ?")
+          .get(targetConversation.conversationId) as { count: number }).count,
+      ).toBe(1);
+    } finally {
+      sessionMemoryDb.close();
+    }
+  });
+
   it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
