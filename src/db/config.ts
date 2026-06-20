@@ -61,8 +61,11 @@ export type SessionMemoryOverlayConfig = {
   maxTokens: number;
   staleAfterMs: number;
   renderVersion: string;
+  renderProfile: SessionMemoryOverlayRenderProfile;
   truncationEnabled: boolean;
 };
+
+export type SessionMemoryOverlayRenderProfile = "grouped" | "compact";
 
 export type LcmConfigSource = "env" | "plugin-config" | "default";
 
@@ -253,6 +256,14 @@ function toStr(value: unknown): string | undefined {
   if (typeof value === "string") {
     const trimmed = value.trim();
     return trimmed.length > 0 ? trimmed : undefined;
+  }
+  return undefined;
+}
+
+function toSessionMemoryOverlayRenderProfile(value: unknown): SessionMemoryOverlayRenderProfile | undefined {
+  const normalized = toStr(value)?.toLowerCase();
+  if (normalized === "grouped" || normalized === "compact") {
+    return normalized;
   }
   return undefined;
 }
@@ -593,6 +604,10 @@ export function resolveLcmConfigWithDiagnostics(
           env.LCM_SESSION_MEMORY_OVERLAY_RENDER_VERSION?.trim()
           ?? toStr(sessionMemoryOverlay?.renderVersion)
           ?? "session_memory_overlay_v1",
+        renderProfile:
+          toSessionMemoryOverlayRenderProfile(env.LCM_SESSION_MEMORY_OVERLAY_RENDER_PROFILE)
+          ?? toSessionMemoryOverlayRenderProfile(sessionMemoryOverlay?.renderProfile)
+          ?? "grouped",
         truncationEnabled:
           env.LCM_SESSION_MEMORY_OVERLAY_TRUNCATION_ENABLED !== undefined
             ? env.LCM_SESSION_MEMORY_OVERLAY_TRUNCATION_ENABLED === "true"

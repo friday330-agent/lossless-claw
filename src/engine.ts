@@ -131,6 +131,7 @@ export type SessionMemoryOverlaySessionStatus = {
   effectiveMode: SessionMemoryOverlayMode;
   killSwitchEnabled: boolean;
   renderVersion: string;
+  renderProfile: string;
   dbPath: string;
   maxTokens: number;
 };
@@ -3212,10 +3213,11 @@ export class LcmContextEngine implements ContextEngine {
       sessionKey: params.sessionKey,
       overrideMode,
       effectiveMode: effectiveConfig.enabled && !effectiveConfig.killSwitchEnabled
-        ? "overlay-readonly"
+      ? "overlay-readonly"
         : "native",
       killSwitchEnabled: effectiveConfig.killSwitchEnabled,
       renderVersion: effectiveConfig.renderVersion,
+      renderProfile: effectiveConfig.renderProfile,
       dbPath: effectiveConfig.dbPath,
       maxTokens: effectiveConfig.maxTokens,
     };
@@ -7474,6 +7476,7 @@ export class LcmContextEngine implements ContextEngine {
             `sessionMemoryOverlayTokens=${assembled.debug.sessionMemoryOverlay.renderedTokens}`,
             `sessionMemoryOverlayMode=${assembled.debug.sessionMemoryOverlay.effectiveMode}`,
             `sessionMemoryOverlayRenderVersion=${assembled.debug.sessionMemoryOverlay.renderVersion}`,
+            `sessionMemoryOverlayRenderProfile=${assembled.debug.sessionMemoryOverlay.renderProfile}`,
           ]
             .filter((part): part is string => Boolean(part))
             .join(" ")

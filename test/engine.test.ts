@@ -66,6 +66,7 @@ function createTestConfig(databasePath: string): LcmConfig {
       maxTokens: 800,
       staleAfterMs: 86_400_000,
       renderVersion: "session_memory_overlay_v1",
+      renderProfile: "grouped",
       truncationEnabled: false,
     },
     delegationTimeoutMs: 120_000,

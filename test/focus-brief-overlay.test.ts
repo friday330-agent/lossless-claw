@@ -376,6 +376,7 @@ describe("session memory assembly overlay", () => {
       projectionKey: undefined,
       effectiveMode: "native",
       renderVersion: "session_memory_overlay_v1",
+      renderProfile: "grouped",
     });
   });
 
@@ -496,6 +497,7 @@ describe("session memory assembly overlay", () => {
       segmentId: "segment-active",
       effectiveMode: "overlay-readonly",
       renderVersion: "session_memory_overlay_v1",
+      renderProfile: "grouped",
     });
   });
 });

@@ -56,6 +56,7 @@ describe("resolveLcmConfig", () => {
       maxTokens: 800,
       staleAfterMs: 86_400_000,
       renderVersion: "session_memory_overlay_v1",
+      renderProfile: "grouped",
       truncationEnabled: false,
     });
     expect(config.pruneHeartbeatOk).toBe(false);
@@ -115,6 +116,7 @@ describe("resolveLcmConfig", () => {
         maxTokens: 1200,
         staleAfterMs: 1234,
         renderVersion: "session_memory_overlay_plugin",
+        renderProfile: "compact",
         truncationEnabled: true,
       },
       autoRotateSessionFiles: {
@@ -173,6 +175,7 @@ describe("resolveLcmConfig", () => {
       maxTokens: 1200,
       staleAfterMs: 1234,
       renderVersion: "session_memory_overlay_plugin",
+      renderProfile: "compact",
       truncationEnabled: true,
     });
     expect(config.autoRotateSessionFiles).toEqual({
@@ -231,6 +234,7 @@ describe("resolveLcmConfig", () => {
       LCM_SESSION_MEMORY_OVERLAY_MAX_TOKENS: "1600",
       LCM_SESSION_MEMORY_OVERLAY_STALE_AFTER_MS: "5678",
       LCM_SESSION_MEMORY_OVERLAY_RENDER_VERSION: "session_memory_overlay_env",
+      LCM_SESSION_MEMORY_OVERLAY_RENDER_PROFILE: "compact",
       LCM_SESSION_MEMORY_OVERLAY_TRUNCATION_ENABLED: "false",
       LCM_SWEEP_MAX_DEPTH: "4",
       LCM_INCREMENTAL_MAX_DEPTH: "3",
@@ -264,6 +268,7 @@ describe("resolveLcmConfig", () => {
         maxTokens: 1200,
         staleAfterMs: 1234,
         renderVersion: "session_memory_overlay_plugin",
+        renderProfile: "grouped",
         truncationEnabled: true,
       },
       autoRotateSessionFiles: {
@@ -310,6 +315,7 @@ describe("resolveLcmConfig", () => {
       maxTokens: 1600,
       staleAfterMs: 5678,
       renderVersion: "session_memory_overlay_env",
+      renderProfile: "compact",
       truncationEnabled: false,
     });
     expect(config.autoRotateSessionFiles).toEqual({

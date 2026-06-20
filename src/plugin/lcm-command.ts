@@ -1188,6 +1188,7 @@ function formatSessionMemoryModeStatus(status: SessionMemoryOverlaySessionStatus
     buildStatLine("override", status.overrideMode ?? "unset"),
     buildStatLine("kill switch", formatBoolean(status.killSwitchEnabled)),
     buildStatLine("render version", status.renderVersion),
+    buildStatLine("render profile", status.renderProfile),
     buildStatLine("max tokens", formatNumber(status.maxTokens)),
     buildStatLine("db path", status.dbPath),
   ];

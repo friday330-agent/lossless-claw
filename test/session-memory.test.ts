@@ -948,6 +948,70 @@ describe("session-memory read-only overlay boundary", () => {
     });
   });
 
+  it("renders a compact overlay profile with typed bullets and a smaller token footprint", async () => {
+    const lookupResult = {
+      ok: true as const,
+      source: "session_memory_overlay" as const,
+      sessionId: "session-active",
+      segmentId: "segment-active",
+      projectionKey: "entry-key",
+      entries: [
+        {
+          entryId: "entry-action",
+          segmentId: "segment-active",
+          kind: "next_action" as const,
+          priority: 5,
+          body: "Improve compact overlay render profile before any runtime enablement.",
+          updatedAt: "2026-06-20T05:02:00.000Z",
+          sourceRefs: [{ type: "workspace_file" as const, path: "Friday-memory/CURRENT.md", line: 55 }],
+        },
+        {
+          entryId: "entry-decision",
+          segmentId: "segment-active",
+          kind: "decision" as const,
+          priority: 10,
+          body: "Keep runtime overlay insertion disabled while evaluating render shape.",
+          updatedAt: "2026-06-20T05:01:00.000Z",
+          sourceRefs: [{ type: "focus_brief" as const, briefId: "focus_123" }],
+        },
+        {
+          entryId: "entry-constraint",
+          segmentId: "segment-active",
+          kind: "constraint" as const,
+          priority: 1,
+          body: "Do not run another writer gate for this render-profile improvement.",
+          updatedAt: "2026-06-20T05:03:00.000Z",
+          sourceRefs: [{ type: "lcm_summary" as const, summaryId: "sum_123" }],
+        },
+      ],
+    };
+
+    const grouped = renderSessionMemoryOverlay(lookupResult, {
+      ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+      enabled: true,
+      maxTokens: 800,
+      renderProfile: "grouped",
+    });
+    const compact = renderSessionMemoryOverlay(lookupResult, {
+      ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+      enabled: true,
+      maxTokens: 800,
+      renderProfile: "compact",
+    });
+
+    if (!grouped.ok || !compact.ok) {
+      throw new Error("expected grouped and compact session-memory overlays");
+    }
+    expect(compact.content).toContain('profile="compact"');
+    expect(compact.content).toContain("- constraint id=entry-constraint refs=1:");
+    expect(compact.content).toContain("- decision id=entry-decision refs=1:");
+    expect(compact.content).toContain("- next_action id=entry-action refs=1:");
+    expect(compact.content).not.toContain("Source refs:");
+    expect(compact.content).not.toContain("workspace_file:Friday-memory/CURRENT.md:55");
+    expect(compact.tokenCount).toBeLessThan(grouped.tokenCount);
+    expect(compact.projectionKey).not.toBe(grouped.projectionKey);
+  });
+
   it("builds separate session-memory telemetry and projection keys without selected-source labels", async () => {
     const baseLookupResult = {
       ok: true as const,
@@ -1000,6 +1064,7 @@ describe("session-memory read-only overlay boundary", () => {
       projectionKey: rendered.projectionKey,
       effectiveMode: "overlay-readonly",
       renderVersion: "session_memory_overlay_v1",
+      renderProfile: "grouped",
     });
     expect(JSON.stringify(telemetry)).not.toContain("raw_only");
     expect(JSON.stringify(telemetry)).not.toContain("dag_summary");
@@ -1042,6 +1107,7 @@ describe("session-memory read-only overlay boundary", () => {
       projectionKey: undefined,
       effectiveMode: "native",
       renderVersion: "session_memory_overlay_v1",
+      renderProfile: "grouped",
     });
   });
 });

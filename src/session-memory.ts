@@ -138,10 +138,12 @@ export type SessionMemoryOverlayConfig = {
   maxTokens: number;
   staleAfterMs: number;
   renderVersion: string;
+  renderProfile: SessionMemoryOverlayRenderProfile;
   truncationEnabled: boolean;
 };
 
 export type SessionMemoryOverlayMode = "native" | "overlay-readonly";
+export type SessionMemoryOverlayRenderProfile = "grouped" | "compact";
 
 export const DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG: SessionMemoryOverlayConfig = {
   enabled: false,
@@ -152,6 +154,7 @@ export const DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG: SessionMemoryOverlayConfig =
   maxTokens: DEFAULT_MAX_TOKENS,
   staleAfterMs: DEFAULT_STALE_AFTER_MS,
   renderVersion: DEFAULT_OVERLAY_RENDER_VERSION,
+  renderProfile: "grouped",
   truncationEnabled: false,
 };
 
@@ -253,6 +256,7 @@ export type SessionMemoryOverlayTelemetry = {
   projectionKey?: string;
   effectiveMode: SessionMemoryOverlayMode;
   renderVersion: string;
+  renderProfile: SessionMemoryOverlayRenderProfile;
 };
 
 export function resolveSessionMemoryOverlayMode(
@@ -370,6 +374,7 @@ export function buildSessionMemoryOverlayTelemetry(
       projectionKey: undefined,
       effectiveMode,
       renderVersion: config.renderVersion,
+      renderProfile: config.renderProfile,
     };
   }
 
@@ -386,6 +391,7 @@ export function buildSessionMemoryOverlayTelemetry(
     projectionKey: result.projectionKey,
     effectiveMode,
     renderVersion: config.renderVersion,
+    renderProfile: config.renderProfile,
   };
 }
 
@@ -920,6 +926,7 @@ function buildSessionMemoryOverlayProjectionKey(
   const payload = {
     projectionFormat: "session_memory_overlay_projection_v1",
     renderVersion: config.renderVersion,
+    renderProfile: config.renderProfile,
     maxTokens: config.maxTokens,
     truncationEnabled: config.truncationEnabled,
     sessionId: lookupResult.sessionId,
@@ -935,6 +942,17 @@ function countSessionMemorySourceRefs(entries: SessionMemoryOverlayEntry[]): num
 }
 
 function buildSessionMemoryOverlayContent(
+  lookupResult: Extract<SessionMemoryOverlayLookupResult, { ok: true }>,
+  config: SessionMemoryOverlayConfig,
+  tokenCount: number,
+): string {
+  if (config.renderProfile === "compact") {
+    return buildCompactSessionMemoryOverlayContent(lookupResult, config, tokenCount);
+  }
+  return buildGroupedSessionMemoryOverlayContent(lookupResult, config, tokenCount);
+}
+
+function buildGroupedSessionMemoryOverlayContent(
   lookupResult: Extract<SessionMemoryOverlayLookupResult, { ok: true }>,
   config: SessionMemoryOverlayConfig,
   tokenCount: number,
@@ -974,6 +992,31 @@ function buildSessionMemoryOverlayContent(
   ].join("\n");
 }
 
+function buildCompactSessionMemoryOverlayContent(
+  lookupResult: Extract<SessionMemoryOverlayLookupResult, { ok: true }>,
+  config: SessionMemoryOverlayConfig,
+  tokenCount: number,
+): string {
+  const body = orderedSessionMemoryEntriesForRender(lookupResult.entries)
+    .map((entry) => {
+      const refs = entry.sourceRefs.length;
+      return `- ${entry.kind} id=${escapeSessionMemoryText(entry.entryId)} refs=${refs}: ${escapeSessionMemoryText(entry.body)}`;
+    })
+    .join("\n");
+
+  return [
+    `<session_memory source="session_memory" version="${escapeSessionMemoryAttribute(
+      config.renderVersion,
+    )}" profile="compact" session_id="${escapeSessionMemoryAttribute(
+      lookupResult.sessionId,
+    )}" segment_id="${escapeSessionMemoryAttribute(lookupResult.segmentId)}" entries="${
+      lookupResult.entries.length
+    }" source_refs="${countSessionMemorySourceRefs(lookupResult.entries)}" tokens="${tokenCount}">`,
+    body,
+    "</session_memory>",
+  ].join("\n");
+}
+
 const SESSION_MEMORY_RENDER_GROUPS: Array<{ kind: SessionMemoryOverlayEntryKind; label: string }> = [
   { kind: "constraint", label: "Constraints" },
   { kind: "decision", label: "Decisions" },
@@ -983,6 +1026,14 @@ const SESSION_MEMORY_RENDER_GROUPS: Array<{ kind: SessionMemoryOverlayEntryKind;
   { kind: "risk", label: "Risks" },
   { kind: "evidence", label: "Evidence" },
 ];
+
+function orderedSessionMemoryEntriesForRender(entries: SessionMemoryOverlayEntry[]): SessionMemoryOverlayEntry[] {
+  return SESSION_MEMORY_RENDER_GROUPS.flatMap((group) => {
+    return entries
+      .filter((entry) => entry.kind === group.kind)
+      .sort(compareSessionMemoryEntriesForRender);
+  });
+}
 
 function compareSessionMemoryEntriesForRender(
   left: SessionMemoryOverlayEntry,

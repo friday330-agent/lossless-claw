@@ -196,6 +196,10 @@
       "label": "Session Memory Render Version",
       "help": "Render-version string included in session-memory projection keys."
     },
+    "sessionMemoryOverlay.renderProfile": {
+      "label": "Session Memory Render Profile",
+      "help": "Rendered overlay shape. Use grouped for full headings/source refs, or compact for shorter typed bullets during compact-input evaluation."
+    },
     "sessionMemoryOverlay.truncationEnabled": {
       "label": "Session Memory Truncation",
       "help": "Future compatibility switch for truncating over-budget overlays. Default false; over-budget skips."
@@ -471,6 +475,10 @@
           },
           "renderVersion": {
             "type": "string"
+          },
+          "renderProfile": {
+            "type": "string",
+            "enum": ["grouped", "compact"]
           },
           "truncationEnabled": {
             "type": "boolean"

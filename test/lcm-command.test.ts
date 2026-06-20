@@ -1903,6 +1903,7 @@ describe("lcm command", () => {
         effectiveMode: overrideMode === "overlay-readonly" ? "overlay-readonly" : "native",
         killSwitchEnabled: false,
         renderVersion: config.sessionMemoryOverlay.renderVersion,
+        renderProfile: config.sessionMemoryOverlay.renderProfile,
         dbPath: config.sessionMemoryOverlay.dbPath,
         maxTokens: config.sessionMemoryOverlay.maxTokens,
       })),
