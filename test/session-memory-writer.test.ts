@@ -701,6 +701,107 @@ describe("session-memory writer", () => {
     }
   });
 
+  it("marks skipped source entries while carrying durable entries forward", () => {
+    const fixture = createSchemaFixture();
+    try {
+      const seeded = writeSessionMemorySeedPacket({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        now: new Date("2026-06-20T07:10:00.000Z"),
+        packet: basePacket({
+          session: {
+            sessionId: "session-mark-source",
+            conversationId: 2700,
+            sessionKey: "agent:main:dashboard:mark-source",
+          },
+          segment: {
+            segmentId: "segment-mark-source",
+            seq: 1,
+          },
+          entries: [
+            {
+              entryId: "entry-mark-constraint",
+              kind: "constraint",
+              confidence: 0.95,
+              priority: 30,
+              body: "Keep runtime overlay disabled until a separate approval gate.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+            },
+            {
+              entryId: "entry-mark-current-fact",
+              kind: "fact",
+              confidence: 0.85,
+              priority: 20,
+              body: "The current conversation 2565 has active seed rows copied from 2549.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-gate24-grouped-vs-compact-readonly-eval-2026-06-20.md" }],
+            },
+            {
+              entryId: "entry-mark-next-action",
+              kind: "next_action",
+              confidence: 0.8,
+              priority: 10,
+              body: "Compare grouped and compact overlay render output next.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/STARTUP.md" }],
+            },
+          ],
+        }),
+      });
+      expect(seeded).toMatchObject({ ok: true, entryCount: 3 });
+
+      const carried = carryForwardSessionMemoryEntries({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        fromConversationId: 2700,
+        fromSessionKey: "agent:main:dashboard:mark-source",
+        to: {
+          sessionId: "session-mark-target",
+          conversationId: 2701,
+          sessionKey: "agent:main:dashboard:mark-target",
+        },
+        now: new Date("2026-06-20T07:15:00.000Z"),
+      });
+
+      expect(carried).toMatchObject({
+        ok: true,
+        status: "written",
+        entryCount: 1,
+        linkCount: 1,
+        skippedEntryIds: [
+          { entryId: "entry-mark-current-fact", reason: "current_state_fact_requires_refresh" },
+          { entryId: "entry-mark-next-action", reason: "next_action_requires_refresh" },
+        ],
+      });
+
+      const db = new DatabaseSync(fixture.dbPath, { readOnly: true });
+      try {
+        expect(
+          db
+            .prepare("SELECT status, settled_at FROM entries WHERE entry_id = ?")
+            .get("entry-mark-constraint"),
+        ).toEqual({ status: "active", settled_at: null });
+        expect(
+          db
+            .prepare("SELECT status, settled_at FROM entries WHERE entry_id = ?")
+            .get("entry-mark-current-fact"),
+        ).toEqual({ status: "stale", settled_at: "2026-06-20T07:15:00.000Z" });
+        expect(
+          db
+            .prepare("SELECT status, settled_at FROM entries WHERE entry_id = ?")
+            .get("entry-mark-next-action"),
+        ).toEqual({ status: "settled", settled_at: "2026-06-20T07:15:00.000Z" });
+        expect(
+          (db
+            .prepare("SELECT COUNT(*) AS count FROM entries WHERE status = 'active' AND origin_entry_id IS NOT NULL")
+            .get() as { count: number }).count,
+        ).toBe(1);
+      } finally {
+        db.close();
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("fails closed when carry-forward has no active source entries", () => {
     const fixture = createSchemaFixture();
     try {

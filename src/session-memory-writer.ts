@@ -162,9 +162,12 @@ export type SessionMemoryCarryForwardResult =
     };
 
 type CarryForwardSkipReason = "current_state_fact_requires_refresh" | "next_action_requires_refresh";
+type CarryForwardSourceStatus = "stale" | "settled";
 
 type CarryForwardSourceEntry = {
   entryId: string;
+  sessionId: string;
+  segmentId: string;
   kind: SessionMemoryOverlayEntryKind;
   confidence: number;
   priority: number;
@@ -337,7 +340,7 @@ export function carryForwardSessionMemoryEntries(params: {
   }
 
   let db: DatabaseSync | undefined;
-  let sourceEntries: CarryForwardSourceEntry[];
+  const updatedAt = (params.now ?? new Date()).toISOString();
   try {
     db = new DatabaseSync(params.dbPath);
     db.exec("PRAGMA foreign_keys = ON");
@@ -358,64 +361,101 @@ export function carryForwardSessionMemoryEntries(params: {
     if (!read.ok) {
       return read.result;
     }
-    sourceEntries = read.entries;
+    const sourceEntries = read.entries;
+    const carryForwardSelection = selectCarryForwardEntries(sourceEntries);
+    if (carryForwardSelection.entries.length === 0) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "no_carryable_entries",
+        detail: "all active source entries require refresh before carry-forward",
+      };
+    }
+
+    const packet = buildCarryForwardPacket({
+      fromConversationId: params.fromConversationId,
+      to: params.to,
+      entries: carryForwardSelection.entries,
+    });
+    const preflight = validateSeedPacketShape(packet);
+    if (!preflight.ok) {
+      return preflight.result;
+    }
+    const refs = collectSourceRefs(packet);
+    const lcmValidation = validateSessionMemorySourceRefs(refs, { lcmDbPath: params.lcmDbPath });
+    if (!lcmValidation.ok) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: lcmValidation.reason === "source_ref_missing" ? "source_ref_missing" : "lcm_schema_incompatible",
+        schemaReason: lcmValidation.reason,
+      };
+    }
+    const checkpointValidation = validateCheckpointRefs(db, refs);
+    if (!checkpointValidation.ok) {
+      return checkpointValidation.result;
+    }
+
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      insertSession(db, packet, updatedAt);
+      insertSegment(db, packet, updatedAt);
+      for (const entry of packet.entries) {
+        insertEntry(db, packet, entry, updatedAt);
+      }
+      for (const link of packet.links ?? []) {
+        insertLink(db, link, updatedAt);
+      }
+      markSkippedCarryForwardSourceEntries(db, carryForwardSelection.skipped, sourceEntries, updatedAt);
+      db
+        .prepare("UPDATE segments SET entry_count = ?, updated_at = ? WHERE segment_id = ?")
+        .run(packet.entries.length, updatedAt, packet.segment.segmentId);
+      db.prepare("UPDATE sessions SET updated_at = ? WHERE session_id = ?").run(updatedAt, packet.session.sessionId);
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original write failure.
+      }
+      return {
+        ok: false,
+        status: "failed",
+        reason: "write_failed",
+        detail: error instanceof Error ? error.message : "session-memory carry-forward write failed",
+      };
+    }
+
+    return {
+      ok: true,
+      status: "written",
+      fromConversationId: params.fromConversationId,
+      toConversationId: params.to.conversationId,
+      sessionId: packet.session.sessionId,
+      segmentId: packet.segment.segmentId,
+      entryCount: packet.entries.length,
+      linkCount: packet.links?.length ?? 0,
+      carriedEntryIds: carryForwardSelection.entries.map((entry) => ({
+        fromEntryId: entry.entryId,
+        toEntryId: buildCarryForwardEntryId(params.to.conversationId, entry.entryId),
+      })),
+      skippedEntryIds: carryForwardSelection.skipped,
+      updatedAt,
+    };
   } catch (error) {
     return {
       ok: false,
       status: "failed",
       reason: "write_failed",
-      detail: error instanceof Error ? error.message : "session-memory carry-forward read failed",
+      detail: error instanceof Error ? error.message : "session-memory carry-forward failed",
     };
   } finally {
     try {
       db?.close();
     } catch {
-      // Best-effort cleanup after a bounded maintenance read.
+      // Best-effort cleanup after a bounded maintenance write.
     }
   }
-
-  const carryForwardSelection = selectCarryForwardEntries(sourceEntries);
-  if (carryForwardSelection.entries.length === 0) {
-    return {
-      ok: false,
-      status: "refused",
-      reason: "no_carryable_entries",
-      detail: "all active source entries require refresh before carry-forward",
-    };
-  }
-
-  const packet = buildCarryForwardPacket({
-    fromConversationId: params.fromConversationId,
-    to: params.to,
-    entries: carryForwardSelection.entries,
-  });
-  const written = writeSessionMemorySeedPacket({
-    dbPath: params.dbPath,
-    lcmDbPath: params.lcmDbPath,
-    packet,
-    allowRealDb: params.allowRealDb,
-    now: params.now,
-  });
-  if (!written.ok) {
-    return written;
-  }
-
-  return {
-    ok: true,
-    status: "written",
-    fromConversationId: params.fromConversationId,
-    toConversationId: params.to.conversationId,
-    sessionId: written.sessionId,
-    segmentId: written.segmentId,
-    entryCount: written.entryCount,
-    linkCount: written.linkCount,
-    carriedEntryIds: carryForwardSelection.entries.map((entry) => ({
-      fromEntryId: entry.entryId,
-      toEntryId: buildCarryForwardEntryId(params.to.conversationId, entry.entryId),
-    })),
-    skippedEntryIds: carryForwardSelection.skipped,
-    updatedAt: written.updatedAt,
-  };
 }
 
 export function rejectSessionMemoryEntries(params: {
@@ -642,6 +682,8 @@ function readCarryForwardSourceEntries(
     .prepare(
       `SELECT
          e.entry_id AS entry_id,
+         e.session_id AS session_id,
+         e.segment_id AS segment_id,
          e.kind AS kind,
          e.confidence AS confidence,
          e.priority AS priority,
@@ -661,6 +703,8 @@ function readCarryForwardSourceEntries(
     )
     .all(params.conversationId, params.sessionKey ?? null, params.sessionKey ?? null, params.maxEntries) as Array<{
     entry_id: unknown;
+    session_id: unknown;
+    segment_id: unknown;
     kind: unknown;
     confidence: unknown;
     priority: unknown;
@@ -676,9 +720,16 @@ function readCarryForwardSourceEntries(
   const entries: CarryForwardSourceEntry[] = [];
   for (const row of rows) {
     const entryId = String(row.entry_id ?? "");
+    const sessionId = String(row.session_id ?? "");
+    const segmentId = String(row.segment_id ?? "");
     const kind = String(row.kind ?? "");
     const body = String(row.body ?? "");
-    if (!isNonEmptyString(entryId) || !ENTRY_KINDS.has(kind as SessionMemoryOverlayEntryKind)) {
+    if (
+      !isNonEmptyString(entryId) ||
+      !isNonEmptyString(sessionId) ||
+      !isNonEmptyString(segmentId) ||
+      !ENTRY_KINDS.has(kind as SessionMemoryOverlayEntryKind)
+    ) {
       return { ok: false, result: { ok: false, status: "refused", reason: "malformed_rows" } };
     }
     if (isRawTranscriptShapedSessionMemoryBody(body)) {
@@ -690,6 +741,8 @@ function readCarryForwardSourceEntries(
     }
     entries.push({
       entryId,
+      sessionId,
+      segmentId,
       kind: kind as SessionMemoryOverlayEntryKind,
       confidence: Number(row.confidence ?? 0),
       priority: Number(row.priority ?? 0),
@@ -726,6 +779,48 @@ function getCarryForwardSkipReason(entry: CarryForwardSourceEntry): CarryForward
     return "current_state_fact_requires_refresh";
   }
   return null;
+}
+
+function getSkippedSourceStatus(reason: CarryForwardSkipReason): CarryForwardSourceStatus {
+  if (reason === "current_state_fact_requires_refresh") {
+    return "stale";
+  }
+  return "settled";
+}
+
+function markSkippedCarryForwardSourceEntries(
+  db: DatabaseSync,
+  skipped: Array<{ entryId: string; reason: CarryForwardSkipReason }>,
+  sourceEntries: CarryForwardSourceEntry[],
+  updatedAt: string,
+): void {
+  if (skipped.length === 0) {
+    return;
+  }
+  const sourceByEntryId = new Map(sourceEntries.map((entry) => [entry.entryId, entry]));
+  const touchedSessionIds = new Set<string>();
+  const touchedSegmentIds = new Set<string>();
+  const update = db.prepare(
+    `UPDATE entries
+     SET status = ?, updated_at = ?, settled_at = ?
+     WHERE entry_id = ?
+       AND status = 'active'`,
+  );
+  for (const skippedEntry of skipped) {
+    const source = sourceByEntryId.get(skippedEntry.entryId);
+    if (!source) {
+      throw new Error(`Missing skipped source entry ${skippedEntry.entryId}`);
+    }
+    const status = getSkippedSourceStatus(skippedEntry.reason);
+    const result = update.run(status, updatedAt, updatedAt, skippedEntry.entryId);
+    if (result.changes !== 1) {
+      throw new Error(`Expected one active source entry update for ${skippedEntry.entryId}`);
+    }
+    touchedSessionIds.add(source.sessionId);
+    touchedSegmentIds.add(source.segmentId);
+  }
+  updateRowsByIds(db, "segments", "segment_id", Array.from(touchedSegmentIds), updatedAt);
+  updateRowsByIds(db, "sessions", "session_id", Array.from(touchedSessionIds), updatedAt);
 }
 
 function isCurrentStateFactBody(body: string): boolean {
