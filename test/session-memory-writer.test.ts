@@ -802,6 +802,103 @@ describe("session-memory writer", () => {
     }
   });
 
+  it("can supersede skipped current-state facts with reviewed replacement entries", () => {
+    const fixture = createSchemaFixture();
+    try {
+      const seeded = writeSessionMemorySeedPacket({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        now: new Date("2026-06-20T08:00:00.000Z"),
+        packet: basePacket({
+          session: {
+            sessionId: "session-replace-source",
+            conversationId: 2800,
+            sessionKey: "agent:main:dashboard:replace-source",
+          },
+          segment: {
+            segmentId: "segment-replace-source",
+            seq: 1,
+          },
+          entries: [
+            {
+              entryId: "entry-stale-db-state",
+              kind: "fact",
+              confidence: 0.82,
+              priority: 20,
+              body: "The current conversation 2565 has active seed rows copied from 2549.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-gate24-grouped-vs-compact-readonly-eval-2026-06-20.md" }],
+            },
+          ],
+        }),
+      });
+      expect(seeded).toMatchObject({ ok: true, entryCount: 1 });
+
+      const carried = carryForwardSessionMemoryEntries({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        fromConversationId: 2800,
+        fromSessionKey: "agent:main:dashboard:replace-source",
+        to: {
+          sessionId: "session-replace-target",
+          conversationId: 2801,
+          sessionKey: "agent:main:dashboard:replace-target",
+        },
+        replacementEntries: [
+          {
+            sourceEntryId: "entry-stale-db-state",
+            entryId: "entry-refreshed-db-state",
+            body: "Gate 27 source replacement is temp-DB-only; live runtime overlay remains disabled and this replacement has not been written to the real DB.",
+            confidence: 0.9,
+            priority: 25,
+            sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-gate27-refreshed-replacement-supersession-2026-06-20.md" }],
+          },
+        ],
+        now: new Date("2026-06-20T08:05:00.000Z"),
+      });
+
+      expect(carried).toMatchObject({
+        ok: true,
+        status: "written",
+        entryCount: 1,
+        replacementEntryIds: [
+          { fromEntryId: "entry-stale-db-state", toEntryId: "entry-refreshed-db-state" },
+        ],
+      });
+
+      const db = new DatabaseSync(fixture.dbPath, { readOnly: true });
+      try {
+        expect(
+          db
+            .prepare("SELECT status, settled_at, superseded_by_entry_id FROM entries WHERE entry_id = ?")
+            .get("entry-stale-db-state"),
+        ).toEqual({
+          status: "superseded",
+          settled_at: "2026-06-20T08:05:00.000Z",
+          superseded_by_entry_id: "entry-refreshed-db-state",
+        });
+        expect(
+          db
+            .prepare("SELECT kind, status, origin_entry_id, body FROM entries WHERE entry_id = ?")
+            .get("entry-refreshed-db-state"),
+        ).toEqual({
+          kind: "fact",
+          status: "active",
+          origin_entry_id: "entry-stale-db-state",
+          body: "Gate 27 source replacement is temp-DB-only; live runtime overlay remains disabled and this replacement has not been written to the real DB.",
+        });
+        expect(
+          (db
+            .prepare("SELECT COUNT(*) AS count FROM links WHERE relation = 'supersedes' AND src_id = ? AND dst_id = ?")
+            .get("entry-refreshed-db-state", "entry-stale-db-state") as { count: number }).count,
+        ).toBe(1);
+      } finally {
+        db.close();
+      }
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("fails closed when carry-forward has no active source entries", () => {
     const fixture = createSchemaFixture();
     try {

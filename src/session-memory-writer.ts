@@ -85,6 +85,16 @@ export type SessionMemorySeedPacket = {
   }>;
 };
 
+export type SessionMemoryCarryForwardReplacementEntry = {
+  sourceEntryId: string;
+  entryId?: string;
+  title?: string;
+  body: string;
+  confidence: number;
+  priority?: number;
+  sourceRefs?: SessionMemorySourceRef[];
+};
+
 export type SessionMemoryWriteResult =
   | {
       ok: true;
@@ -140,6 +150,7 @@ export type SessionMemoryCarryForwardResult =
       linkCount: number;
       carriedEntryIds: Array<{ fromEntryId: string; toEntryId: string }>;
       skippedEntryIds: Array<{ entryId: string; reason: CarryForwardSkipReason }>;
+      replacementEntryIds: Array<{ fromEntryId: string; toEntryId: string }>;
       updatedAt: string;
     }
   | {
@@ -162,7 +173,7 @@ export type SessionMemoryCarryForwardResult =
     };
 
 type CarryForwardSkipReason = "current_state_fact_requires_refresh" | "next_action_requires_refresh";
-type CarryForwardSourceStatus = "stale" | "settled";
+type CarryForwardSourceStatus = "stale" | "settled" | "superseded";
 
 type CarryForwardSourceEntry = {
   entryId: string;
@@ -293,6 +304,7 @@ export function carryForwardSessionMemoryEntries(params: {
   };
   allowRealDb?: boolean;
   maxEntries?: number;
+  replacementEntries?: SessionMemoryCarryForwardReplacementEntry[];
   now?: Date;
 }): SessionMemoryCarryForwardResult {
   if (!params.allowRealDb && !isTempPath(params.dbPath)) {
@@ -363,7 +375,16 @@ export function carryForwardSessionMemoryEntries(params: {
     }
     const sourceEntries = read.entries;
     const carryForwardSelection = selectCarryForwardEntries(sourceEntries);
-    if (carryForwardSelection.entries.length === 0) {
+    const replacements = validateCarryForwardReplacementEntries({
+      replacements: params.replacementEntries ?? [],
+      skipped: carryForwardSelection.skipped,
+      sourceEntries,
+      toConversationId: params.to.conversationId,
+    });
+    if (!replacements.ok) {
+      return replacements.result;
+    }
+    if (carryForwardSelection.entries.length === 0 && replacements.entries.length === 0) {
       return {
         ok: false,
         status: "refused",
@@ -376,6 +397,7 @@ export function carryForwardSessionMemoryEntries(params: {
       fromConversationId: params.fromConversationId,
       to: params.to,
       entries: carryForwardSelection.entries,
+      replacements: replacements.entries,
     });
     const preflight = validateSeedPacketShape(packet);
     if (!preflight.ok) {
@@ -406,7 +428,13 @@ export function carryForwardSessionMemoryEntries(params: {
       for (const link of packet.links ?? []) {
         insertLink(db, link, updatedAt);
       }
-      markSkippedCarryForwardSourceEntries(db, carryForwardSelection.skipped, sourceEntries, updatedAt);
+      markSkippedCarryForwardSourceEntries(
+        db,
+        carryForwardSelection.skipped,
+        sourceEntries,
+        replacements.entries,
+        updatedAt,
+      );
       db
         .prepare("UPDATE segments SET entry_count = ?, updated_at = ? WHERE segment_id = ?")
         .run(packet.entries.length, updatedAt, packet.segment.segmentId);
@@ -440,6 +468,10 @@ export function carryForwardSessionMemoryEntries(params: {
         toEntryId: buildCarryForwardEntryId(params.to.conversationId, entry.entryId),
       })),
       skippedEntryIds: carryForwardSelection.skipped,
+      replacementEntryIds: replacements.entries.map((entry) => ({
+        fromEntryId: entry.sourceEntryId,
+        toEntryId: entry.entryId,
+      })),
       updatedAt,
     };
   } catch (error) {
@@ -788,21 +820,105 @@ function getSkippedSourceStatus(reason: CarryForwardSkipReason): CarryForwardSou
   return "settled";
 }
 
+type NormalizedCarryForwardReplacementEntry = Required<
+  Pick<SessionMemoryCarryForwardReplacementEntry, "sourceEntryId" | "entryId" | "body" | "confidence" | "sourceRefs">
+> &
+  Pick<SessionMemoryCarryForwardReplacementEntry, "title" | "priority">;
+
+function validateCarryForwardReplacementEntries(params: {
+  replacements: SessionMemoryCarryForwardReplacementEntry[];
+  skipped: Array<{ entryId: string; reason: CarryForwardSkipReason }>;
+  sourceEntries: CarryForwardSourceEntry[];
+  toConversationId: number;
+}):
+  | { ok: true; entries: NormalizedCarryForwardReplacementEntry[] }
+  | { ok: false; result: Extract<SessionMemoryCarryForwardResult, { ok: false }> } {
+  const skippedByEntryId = new Map(params.skipped.map((entry) => [entry.entryId, entry.reason]));
+  const sourceByEntryId = new Map(params.sourceEntries.map((entry) => [entry.entryId, entry]));
+  const normalized: NormalizedCarryForwardReplacementEntry[] = [];
+  const sourceIds = new Set<string>();
+  const replacementIds = new Set<string>();
+
+  for (const replacement of params.replacements) {
+    if (!isNonEmptyString(replacement.sourceEntryId)) {
+      return carryForwardInvalidPacket("replacement.sourceEntryId is required");
+    }
+    if (sourceIds.has(replacement.sourceEntryId)) {
+      return carryForwardInvalidPacket(`duplicate replacement sourceEntryId ${replacement.sourceEntryId}`);
+    }
+    sourceIds.add(replacement.sourceEntryId);
+
+    const reason = skippedByEntryId.get(replacement.sourceEntryId);
+    if (!reason) {
+      return carryForwardInvalidPacket(`replacement source entry ${replacement.sourceEntryId} was not skipped`);
+    }
+    if (reason !== "current_state_fact_requires_refresh") {
+      return carryForwardInvalidPacket(`replacement source entry ${replacement.sourceEntryId} is not a stale fact`);
+    }
+    const source = sourceByEntryId.get(replacement.sourceEntryId);
+    if (!source || source.kind !== "fact") {
+      return carryForwardInvalidPacket(`replacement source entry ${replacement.sourceEntryId} is not a fact`);
+    }
+    if (!isNonEmptyString(replacement.body)) {
+      return carryForwardInvalidPacket("replacement.body is required");
+    }
+    if (replacement.body.length > MAX_ENTRY_BODY_CHARS) {
+      return carryForwardInvalidPacket(`replacement.body exceeds ${MAX_ENTRY_BODY_CHARS} chars`);
+    }
+    if (isRawTranscriptShapedSessionMemoryBody(replacement.body)) {
+      return { ok: false, result: { ok: false, status: "refused", reason: "raw_transcript_detected" } };
+    }
+    if (!Number.isFinite(replacement.confidence) || replacement.confidence < 0 || replacement.confidence > 1) {
+      return carryForwardInvalidPacket("replacement.confidence must be between 0 and 1");
+    }
+    if (replacement.priority !== undefined && !Number.isInteger(replacement.priority)) {
+      return carryForwardInvalidPacket("replacement.priority must be an integer");
+    }
+    const refs = validateSourceRefs(replacement.sourceRefs ?? []);
+    if (!refs.ok) {
+      return carryForwardInvalidPacket(refs.reason);
+    }
+    const entryId =
+      replacement.entryId ?? buildCarryForwardReplacementEntryId(params.toConversationId, replacement.sourceEntryId);
+    if (!isNonEmptyString(entryId)) {
+      return carryForwardInvalidPacket("replacement.entryId must be a non-empty string when provided");
+    }
+    if (replacementIds.has(entryId)) {
+      return carryForwardInvalidPacket(`duplicate replacement entry id ${entryId}`);
+    }
+    replacementIds.add(entryId);
+
+    normalized.push({
+      sourceEntryId: replacement.sourceEntryId,
+      entryId,
+      title: replacement.title,
+      body: replacement.body,
+      confidence: replacement.confidence,
+      priority: replacement.priority,
+      sourceRefs: replacement.sourceRefs ?? [],
+    });
+  }
+
+  return { ok: true, entries: normalized };
+}
+
 function markSkippedCarryForwardSourceEntries(
   db: DatabaseSync,
   skipped: Array<{ entryId: string; reason: CarryForwardSkipReason }>,
   sourceEntries: CarryForwardSourceEntry[],
+  replacements: NormalizedCarryForwardReplacementEntry[],
   updatedAt: string,
 ): void {
   if (skipped.length === 0) {
     return;
   }
   const sourceByEntryId = new Map(sourceEntries.map((entry) => [entry.entryId, entry]));
+  const replacementBySourceId = new Map(replacements.map((entry) => [entry.sourceEntryId, entry]));
   const touchedSessionIds = new Set<string>();
   const touchedSegmentIds = new Set<string>();
   const update = db.prepare(
     `UPDATE entries
-     SET status = ?, updated_at = ?, settled_at = ?
+     SET status = ?, updated_at = ?, settled_at = ?, superseded_by_entry_id = ?
      WHERE entry_id = ?
        AND status = 'active'`,
   );
@@ -811,8 +927,9 @@ function markSkippedCarryForwardSourceEntries(
     if (!source) {
       throw new Error(`Missing skipped source entry ${skippedEntry.entryId}`);
     }
-    const status = getSkippedSourceStatus(skippedEntry.reason);
-    const result = update.run(status, updatedAt, updatedAt, skippedEntry.entryId);
+    const replacement = replacementBySourceId.get(skippedEntry.entryId);
+    const status: CarryForwardSourceStatus = replacement ? "superseded" : getSkippedSourceStatus(skippedEntry.reason);
+    const result = update.run(status, updatedAt, updatedAt, replacement?.entryId ?? null, skippedEntry.entryId);
     if (result.changes !== 1) {
       throw new Error(`Expected one active source entry update for ${skippedEntry.entryId}`);
     }
@@ -850,6 +967,7 @@ function buildCarryForwardPacket(params: {
     segmentId?: string;
   };
   entries: CarryForwardSourceEntry[];
+  replacements: NormalizedCarryForwardReplacementEntry[];
 }): SessionMemorySeedPacket {
   const segmentId = params.to.segmentId ?? `carry:${params.to.conversationId}:segment:${hashShort(params.to.sessionId)}`;
   const entryIdBySource = new Map<string, string>();
@@ -875,29 +993,58 @@ function buildCarryForwardPacket(params: {
       segmentId,
       seq: 1,
     },
-    entries: params.entries.map((entry) => ({
-      entryId: entryIdBySource.get(entry.entryId) ?? buildCarryForwardEntryId(params.to.conversationId, entry.entryId),
-      kind: entry.kind,
-      confidence: entry.confidence,
-      priority: entry.priority,
-      title: entry.title,
-      body: entry.body,
-      sourceRefs: entry.sourceRefs,
-      originEntryId: entry.entryId,
-    })),
-    links: params.entries.map((entry) => ({
-      linkId: `carry:${params.to.conversationId}:link:${hashShort(entry.entryId)}`,
-      srcType: "entry",
-      srcId: entry.entryId,
-      relation: "carried_to",
-      dstType: "entry",
-      dstId: entryIdBySource.get(entry.entryId) ?? buildCarryForwardEntryId(params.to.conversationId, entry.entryId),
-      confidence: 1,
-    })),
+    entries: [
+      ...params.entries.map((entry) => ({
+        entryId: entryIdBySource.get(entry.entryId) ?? buildCarryForwardEntryId(params.to.conversationId, entry.entryId),
+        kind: entry.kind,
+        confidence: entry.confidence,
+        priority: entry.priority,
+        title: entry.title,
+        body: entry.body,
+        sourceRefs: entry.sourceRefs,
+        originEntryId: entry.entryId,
+      })),
+      ...params.replacements.map((entry) => ({
+        entryId: entry.entryId,
+        kind: "fact",
+        confidence: entry.confidence,
+        priority: entry.priority,
+        title: entry.title,
+        body: entry.body,
+        sourceRefs: entry.sourceRefs,
+        originEntryId: entry.sourceEntryId,
+      })),
+    ],
+    links: [
+      ...params.entries.map((entry) => ({
+        linkId: `carry:${params.to.conversationId}:link:${hashShort(entry.entryId)}`,
+        srcType: "entry",
+        srcId: entry.entryId,
+        relation: "carried_to",
+        dstType: "entry",
+        dstId: entryIdBySource.get(entry.entryId) ?? buildCarryForwardEntryId(params.to.conversationId, entry.entryId),
+        confidence: 1,
+      })),
+      ...params.replacements.map((entry) => ({
+        linkId: `refresh:${params.to.conversationId}:link:${hashShort(entry.sourceEntryId)}`,
+        srcType: "entry",
+        srcId: entry.entryId,
+        relation: "supersedes",
+        dstType: "entry",
+        dstId: entry.sourceEntryId,
+        confidence: entry.confidence,
+      })),
+    ],
   };
 }
 
 function invalidPacket(detail: string): { ok: false; result: Extract<SessionMemoryWriteResult, { ok: false }> } {
+  return { ok: false, result: { ok: false, status: "refused", reason: "invalid_packet", detail } };
+}
+
+function carryForwardInvalidPacket(
+  detail: string,
+): { ok: false; result: Extract<SessionMemoryCarryForwardResult, { ok: false }> } {
   return { ok: false, result: { ok: false, status: "refused", reason: "invalid_packet", detail } };
 }
 
@@ -1184,6 +1331,10 @@ function parseStoredSourceRefs(raw: unknown): SessionMemorySourceRef[] | null {
 
 function buildCarryForwardEntryId(toConversationId: number, sourceEntryId: string): string {
   return `carry:${toConversationId}:entry:${hashShort(sourceEntryId)}`;
+}
+
+function buildCarryForwardReplacementEntryId(toConversationId: number, sourceEntryId: string): string {
+  return `refresh:${toConversationId}:entry:${hashShort(sourceEntryId)}`;
 }
 
 function hashShort(value: string): string {
