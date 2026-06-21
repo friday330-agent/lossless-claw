@@ -5623,6 +5623,7 @@ export class LcmContextEngine implements ContextEngine {
                 sessionId: params.sessionId,
                 sessionKey: params.sessionKey,
                 message,
+                skipReplayTimestampFloodGuard: true,
               });
               if (result.ingested) {
                 importedMessages += 1;
@@ -6083,6 +6084,7 @@ export class LcmContextEngine implements ContextEngine {
                     sessionId: params.sessionId,
                     sessionKey: params.sessionKey,
                     message,
+                    skipReplayTimestampFloodGuard: true,
                   });
                   if (ingestResult.ingested) {
                     importedMessages += 1;

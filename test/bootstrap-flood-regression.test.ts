@@ -140,6 +140,31 @@ function buildRepeatedPatternSession(sessionFile: string, pairCount: number): vo
   }
 }
 
+function appendRepeatedSlashStatusSequence(sessionFile: string): void {
+  const sm = SessionManager.open(sessionFile);
+  const commands = [
+    "/lossless session-memory status",
+    "/lossless session-memory overlay-readonly",
+    "/lossless session-memory profile compact",
+  ];
+  const outputs = [
+    "Session Memory status: effective mode native, render profile grouped.",
+    "Session Memory status: effective mode overlay-readonly, render profile grouped.",
+    "Session Memory profile updated: effective mode overlay-readonly, render profile compact.",
+  ];
+
+  for (let i = 0; i < commands.length; i++) {
+    sm.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: commands[i] }],
+    } as AgentMessage);
+    sm.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: outputs[i] }],
+    } as AgentMessage);
+  }
+}
+
 /**
  * Simulate what maintain() does after rewriteTranscriptEntries succeeds:
  * rewrite a portion of the JSONL file (shrinking tool outputs) and update
@@ -444,5 +469,43 @@ describe("bootstrap flood regression (PR #280) — round-trip integration", () =
       finalCount,
       "DB message count should be unchanged after capped flood attempt",
     ).toBe(dbCountAfterBoot);
+  });
+
+  it("append-only bootstrap accepts intentionally repeated slash status output", async () => {
+    const engine = createEngine();
+    const sessionId = randomUUID();
+    const sessionFile = createSessionFilePath("repeated-slash-status");
+
+    appendRepeatedSlashStatusSequence(sessionFile);
+
+    const boot1 = await engine.bootstrap({ sessionId, sessionFile });
+    expect(boot1.bootstrapped, "initial slash status bootstrap should seed DB").toBe(true);
+    expect(boot1.importedMessages, "initial bootstrap should import first slash sequence").toBe(6);
+
+    const conversation = await engine
+      .getConversationStore()
+      .getConversationBySessionId(sessionId);
+    expect(conversation, "conversation should exist").not.toBeNull();
+    const conversationId = conversation!.conversationId;
+    const dbCountAfterBoot = await engine
+      .getConversationStore()
+      .getMessageCount(conversationId);
+    (engine.getConversationStore() as any).db
+      .prepare(
+        `UPDATE messages
+         SET created_at = datetime('now', '-10 seconds')
+         WHERE conversation_id = ?`,
+      )
+      .run(conversationId);
+
+    appendRepeatedSlashStatusSequence(sessionFile);
+
+    const boot2 = await engine.bootstrap({ sessionId, sessionFile });
+
+    expect(boot2.bootstrapped, "append-only replay-shaped slash commands are real new tail").toBe(true);
+    expect(boot2.importedMessages, "second bootstrap should import repeated slash sequence").toBe(6);
+
+    const finalCount = await engine.getConversationStore().getMessageCount(conversationId);
+    expect(finalCount, "repeated slash sequence should be retained").toBe(dbCountAfterBoot + 6);
   });
 });
