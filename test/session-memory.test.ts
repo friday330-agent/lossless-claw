@@ -312,7 +312,7 @@ describe("session-memory read-only overlay boundary", () => {
 
   it("skips fixture DBs with old and future schema versions", async () => {
     const oldFixture = createCompatibleSessionMemoryFixture({ userVersion: 0, migrationVersion: 0 });
-    const futureFixture = createCompatibleSessionMemoryFixture({ userVersion: 2, migrationVersion: 2 });
+    const futureFixture = createCompatibleSessionMemoryFixture({ userVersion: 3, migrationVersion: 3 });
 
     try {
       await expect(
@@ -353,6 +353,61 @@ describe("session-memory read-only overlay boundary", () => {
     } finally {
       oldFixture.cleanup();
       futureFixture.cleanup();
+    }
+  });
+
+  it("reads active entries from additive v2 schema DBs through the stable v1 projection", async () => {
+    const fixture = createCompatibleSessionMemoryFixture({
+      userVersion: 2,
+      migrationVersion: 2,
+      includeSemanticColumns: true,
+    });
+    const db = new DatabaseSync(fixture.dbPath);
+    insertActiveSessionMemoryEntry(db, {
+      sourceRefsJson: '[{"type":"workspace_file","path":"Friday-memory/CURRENT.md","line":1}]',
+    });
+    db
+      .prepare(
+        `UPDATE entries
+         SET logical_kind = 'reviewed_decision',
+             project_id = 'lossless-session-memory',
+             workline_id = 'gate40-first-reviewed-entry',
+             details_json = '{"decision":"fixture"}',
+             evidence_level = 'committed_plan',
+             review_state = 'accepted'
+         WHERE entry_id = 'entry-1'`,
+      )
+      .run();
+    db.close();
+
+    try {
+      const result = await resolveSessionMemoryOverlay({
+        config: {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+        },
+        request: {
+          conversationId: 123,
+          sessionKey: "agent:main:test",
+        },
+      });
+
+      expect(result).toMatchObject({
+        ok: true,
+        source: "session_memory_overlay",
+        sessionId: "session-active",
+        segmentId: "segment-active",
+        entries: [
+          {
+            entryId: "entry-1",
+            kind: "decision",
+            body: "Keep session-memory read-only until assembler wiring is separately approved.",
+          },
+        ],
+      });
+    } finally {
+      fixture.cleanup();
     }
   });
 
@@ -1160,6 +1215,7 @@ function createCompatibleSessionMemoryFixture(options?: {
   migrationVersion?: number;
   includeIndexes?: boolean;
   includeUniqueConstraints?: boolean;
+  includeSemanticColumns?: boolean;
   omitColumns?: Record<string, string[]>;
 }): { tempDir: string; dbPath: string; cleanup: () => void } {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-compatible-"));
@@ -1284,6 +1340,18 @@ function createCompatibleSessionMemoryFixture(options?: {
     db.exec(`
       CREATE UNIQUE INDEX segments_session_seq_unique_idx ON segments (session_id, seq);
       CREATE UNIQUE INDEX links_unique_edge_idx ON links (src_type, src_id, relation, dst_type, dst_id);
+    `);
+  }
+  if (options?.includeSemanticColumns) {
+    db.exec(`
+      ALTER TABLE entries ADD COLUMN logical_kind TEXT NULL;
+      ALTER TABLE entries ADD COLUMN project_id TEXT NULL;
+      ALTER TABLE entries ADD COLUMN workline_id TEXT NULL;
+      ALTER TABLE entries ADD COLUMN details_json TEXT NULL;
+      ALTER TABLE entries ADD COLUMN evidence_level TEXT NULL;
+      ALTER TABLE entries ADD COLUMN review_state TEXT NULL;
+      CREATE INDEX entries_project_workline_status_idx ON entries (project_id, workline_id, status);
+      CREATE INDEX entries_logical_kind_status_idx ON entries (logical_kind, status);
     `);
   }
   db.close();

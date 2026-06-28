@@ -10,7 +10,8 @@ const DEFAULT_MAX_TOKENS = 800;
 const DEFAULT_OVERLAY_DB_PATH = join(resolveOpenclawStateDir(), "session-memory.db");
 const DEFAULT_OVERLAY_LCM_DB_PATH = join(resolveOpenclawStateDir(), "lcm.db");
 const DEFAULT_OVERLAY_RENDER_VERSION = "session_memory_overlay_v1";
-const SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION = 1;
+const MIN_SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION = 1;
+const MAX_SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION = 2;
 const REQUIRED_OVERLAY_TABLES = [
   "schema_migrations",
   "sessions",
@@ -468,14 +469,14 @@ export function checkSessionMemorySchemaCompatibility(db: DatabaseSync): Session
 
   const pragmaUserVersion = db.prepare("PRAGMA user_version").get() as { user_version?: unknown } | undefined;
   const userVersion = Number(pragmaUserVersion?.user_version ?? 0);
-  if (userVersion < SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION) {
+  if (userVersion < MIN_SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION) {
     return {
       ok: false,
       source: "session_memory_overlay",
       reason: "schema_too_old",
     };
   }
-  if (userVersion > SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION) {
+  if (userVersion > MAX_SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION) {
     return {
       ok: false,
       source: "session_memory_overlay",
@@ -487,7 +488,10 @@ export function checkSessionMemorySchemaCompatibility(db: DatabaseSync): Session
     .prepare("SELECT schema_version FROM schema_migrations ORDER BY applied_at DESC LIMIT 1")
     .get() as { schema_version?: unknown } | undefined;
   const migrationVersion = Number(migration?.schema_version ?? 0);
-  if (migrationVersion !== SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION) {
+  if (
+    migrationVersion < MIN_SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION ||
+    migrationVersion > MAX_SUPPORTED_SESSION_MEMORY_SCHEMA_VERSION
+  ) {
     return {
       ok: false,
       source: "session_memory_overlay",
