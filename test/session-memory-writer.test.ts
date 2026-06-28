@@ -11,12 +11,15 @@ import {
 } from "../src/session-memory.js";
 import { buildSessionMemorySchemaMaintenanceText } from "../src/session-memory-maintenance.js";
 import {
+  appendReviewedSessionMemoryEntry,
   carryForwardSessionMemoryEntries,
   rejectSessionMemoryEntries,
   refreshSessionMemoryEntries,
   type SessionMemorySeedPacket,
   writeSessionMemorySeedPacket,
 } from "../src/session-memory-writer.js";
+
+const TEST_STALE_AFTER_MS = 365 * 24 * 60 * 60 * 1000;
 
 function createSchemaFixture(): { tempDir: string; dbPath: string; cleanup: () => void } {
   const tempDir = mkdtempSync(join(tmpdir(), "lossless-session-memory-writer-"));
@@ -105,6 +108,33 @@ function createCompatibleLcmDb(tempDir: string): string {
   return dbPath;
 }
 
+function upgradeFixtureToSemanticSchema(dbPath: string): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`
+      ALTER TABLE entries ADD COLUMN logical_kind TEXT NULL;
+      ALTER TABLE entries ADD COLUMN project_id TEXT NULL;
+      ALTER TABLE entries ADD COLUMN workline_id TEXT NULL;
+      ALTER TABLE entries ADD COLUMN details_json TEXT NULL;
+      ALTER TABLE entries ADD COLUMN evidence_level TEXT NULL;
+      ALTER TABLE entries ADD COLUMN review_state TEXT NULL;
+      CREATE INDEX entries_project_workline_status_idx ON entries (project_id, workline_id, status);
+      CREATE INDEX entries_logical_kind_status_idx ON entries (logical_kind, status);
+      INSERT INTO schema_migrations (migration_id, schema_version, applied_at, checksum, description)
+      VALUES (
+        'session_memory_v0_2_entry_semantic_fields',
+        2,
+        '2026-06-28T06:24:59.246Z',
+        'test-semantic-schema',
+        'Add semantic entry fields'
+      );
+      PRAGMA user_version = 2;
+    `);
+  } finally {
+    db.close();
+  }
+}
+
 function basePacket(overrides: Partial<SessionMemorySeedPacket> = {}): SessionMemorySeedPacket {
   return {
     session: {
@@ -144,6 +174,157 @@ function countRows(dbPath: string, tableName: "sessions" | "segments" | "entries
 }
 
 describe("session-memory writer", () => {
+  it("appends a reviewed semantic entry to an existing active segment in a temp DB", async () => {
+    const fixture = createSchemaFixture();
+    try {
+      const seeded = writeSessionMemorySeedPacket({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        now: new Date("2026-06-28T06:35:00.000Z"),
+        packet: basePacket({
+          session: {
+            sessionId: "session-gate41",
+            conversationId: 2712,
+            sessionKey: "agent:main:dashboard:gate41",
+          },
+          segment: {
+            segmentId: "segment-gate41",
+            seq: 1,
+          },
+          entries: [
+            {
+              entryId: "entry-existing-context",
+              kind: "decision",
+              confidence: 0.9,
+              priority: 30,
+              body: "Gate 40 proved one manual semantic entry on the real v2 DB.",
+              sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md", line: 4 }],
+            },
+          ],
+        }),
+      });
+      expect(seeded).toMatchObject({ ok: true, entryCount: 1 });
+      upgradeFixtureToSemanticSchema(fixture.dbPath);
+
+      const appended = appendReviewedSessionMemoryEntry({
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        conversationId: 2712,
+        sessionKey: "agent:main:dashboard:gate41",
+        entry: {
+          entryId: "gate41-reviewed-writer-primitive",
+          kind: "decision",
+          logicalKind: "reviewed_decision",
+          projectId: "lossless-session-memory",
+          worklineId: "gate41-semantic-append-writer",
+          details: {
+            decision: "Gate 41 turns the Gate 40 manual SQL shape into a controlled writer primitive.",
+            includes: ["temp DB proof", "semantic field validation", "read path proof"],
+            not_types: ["automatic capture", "runtime overlay enablement", "W550 automatic ingestion"],
+            conditions: ["no real DB business write"],
+            source_decision_ref: "source_refs_json[0]",
+          },
+          evidenceLevel: "committed_plan_plus_reverse_review",
+          reviewState: "accepted",
+          confidence: 0.94,
+          priority: 96,
+          title: "Gate 41 controlled semantic append writer",
+          body: "Gate 41 should append one reviewed semantic event-line entry through a controlled writer seam, not hand-written SQL.",
+          sourceRefs: [{ type: "workspace_file", path: "Friday-memory/plans/Friday/session-memory-gate40-first-reviewed-event-line-entry-2026-06-28.md" }],
+        },
+        now: new Date("2026-06-28T12:20:00.000Z"),
+      });
+
+      expect(appended).toEqual({
+        ok: true,
+        status: "written",
+        conversationId: 2712,
+        sessionId: "session-gate41",
+        segmentId: "segment-gate41",
+        entryId: "gate41-reviewed-writer-primitive",
+        updatedAt: "2026-06-28T12:20:00.000Z",
+      });
+
+      const db = new DatabaseSync(fixture.dbPath, { readOnly: true });
+      try {
+        expect(
+          db.prepare("SELECT entry_count FROM segments WHERE segment_id = ?").get("segment-gate41"),
+        ).toEqual({ entry_count: 2 });
+        expect(
+          db
+            .prepare(
+              `SELECT kind, logical_kind, project_id, workline_id, evidence_level, review_state, details_json
+               FROM entries
+               WHERE entry_id = ?`,
+            )
+            .get("gate41-reviewed-writer-primitive"),
+        ).toEqual({
+          kind: "decision",
+          logical_kind: "reviewed_decision",
+          project_id: "lossless-session-memory",
+          workline_id: "gate41-semantic-append-writer",
+          evidence_level: "committed_plan_plus_reverse_review",
+          review_state: "accepted",
+          details_json: JSON.stringify({
+            decision: "Gate 41 turns the Gate 40 manual SQL shape into a controlled writer primitive.",
+            includes: ["temp DB proof", "semantic field validation", "read path proof"],
+            not_types: ["automatic capture", "runtime overlay enablement", "W550 automatic ingestion"],
+            conditions: ["no real DB business write"],
+            source_decision_ref: "source_refs_json[0]",
+          }),
+        });
+      } finally {
+        db.close();
+      }
+
+      const lookup = await lookupSessionMemoryOverlay(
+        {
+          conversationId: 2712,
+          sessionKey: "agent:main:dashboard:gate41",
+        },
+        {
+          ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+          enabled: true,
+          dbPath: fixture.dbPath,
+          lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+          staleAfterMs: TEST_STALE_AFTER_MS,
+        },
+      );
+      expect(lookup).toMatchObject({
+        ok: true,
+        source: "session_memory_overlay",
+        sessionId: "session-gate41",
+        segmentId: "segment-gate41",
+        entries: [
+          {
+            entryId: "gate41-reviewed-writer-primitive",
+            kind: "decision",
+          },
+          {
+            entryId: "entry-existing-context",
+            kind: "decision",
+          },
+        ],
+      });
+
+      const rendered = renderSessionMemoryOverlay(lookup, {
+        ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+        enabled: true,
+        dbPath: fixture.dbPath,
+        lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
+        staleAfterMs: TEST_STALE_AFTER_MS,
+      });
+      expect(rendered).toMatchObject({
+        ok: true,
+        source: "session_memory_overlay",
+        entryCount: 2,
+      });
+      expect(rendered.ok && rendered.content).toContain("controlled writer seam");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("writes a manual seed to a temp DB and renders it through the read-only overlay", async () => {
     const fixture = createSchemaFixture();
     try {
@@ -229,7 +410,7 @@ describe("session-memory writer", () => {
           enabled: true,
           dbPath: fixture.dbPath,
           lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
-          staleAfterMs: 7 * 24 * 60 * 60 * 1000,
+          staleAfterMs: TEST_STALE_AFTER_MS,
         },
       );
       expect(lookup).toMatchObject({
@@ -244,7 +425,7 @@ describe("session-memory writer", () => {
         enabled: true,
         dbPath: fixture.dbPath,
         lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
-        staleAfterMs: 7 * 24 * 60 * 60 * 1000,
+        staleAfterMs: TEST_STALE_AFTER_MS,
       });
       expect(rendered).toMatchObject({
         ok: true,
@@ -541,7 +722,7 @@ describe("session-memory writer", () => {
           enabled: true,
           dbPath: fixture.dbPath,
           lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
-          staleAfterMs: 7 * 24 * 60 * 60 * 1000,
+          staleAfterMs: TEST_STALE_AFTER_MS,
         },
       );
       expect(lookup).toMatchObject({
@@ -555,7 +736,7 @@ describe("session-memory writer", () => {
         enabled: true,
         dbPath: fixture.dbPath,
         lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
-        staleAfterMs: 7 * 24 * 60 * 60 * 1000,
+        staleAfterMs: TEST_STALE_AFTER_MS,
       });
       expect(rendered).toMatchObject({
         ok: true,
@@ -575,7 +756,7 @@ describe("session-memory writer", () => {
           enabled: true,
           dbPath: fixture.dbPath,
           lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
-          staleAfterMs: 7 * 24 * 60 * 60 * 1000,
+          staleAfterMs: TEST_STALE_AFTER_MS,
         },
       );
       expect(unrelatedLookup).toEqual({
@@ -1046,7 +1227,7 @@ describe("session-memory writer", () => {
           enabled: true,
           dbPath: fixture.dbPath,
           lcmDbPath: join(fixture.tempDir, "missing-lcm.db"),
-          staleAfterMs: 7 * 24 * 60 * 60 * 1000,
+          staleAfterMs: TEST_STALE_AFTER_MS,
         },
       );
       expect(lookup).toMatchObject({

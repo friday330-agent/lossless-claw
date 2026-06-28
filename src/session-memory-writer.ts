@@ -45,6 +45,37 @@ const LINK_OBJECT_TYPES = new Set([
   "focus_brief",
   "sidecar_sample",
 ]);
+const SEMANTIC_LOGICAL_KINDS = new Set([
+  "overlay_verification",
+  "overlay_content_gap",
+  "reviewed_decision",
+  "segment_bridge",
+  "ingestion_rule",
+  "implementation_trace",
+  "dialogue_logic_trace",
+  "writer_temp_proof",
+  "schema_question",
+]);
+const SEMANTIC_REVIEW_STATES = new Set(["candidate", "accepted", "accepted_with_conditions", "rejected"]);
+const SEMANTIC_EVIDENCE_LEVELS = new Set([
+  "conversation_source_backed",
+  "committed_plan",
+  "committed_plan_plus_reverse_review",
+  "native_slash_plus_db_check",
+  "local_db_read",
+  "temp_db_proof",
+  "source_backed_required",
+  "w550_report_friday_reviewed",
+  "derived_from_reviewed_mapping",
+]);
+const SEMANTIC_ENTRY_COLUMNS = [
+  "logical_kind",
+  "project_id",
+  "workline_id",
+  "details_json",
+  "evidence_level",
+  "review_state",
+];
 
 export type SessionMemorySeedPacket = {
   session: {
@@ -95,6 +126,24 @@ export type SessionMemoryCarryForwardReplacementEntry = {
   sourceRefs?: SessionMemorySourceRef[];
 };
 
+export type SessionMemorySemanticEntryAppend = {
+  entryId: string;
+  kind: SessionMemoryOverlayEntryKind | string;
+  logicalKind: string;
+  projectId: string;
+  worklineId: string;
+  details: Record<string, unknown>;
+  evidenceLevel: string;
+  reviewState: string;
+  confidence: number;
+  priority?: number;
+  title?: string;
+  body: string;
+  sourceRefs?: SessionMemorySourceRef[];
+  originEntryId?: string;
+  supersededByEntryId?: string;
+};
+
 export type SessionMemoryWriteResult =
   | {
       ok: true;
@@ -116,6 +165,33 @@ export type SessionMemoryWriteResult =
         | "raw_transcript_detected"
         | "lcm_schema_incompatible"
         | "source_ref_missing"
+        | "write_failed";
+      detail?: string;
+      schemaReason?: SessionMemoryOverlaySkipReason;
+    };
+
+export type SessionMemorySemanticAppendResult =
+  | {
+      ok: true;
+      status: "written";
+      conversationId: number;
+      sessionId: string;
+      segmentId: string;
+      entryId: string;
+      updatedAt: string;
+    }
+  | {
+      ok: false;
+      status: "refused" | "failed";
+      reason:
+        | "real_db_refused"
+        | "db_absent"
+        | "schema_incompatible"
+        | "invalid_packet"
+        | "raw_transcript_detected"
+        | "lcm_schema_incompatible"
+        | "source_ref_missing"
+        | "no_active_segment"
         | "write_failed";
       detail?: string;
       schemaReason?: SessionMemoryOverlaySkipReason;
@@ -312,6 +388,130 @@ export function writeSessionMemorySeedPacket(params: {
       status: "failed",
       reason: "write_failed",
       detail: error instanceof Error ? error.message : "session-memory writer failed",
+    };
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // Best-effort cleanup after a bounded maintenance write.
+    }
+  }
+}
+
+export function appendReviewedSessionMemoryEntry(params: {
+  dbPath: string;
+  lcmDbPath: string;
+  conversationId: number;
+  sessionKey?: string;
+  segmentId?: string;
+  entry: SessionMemorySemanticEntryAppend;
+  allowRealDb?: boolean;
+  now?: Date;
+}): SessionMemorySemanticAppendResult {
+  if (!params.allowRealDb && !isTempPath(params.dbPath)) {
+    return { ok: false, status: "refused", reason: "real_db_refused" };
+  }
+  if (!existsSync(params.dbPath)) {
+    return { ok: false, status: "refused", reason: "db_absent" };
+  }
+  if (!Number.isInteger(params.conversationId)) {
+    return semanticAppendInvalidPacket("conversationId is required");
+  }
+  const preflight = validateSemanticAppendEntry(params.entry);
+  if (!preflight.ok) {
+    return preflight.result;
+  }
+
+  let db: DatabaseSync | undefined;
+  const updatedAt = (params.now ?? new Date()).toISOString();
+  try {
+    db = new DatabaseSync(params.dbPath);
+    db.exec("PRAGMA foreign_keys = ON");
+    const compatibility = checkSessionMemorySchemaCompatibility(db);
+    if (!compatibility.ok) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "schema_incompatible",
+        schemaReason: compatibility.reason,
+      };
+    }
+    if (!hasColumns(db, "entries", SEMANTIC_ENTRY_COLUMNS)) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "schema_incompatible",
+        detail: "entries semantic columns are required",
+        schemaReason: "schema_missing",
+      };
+    }
+
+    const refs = params.entry.sourceRefs ?? [];
+    const lcmValidation = validateSessionMemorySourceRefs(refs, { lcmDbPath: params.lcmDbPath });
+    if (!lcmValidation.ok) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: lcmValidation.reason === "source_ref_missing" ? "source_ref_missing" : "lcm_schema_incompatible",
+        schemaReason: lcmValidation.reason,
+      };
+    }
+    const checkpointValidation = validateCheckpointRefs(db, refs);
+    if (!checkpointValidation.ok) {
+      return semanticAppendFromWriteFailure(checkpointValidation.result);
+    }
+
+    const target = readActiveAppendTarget(db, {
+      conversationId: params.conversationId,
+      sessionKey: params.sessionKey,
+      segmentId: params.segmentId,
+    });
+    if (!target.ok) {
+      return target.result;
+    }
+
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      insertSemanticAppendEntry(db, {
+        entry: params.entry,
+        sessionId: target.sessionId,
+        segmentId: target.segmentId,
+        updatedAt,
+      });
+      db
+        .prepare("UPDATE segments SET entry_count = entry_count + 1, updated_at = ? WHERE segment_id = ?")
+        .run(updatedAt, target.segmentId);
+      db.prepare("UPDATE sessions SET updated_at = ? WHERE session_id = ?").run(updatedAt, target.sessionId);
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original write failure.
+      }
+      return {
+        ok: false,
+        status: "failed",
+        reason: "write_failed",
+        detail: error instanceof Error ? error.message : "session-memory semantic append failed",
+      };
+    }
+
+    return {
+      ok: true,
+      status: "written",
+      conversationId: params.conversationId,
+      sessionId: target.sessionId,
+      segmentId: target.segmentId,
+      entryId: params.entry.entryId,
+      updatedAt,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: "failed",
+      reason: "write_failed",
+      detail: error instanceof Error ? error.message : "session-memory semantic append failed",
     };
   } finally {
     try {
@@ -922,6 +1122,93 @@ function validateSeedPacketShape(packet: SessionMemorySeedPacket):
   return { ok: true };
 }
 
+function validateSemanticAppendEntry(entry: SessionMemorySemanticEntryAppend):
+  | { ok: true }
+  | { ok: false; result: Extract<SessionMemorySemanticAppendResult, { ok: false }> } {
+  if (!isNonEmptyString(entry?.entryId)) {
+    return semanticAppendInvalidPacket("entry.entryId is required");
+  }
+  if (!ENTRY_KINDS.has(entry.kind as SessionMemoryOverlayEntryKind)) {
+    return semanticAppendInvalidPacket(`invalid entry kind ${entry.kind}`);
+  }
+  if (!SEMANTIC_LOGICAL_KINDS.has(entry.logicalKind)) {
+    return semanticAppendInvalidPacket(`invalid logicalKind ${entry.logicalKind}`);
+  }
+  if (!isNonEmptyString(entry.projectId)) {
+    return semanticAppendInvalidPacket("entry.projectId is required");
+  }
+  if (!isNonEmptyString(entry.worklineId)) {
+    return semanticAppendInvalidPacket("entry.worklineId is required");
+  }
+  if (!SEMANTIC_EVIDENCE_LEVELS.has(entry.evidenceLevel)) {
+    return semanticAppendInvalidPacket(`invalid evidenceLevel ${entry.evidenceLevel}`);
+  }
+  if (!SEMANTIC_REVIEW_STATES.has(entry.reviewState)) {
+    return semanticAppendInvalidPacket(`invalid reviewState ${entry.reviewState}`);
+  }
+  if (!Number.isFinite(entry.confidence) || entry.confidence < 0 || entry.confidence > 1) {
+    return semanticAppendInvalidPacket("entry.confidence must be between 0 and 1");
+  }
+  if (entry.priority !== undefined && !Number.isInteger(entry.priority)) {
+    return semanticAppendInvalidPacket("entry.priority must be an integer");
+  }
+  if (!isNonEmptyString(entry.body)) {
+    return semanticAppendInvalidPacket("entry.body is required");
+  }
+  if (entry.body.length > MAX_ENTRY_BODY_CHARS) {
+    return semanticAppendInvalidPacket(`entry.body exceeds ${MAX_ENTRY_BODY_CHARS} chars`);
+  }
+  if (isRawTranscriptShapedSessionMemoryBody(entry.body)) {
+    return { ok: false, result: { ok: false, status: "refused", reason: "raw_transcript_detected" } };
+  }
+  if (!entry.details || typeof entry.details !== "object" || Array.isArray(entry.details)) {
+    return semanticAppendInvalidPacket("entry.details must be an object");
+  }
+  const detailsJson = serializeOptionalJson(entry.details);
+  if (!detailsJson.ok || detailsJson.value === null) {
+    return semanticAppendInvalidPacket(`entry.details ${detailsJson.ok ? "is required" : detailsJson.reason}`);
+  }
+  const refs = validateSourceRefs(entry.sourceRefs ?? []);
+  if (!refs.ok) {
+    return semanticAppendInvalidPacket(refs.reason);
+  }
+  return { ok: true };
+}
+
+function readActiveAppendTarget(
+  db: DatabaseSync,
+  params: { conversationId: number; sessionKey?: string; segmentId?: string },
+):
+  | { ok: true; sessionId: string; segmentId: string }
+  | { ok: false; result: Extract<SessionMemorySemanticAppendResult, { ok: false }> } {
+  const row = db
+    .prepare(
+      `SELECT s.session_id AS session_id, sg.segment_id AS segment_id
+       FROM sessions s
+       JOIN segments sg ON sg.session_id = s.session_id
+       WHERE s.conversation_id = ?
+         AND s.status = 'active'
+         AND sg.status = 'active'
+         AND (? IS NULL OR s.session_key IS NULL OR s.session_key = ?)
+         AND (? IS NULL OR sg.segment_id = ?)
+       ORDER BY sg.seq DESC, sg.updated_at DESC, sg.segment_id ASC
+       LIMIT 1`,
+    )
+    .get(
+      params.conversationId,
+      params.sessionKey ?? null,
+      params.sessionKey ?? null,
+      params.segmentId ?? null,
+      params.segmentId ?? null,
+    ) as { session_id?: unknown; segment_id?: unknown } | undefined;
+  const sessionId = String(row?.session_id ?? "");
+  const segmentId = String(row?.segment_id ?? "");
+  if (!isNonEmptyString(sessionId) || !isNonEmptyString(segmentId)) {
+    return { ok: false, result: { ok: false, status: "refused", reason: "no_active_segment" } };
+  }
+  return { ok: true, sessionId, segmentId };
+}
+
 function readCarryForwardSourceEntries(
   db: DatabaseSync,
   params: {
@@ -1264,10 +1551,39 @@ function invalidPacket(detail: string): { ok: false; result: Extract<SessionMemo
   return { ok: false, result: { ok: false, status: "refused", reason: "invalid_packet", detail } };
 }
 
+function semanticAppendInvalidPacket(
+  detail: string,
+): { ok: false; result: Extract<SessionMemorySemanticAppendResult, { ok: false }> } {
+  return { ok: false, result: { ok: false, status: "refused", reason: "invalid_packet", detail } };
+}
+
 function carryForwardInvalidPacket(
   detail: string,
 ): { ok: false; result: Extract<SessionMemoryCarryForwardResult, { ok: false }> } {
   return { ok: false, result: { ok: false, status: "refused", reason: "invalid_packet", detail } };
+}
+
+function semanticAppendFromWriteFailure(
+  result: Extract<SessionMemoryWriteResult, { ok: false }>,
+): Extract<SessionMemorySemanticAppendResult, { ok: false }> {
+  const reason =
+    result.reason === "real_db_refused" ||
+    result.reason === "db_absent" ||
+    result.reason === "schema_incompatible" ||
+    result.reason === "invalid_packet" ||
+    result.reason === "raw_transcript_detected" ||
+    result.reason === "lcm_schema_incompatible" ||
+    result.reason === "source_ref_missing" ||
+    result.reason === "write_failed"
+      ? result.reason
+      : "write_failed";
+  return {
+    ok: false,
+    status: result.status,
+    reason,
+    detail: result.detail,
+    schemaReason: result.schemaReason,
+  };
 }
 
 function refreshFromCarryForwardFailure(
@@ -1519,6 +1835,46 @@ function insertRefreshReplacementEntry(
     );
 }
 
+function insertSemanticAppendEntry(
+  db: DatabaseSync,
+  params: {
+    entry: SessionMemorySemanticEntryAppend;
+    sessionId: string;
+    segmentId: string;
+    updatedAt: string;
+  },
+): void {
+  db
+    .prepare(
+      `INSERT INTO entries (
+        entry_id, session_id, segment_id, kind, status, confidence, priority, title, body, source_refs_json,
+        origin_entry_id, superseded_by_entry_id, created_at, updated_at, settled_at,
+        logical_kind, project_id, workline_id, details_json, evidence_level, review_state
+      ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      params.entry.entryId,
+      params.sessionId,
+      params.segmentId,
+      params.entry.kind,
+      params.entry.confidence,
+      params.entry.priority ?? 0,
+      params.entry.title ?? null,
+      params.entry.body,
+      serializeSourceRefs(params.entry.sourceRefs ?? []),
+      params.entry.originEntryId ?? null,
+      params.entry.supersededByEntryId ?? null,
+      params.updatedAt,
+      params.updatedAt,
+      params.entry.logicalKind,
+      params.entry.projectId,
+      params.entry.worklineId,
+      serializeRequiredOptionalJson(params.entry.details),
+      params.entry.evidenceLevel,
+      params.entry.reviewState,
+    );
+}
+
 function insertLink(db: DatabaseSync, link: NonNullable<SessionMemorySeedPacket["links"]>[number], updatedAt: string): void {
   db
     .prepare(
@@ -1537,6 +1893,13 @@ function insertLink(db: DatabaseSync, link: NonNullable<SessionMemorySeedPacket[
       serializeSourceRefs(link.sourceRefs ?? []),
       updatedAt,
     );
+}
+
+function hasColumns(db: DatabaseSync, tableName: string, columns: string[]): boolean {
+  const tableColumns = new Set(
+    db.prepare(`PRAGMA table_info(${tableName})`).all().map((row) => String((row as { name: unknown }).name)),
+  );
+  return columns.every((column) => tableColumns.has(column));
 }
 
 function updateRowsByIds(
