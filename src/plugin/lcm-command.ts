@@ -46,8 +46,10 @@ import {
 } from "../session-memory-maintenance.js";
 import type { SessionMemoryOverlayMode, SessionMemoryOverlayRenderProfile } from "../session-memory.js";
 import {
+  appendReviewedSessionMemoryEntry,
   carryForwardSessionMemoryEntries,
   type SessionMemoryCarryForwardReplacementEntry,
+  type SessionMemorySemanticEntryAppend,
 } from "../session-memory-writer.js";
 
 const VISIBLE_COMMAND = "/lossless";
@@ -102,6 +104,7 @@ type ParsedLcmCommand =
   | { kind: "session_memory_profile"; action: "clear" | SessionMemoryOverlayRenderProfile }
   | { kind: "session_memory_schema"; command: SessionMemorySchemaCommand }
   | { kind: "session_memory_carry_forward"; command: SessionMemoryCarryForwardCommand }
+  | { kind: "session_memory_append_reviewed"; command: SessionMemoryAppendReviewedCommand }
   | { kind: "help"; error?: string };
 
 type SessionMemoryCarryForwardCommand = {
@@ -114,11 +117,31 @@ type SessionMemoryCarryForwardCommand = {
   replacementsPath?: string;
 };
 
+type SessionMemoryAppendReviewedCommand = {
+  entryPath: string;
+  dbPath?: string;
+  segmentId?: string;
+  execute: boolean;
+  confirm?: string;
+};
+
 type SessionMemoryReplacementPacketLoadResult =
   | {
       ok: true;
       path?: string;
       entries: SessionMemoryCarryForwardReplacementEntry[];
+      digest: string;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
+type SessionMemoryAppendPacketLoadResult =
+  | {
+      ok: true;
+      path: string;
+      entry: SessionMemorySemanticEntryAppend;
       digest: string;
     }
   | {
@@ -300,6 +323,28 @@ function sessionMemoryCarryForwardConfirmationToken(params: {
     .slice(0, 12)}`;
 }
 
+function sessionMemoryAppendReviewedConfirmationToken(params: {
+  dbPath: string;
+  conversationId: number;
+  sessionId: string;
+  sessionKey?: string | null;
+  segmentId?: string;
+  entryDigest: string;
+}): string {
+  return `smar:${createHash("sha256")
+    .update([
+      "session_memory_append_reviewed_v1",
+      resolve(params.dbPath),
+      String(params.conversationId),
+      params.sessionId,
+      params.sessionKey ?? "",
+      params.segmentId ?? "",
+      params.entryDigest,
+    ].join("\n"))
+    .digest("hex")
+    .slice(0, 12)}`;
+}
+
 function loadSessionMemoryReplacementPacket(path: string | undefined): SessionMemoryReplacementPacketLoadResult {
   if (!path) {
     return {
@@ -347,6 +392,50 @@ function loadSessionMemoryReplacementPacket(path: string | undefined): SessionMe
     ok: true,
     path,
     entries: entries as SessionMemoryCarryForwardReplacementEntry[],
+    digest: createHash("sha256").update(raw).digest("hex").slice(0, 16),
+  };
+}
+
+function loadSessionMemoryAppendPacket(path: string | undefined): SessionMemoryAppendPacketLoadResult {
+  if (!path) {
+    return { ok: false, error: "`--entry` requires a JSON file path." };
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    return {
+      ok: false,
+      error: `could not read entry packet: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (raw.length > 64 * 1024) {
+    return { ok: false, error: "entry packet exceeds 65536 chars" };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return {
+      ok: false,
+      error: `entry packet is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  const maybePacket = asRecord(parsed);
+  const entry = asRecord(maybePacket?.entry) ?? maybePacket;
+  if (!entry) {
+    return {
+      ok: false,
+      error: "entry packet must be an entry object or an object with an entry object",
+    };
+  }
+
+  return {
+    ok: true,
+    path,
+    entry: entry as SessionMemorySemanticEntryAppend,
     digest: createHash("sha256").update(raw).digest("hex").slice(0, 16),
   };
 }
@@ -558,6 +647,81 @@ function parseSessionMemoryCarryForwardArgs(tokens: string[]):
   };
 }
 
+function parseSessionMemoryAppendReviewedArgs(tokens: string[]):
+  | { ok: true; command: SessionMemoryAppendReviewedCommand }
+  | { ok: false; error: string } {
+  let entryPath: string | undefined;
+  let dbPath: string | undefined;
+  let segmentId: string | undefined;
+  let execute = false;
+  let confirm: string | undefined;
+
+  const rest = tokens.slice(1);
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (token === "--entry") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--entry` requires a JSON file path." };
+      }
+      entryPath = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--db") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--db` requires a path." };
+      }
+      dbPath = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--segment-id") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--segment-id` requires an id." };
+      }
+      segmentId = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--execute") {
+      execute = true;
+      continue;
+    }
+    if (token === "--dry-run") {
+      execute = false;
+      continue;
+    }
+    if (token === "--confirm") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--confirm` requires a token." };
+      }
+      confirm = value;
+      index += 1;
+      continue;
+    }
+    return { ok: false, error: `Unknown session-memory append-reviewed option \`${token}\`.` };
+  }
+
+  if (!entryPath) {
+    return { ok: false, error: "`/lossless session-memory append-reviewed` requires `--entry <json>`." };
+  }
+
+  return {
+    ok: true,
+    command: {
+      entryPath,
+      dbPath,
+      segmentId,
+      execute,
+      confirm,
+    },
+  };
+}
+
 function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
   const action = tokens[0]?.toLowerCase();
   if (!action || action === "status") {
@@ -592,9 +756,15 @@ function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
       ? { kind: "session_memory_carry_forward", command: parsed.command }
       : { kind: "help", error: parsed.error };
   }
+  if (action === "append-reviewed") {
+    const parsed = parseSessionMemoryAppendReviewedArgs(tokens);
+    return parsed.ok
+      ? { kind: "session_memory_append_reviewed", command: parsed.command }
+      : { kind: "help", error: parsed.error };
+  }
   return {
     kind: "help",
-    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, \`profile grouped|compact|clear\`, \`carry-forward\`, and \`schema plan|check|apply\`.`,
+    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, \`profile grouped|compact|clear\`, \`carry-forward\`, \`append-reviewed\`, and \`schema plan|check|apply\`.`,
   };
 }
 
@@ -1105,6 +1275,10 @@ function buildHelpText(error?: string): string {
       buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory carry-forward --from <conversation-id> [--replacements <json>]`),
         "Dry-run or temp-DB execute reviewed seed carry-forward and explicit replacement facts.",
+      ),
+      buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} session-memory append-reviewed --entry <json>`),
+        "Dry-run or temp-DB execute one reviewed semantic entry append.",
       ),
       buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory schema plan|check|apply`),
@@ -1645,6 +1819,165 @@ async function buildSessionMemoryCarryForwardText(params: {
       buildStatLine("entries skipped", formatNumber(result.skippedEntryIds.length)),
       buildStatLine("entries replaced", formatNumber(result.replacementEntryIds.length)),
       buildStatLine("links written", formatNumber(result.linkCount)),
+      buildStatLine("updated at", result.updatedAt),
+    ]),
+  );
+  return lines.join("\n");
+}
+
+async function buildSessionMemoryAppendReviewedText(params: {
+  ctx: PluginCommandContext;
+  db: DatabaseSync;
+  config: LcmConfig;
+  command: SessionMemoryAppendReviewedCommand;
+}): Promise<string> {
+  const current = await resolveCurrentConversation({
+    ctx: params.ctx,
+    db: params.db,
+  });
+  const dbPath = params.command.dbPath?.trim() || params.config.sessionMemoryOverlay.dbPath;
+  const lines = [
+    ...buildHeaderLines(),
+    "",
+    "🧠 Session Memory Reviewed Append",
+    "",
+  ];
+
+  if (current.kind === "unavailable") {
+    lines.push(
+      buildSection("📍 Target conversation", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", current.reason),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const packet = loadSessionMemoryAppendPacket(params.command.entryPath);
+  if (!packet.ok) {
+    lines.push(
+      buildSection("🧩 Entry packet", [
+        buildStatLine("status", "invalid"),
+        buildStatLine("reason", packet.error),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const confirmation = sessionMemoryAppendReviewedConfirmationToken({
+    dbPath,
+    conversationId: current.stats.conversationId,
+    sessionId: current.stats.sessionId,
+    sessionKey: current.stats.sessionKey,
+    segmentId: params.command.segmentId,
+    entryDigest: packet.digest,
+  });
+
+  lines.push(
+    buildSection("📍 Target conversation", [
+      buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
+      buildStatLine("session id", formatCommand(truncateMiddle(current.stats.sessionId, 44))),
+      buildStatLine(
+        "session key",
+        current.stats.sessionKey ? formatCommand(truncateMiddle(current.stats.sessionKey, 44)) : "missing",
+      ),
+      buildStatLine("segment id", params.command.segmentId ? formatCommand(params.command.segmentId) : "active segment"),
+    ]),
+    "",
+    buildSection("🧩 Entry packet", [
+      buildStatLine("path", packet.path),
+      buildStatLine("digest", packet.digest),
+      buildStatLine("entry id", formatCommand(packet.entry.entryId ?? "missing")),
+      buildStatLine("kind", String(packet.entry.kind ?? "missing")),
+      buildStatLine("logical kind", String(packet.entry.logicalKind ?? "missing")),
+      buildStatLine("project id", String(packet.entry.projectId ?? "missing")),
+      buildStatLine("workline id", String(packet.entry.worklineId ?? "missing")),
+      buildStatLine("review state", String(packet.entry.reviewState ?? "missing")),
+      buildStatLine("evidence level", String(packet.entry.evidenceLevel ?? "missing")),
+    ]),
+    "",
+    buildSection("💾 Write target", [
+      buildStatLine("session-memory db", dbPath),
+      buildStatLine("overlay enabled", params.config.sessionMemoryOverlay.enabled ? "yes" : "no"),
+      buildStatLine("mode", params.command.execute ? "execute" : "dry_run"),
+      buildStatLine("execute confirmation", confirmation),
+    ]),
+  );
+
+  if (!params.command.execute) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", "dry_run"),
+        buildStatLine(
+          "next",
+          `rerun with ${formatCommand("--execute")} ${formatCommand("--confirm")} ${confirmation}`,
+        ),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  if (params.command.confirm !== confirmation) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", "refused"),
+        buildStatLine("reason", "confirmation token mismatch"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+  if (params.config.sessionMemoryOverlay.enabled) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", "refused"),
+        buildStatLine("reason", "session-memory overlay is enabled"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+  if (!isTempPath(dbPath)) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", "refused"),
+        buildStatLine("reason", "real DB append requires a separate approved backup gate"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const result = appendReviewedSessionMemoryEntry({
+    dbPath,
+    lcmDbPath: params.config.databasePath,
+    conversationId: current.stats.conversationId,
+    sessionKey: current.stats.sessionKey ?? undefined,
+    segmentId: params.command.segmentId,
+    entry: packet.entry,
+  });
+
+  if (!result.ok) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", result.status),
+        buildStatLine("reason", result.reason),
+        ...(result.detail ? [buildStatLine("detail", result.detail)] : []),
+        ...(result.schemaReason ? [buildStatLine("schema reason", result.schemaReason)] : []),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(
+    "",
+    buildSection("🛠️ Result", [
+      buildStatLine("status", result.status),
+      buildStatLine("session id", formatCommand(truncateMiddle(result.sessionId, 44))),
+      buildStatLine("segment id", formatCommand(truncateMiddle(result.segmentId, 44))),
+      buildStatLine("entry id", formatCommand(result.entryId)),
       buildStatLine("updated at", result.updatedAt),
     ]),
   );
@@ -3225,6 +3558,15 @@ export function createLcmCommand(params: {
         case "session_memory_carry_forward":
           return {
             text: await buildSessionMemoryCarryForwardText({
+              ctx,
+              db: await getDb(),
+              config: params.config,
+              command: parsed.command,
+            }),
+          };
+        case "session_memory_append_reviewed":
+          return {
+            text: await buildSessionMemoryAppendReviewedText({
               ctx,
               db: await getDb(),
               config: params.config,

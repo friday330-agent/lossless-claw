@@ -2283,6 +2283,177 @@ describe("lcm command", () => {
     }
   });
 
+  it("appends one reviewed semantic entry from an explicit temp-DB packet only with confirmation", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-append-reviewed.db");
+    const entryPath = join(fixture.tempDir, "append-reviewed-entry.json");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const runCommand = async (args: string): Promise<{ text: string }> => {
+      return await command.handler!(createCommandContext(args, {
+        sessionId: "session-memory-append-target",
+        sessionKey: "agent:main:webchat:session-memory-append-target",
+      })) as { text: string };
+    };
+
+    const targetConversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-append-target",
+      sessionKey: "agent:main:webchat:session-memory-append-target",
+    });
+
+    const schemaDryRun = await runCommand(`session-memory schema apply --db ${sessionMemoryDbPath}`);
+    const schemaConfirmation = schemaDryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(schemaConfirmation).toBeTruthy();
+    const schemaCreated = await runCommand(
+      `session-memory schema apply --execute --confirm ${schemaConfirmation} --db ${sessionMemoryDbPath}`,
+    );
+    expect(schemaCreated.text).toContain("status: created");
+
+    writeSessionMemorySeedPacket({
+      dbPath: sessionMemoryDbPath,
+      lcmDbPath: fixture.dbPath,
+      packet: {
+        session: {
+          sessionId: "session-memory-append-target",
+          conversationId: targetConversation.conversationId,
+          sessionKey: "agent:main:webchat:session-memory-append-target",
+        },
+        segment: {
+          segmentId: "segment-memory-append-target",
+          seq: 1,
+        },
+        entries: [
+          {
+            entryId: "entry-memory-append-existing",
+            kind: "decision",
+            confidence: 0.9,
+            priority: 30,
+            body: "Gate 41 added a controlled semantic append writer primitive.",
+            sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+          },
+        ],
+      },
+    });
+    const sessionMemoryDb = new DatabaseSync(sessionMemoryDbPath);
+    try {
+      sessionMemoryDb.exec(`
+        ALTER TABLE entries ADD COLUMN logical_kind TEXT NULL;
+        ALTER TABLE entries ADD COLUMN project_id TEXT NULL;
+        ALTER TABLE entries ADD COLUMN workline_id TEXT NULL;
+        ALTER TABLE entries ADD COLUMN details_json TEXT NULL;
+        ALTER TABLE entries ADD COLUMN evidence_level TEXT NULL;
+        ALTER TABLE entries ADD COLUMN review_state TEXT NULL;
+        CREATE INDEX entries_project_workline_status_idx ON entries (project_id, workline_id, status);
+        CREATE INDEX entries_logical_kind_status_idx ON entries (logical_kind, status);
+        INSERT INTO schema_migrations (migration_id, schema_version, applied_at, checksum, description)
+        VALUES (
+          'session_memory_v0_2_entry_semantic_fields',
+          2,
+          '2026-06-28T12:45:00.000Z',
+          'test-semantic-append-command',
+          'Add semantic entry fields'
+        );
+        PRAGMA user_version = 2;
+      `);
+    } finally {
+      sessionMemoryDb.close();
+    }
+
+    writeFileSync(entryPath, JSON.stringify({
+      entry: {
+        entryId: "gate42-reviewed-command-entry",
+        kind: "decision",
+        logicalKind: "reviewed_decision",
+        projectId: "lossless-session-memory",
+        worklineId: "gate42-semantic-append-command",
+        details: {
+          decision: "Gate 42 exposes semantic append as a dry-run-first command.",
+          includes: ["entry packet digest", "confirmation token", "temp DB execution"],
+          not_types: ["automatic capture", "runtime overlay enablement", "real DB write"],
+          conditions: ["execute requires confirmation"],
+          source_decision_ref: "source_refs_json[0]",
+        },
+        evidenceLevel: "committed_plan_plus_reverse_review",
+        reviewState: "accepted",
+        confidence: 0.93,
+        priority: 94,
+        title: "Gate 42 dry-run-first semantic append command",
+        body: "Gate 42 should expose the semantic append writer through a dry-run-first command without enabling automatic capture.",
+        sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+      },
+    }));
+
+    const dryRun = await runCommand(`session-memory append-reviewed --entry ${entryPath}`);
+    const confirmation = dryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(dryRun.text).toContain("Session Memory Reviewed Append");
+    expect(dryRun.text).toContain("status: dry_run");
+    expect(dryRun.text).toContain("entry id: `gate42-reviewed-command-entry`");
+    expect(dryRun.text).toContain("logical kind: reviewed_decision");
+    expect(confirmation).toBeTruthy();
+
+    const dryRunDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        (dryRunDb
+          .prepare("SELECT COUNT(*) AS count FROM entries WHERE entry_id = ?")
+          .get("gate42-reviewed-command-entry") as { count: number }).count,
+      ).toBe(0);
+    } finally {
+      dryRunDb.close();
+    }
+
+    const nonTempDbPath = join("test-fixtures", "session-memory-real.db");
+    const nonTempDryRun = await runCommand(`session-memory append-reviewed --entry ${entryPath} --db ${nonTempDbPath}`);
+    const nonTempConfirmation = nonTempDryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(nonTempConfirmation).toBeTruthy();
+    const nonTempRefused = await runCommand(
+      `session-memory append-reviewed --entry ${entryPath} --db ${nonTempDbPath} --execute --confirm ${nonTempConfirmation}`,
+    );
+    expect(nonTempRefused.text).toContain("status: refused");
+    expect(nonTempRefused.text).toContain("reason: real DB append requires a separate approved backup gate");
+
+    const refused = await runCommand(`session-memory append-reviewed --entry ${entryPath} --execute --confirm wrong`);
+    expect(refused.text).toContain("status: refused");
+    expect(refused.text).toContain("reason: confirmation token mismatch");
+
+    const executed = await runCommand(
+      `session-memory append-reviewed --entry ${entryPath} --execute --confirm ${confirmation}`,
+    );
+    expect(executed.text).toContain("status: written");
+    expect(executed.text).toContain("entry id: `gate42-reviewed-command-entry`");
+    expect(executed.text).toContain("segment id: `segment-memory-append-target`");
+
+    const postWriteDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        postWriteDb
+          .prepare("SELECT logical_kind, project_id, workline_id, evidence_level, review_state FROM entries WHERE entry_id = ?")
+          .get("gate42-reviewed-command-entry"),
+      ).toEqual({
+        logical_kind: "reviewed_decision",
+        project_id: "lossless-session-memory",
+        workline_id: "gate42-semantic-append-command",
+        evidence_level: "committed_plan_plus_reverse_review",
+        review_state: "accepted",
+      });
+      expect(
+        postWriteDb
+          .prepare("SELECT entry_count FROM segments WHERE segment_id = ?")
+          .get("segment-memory-append-target"),
+      ).toEqual({ entry_count: 2 });
+    } finally {
+      postWriteDb.close();
+    }
+  });
+
   it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
