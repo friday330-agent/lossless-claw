@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -2283,7 +2283,7 @@ describe("lcm command", () => {
     }
   });
 
-  it("appends one reviewed semantic entry from an explicit temp-DB packet only with confirmation", async () => {
+  it("appends one reviewed semantic entry from an explicit packet only with confirmation", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
@@ -2367,6 +2367,28 @@ describe("lcm command", () => {
       sessionMemoryDb.close();
     }
 
+    const approvedRealDbDir = join(
+      process.cwd(),
+      `.lossless-claw-command-real-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    );
+    mkdirSync(approvedRealDbDir);
+    tempDirs.add(approvedRealDbDir);
+    const approvedRealDbPath = join(approvedRealDbDir, "session-memory-approved-real.db");
+    copyFileSync(sessionMemoryDbPath, approvedRealDbPath);
+    const approvedRealConfig = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: approvedRealDbPath,
+      },
+    });
+    const approvedRealCommand = createLcmCommand({ db: fixture.db, config: approvedRealConfig });
+    const runApprovedRealCommand = async (args: string): Promise<{ text: string }> => {
+      return await approvedRealCommand.handler!(createCommandContext(args, {
+        sessionId: "session-memory-append-target",
+        sessionKey: "agent:main:webchat:session-memory-append-target",
+      })) as { text: string };
+    };
+
     writeFileSync(entryPath, JSON.stringify({
       entry: {
         entryId: "gate42-reviewed-command-entry",
@@ -2420,6 +2442,14 @@ describe("lcm command", () => {
     expect(nonTempRefused.text).toContain("status: refused");
     expect(nonTempRefused.text).toContain("reason: real DB append requires a separate approved backup gate");
 
+    const nonTempExplicitRealRefused = await runCommand(
+      `session-memory append-reviewed --entry ${entryPath} --db ${nonTempDbPath} --allow-real-db --execute --confirm ${nonTempConfirmation}`,
+    );
+    expect(nonTempExplicitRealRefused.text).toContain("status: refused");
+    expect(nonTempExplicitRealRefused.text).toContain(
+      "reason: --allow-real-db uses the resolved session-memory DB path; omit --db",
+    );
+
     const refused = await runCommand(`session-memory append-reviewed --entry ${entryPath} --execute --confirm wrong`);
     expect(refused.text).toContain("status: refused");
     expect(refused.text).toContain("reason: confirmation token mismatch");
@@ -2451,6 +2481,34 @@ describe("lcm command", () => {
       ).toEqual({ entry_count: 2 });
     } finally {
       postWriteDb.close();
+    }
+
+    const approvedRealDryRun = await runApprovedRealCommand(
+      `session-memory append-reviewed --entry ${entryPath} --allow-real-db`,
+    );
+    const approvedRealConfirmation = approvedRealDryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(approvedRealDryRun.text).toContain("status: dry_run");
+    expect(approvedRealDryRun.text).toContain("real DB execution: allowed by explicit flag");
+    expect(approvedRealConfirmation).toBeTruthy();
+    const approvedRealExecuted = await runApprovedRealCommand(
+      `session-memory append-reviewed --entry ${entryPath} --allow-real-db --execute --confirm ${approvedRealConfirmation}`,
+    );
+    expect(approvedRealExecuted.text).toContain("status: written");
+    const approvedRealPostWriteDb = new DatabaseSync(approvedRealDbPath, { readOnly: true });
+    try {
+      expect(
+        approvedRealPostWriteDb
+          .prepare("SELECT logical_kind, project_id, workline_id, evidence_level, review_state FROM entries WHERE entry_id = ?")
+          .get("gate42-reviewed-command-entry"),
+      ).toEqual({
+        logical_kind: "reviewed_decision",
+        project_id: "lossless-session-memory",
+        workline_id: "gate42-semantic-append-command",
+        evidence_level: "committed_plan_plus_reverse_review",
+        review_state: "accepted",
+      });
+    } finally {
+      approvedRealPostWriteDb.close();
     }
   });
 

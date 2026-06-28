@@ -123,6 +123,7 @@ type SessionMemoryAppendReviewedCommand = {
   segmentId?: string;
   execute: boolean;
   confirm?: string;
+  allowRealDb: boolean;
 };
 
 type SessionMemoryReplacementPacketLoadResult =
@@ -655,6 +656,7 @@ function parseSessionMemoryAppendReviewedArgs(tokens: string[]):
   let segmentId: string | undefined;
   let execute = false;
   let confirm: string | undefined;
+  let allowRealDb = false;
 
   const rest = tokens.slice(1);
   for (let index = 0; index < rest.length; index += 1) {
@@ -703,6 +705,10 @@ function parseSessionMemoryAppendReviewedArgs(tokens: string[]):
       index += 1;
       continue;
     }
+    if (token === "--allow-real-db") {
+      allowRealDb = true;
+      continue;
+    }
     return { ok: false, error: `Unknown session-memory append-reviewed option \`${token}\`.` };
   }
 
@@ -718,6 +724,7 @@ function parseSessionMemoryAppendReviewedArgs(tokens: string[]):
       segmentId,
       execute,
       confirm,
+      allowRealDb,
     },
   };
 }
@@ -1900,6 +1907,7 @@ async function buildSessionMemoryAppendReviewedText(params: {
       buildStatLine("session-memory db", dbPath),
       buildStatLine("overlay enabled", params.config.sessionMemoryOverlay.enabled ? "yes" : "no"),
       buildStatLine("mode", params.command.execute ? "execute" : "dry_run"),
+      buildStatLine("real DB execution", params.command.allowRealDb ? "allowed by explicit flag" : "blocked"),
       buildStatLine("execute confirmation", confirmation),
     ]),
   );
@@ -1938,12 +1946,22 @@ async function buildSessionMemoryAppendReviewedText(params: {
     );
     return lines.join("\n");
   }
-  if (!isTempPath(dbPath)) {
+  if (!isTempPath(dbPath) && !params.command.allowRealDb) {
     lines.push(
       "",
       buildSection("🛠️ Result", [
         buildStatLine("status", "refused"),
         buildStatLine("reason", "real DB append requires a separate approved backup gate"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+  if (params.command.allowRealDb && params.command.dbPath && !isTempPath(dbPath)) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", "refused"),
+        buildStatLine("reason", "--allow-real-db uses the resolved session-memory DB path; omit --db"),
       ]),
     );
     return lines.join("\n");
@@ -1956,6 +1974,7 @@ async function buildSessionMemoryAppendReviewedText(params: {
     sessionKey: current.stats.sessionKey ?? undefined,
     segmentId: params.command.segmentId,
     entry: packet.entry,
+    allowRealDb: params.command.allowRealDb,
   });
 
   if (!result.ok) {
