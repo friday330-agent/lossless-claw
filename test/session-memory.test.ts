@@ -1003,6 +1003,71 @@ describe("session-memory read-only overlay boundary", () => {
     });
   });
 
+  it("keeps an active experiment objective anchor ahead of business artifact facts", async () => {
+    const lookupResult = {
+      ok: true as const,
+      source: "session_memory_overlay" as const,
+      sessionId: "session-gate46",
+      segmentId: "segment-gate46",
+      projectionKey: "gate46-objective-anchor",
+      entries: [
+        {
+          entryId: "gate46-business-artifact",
+          segmentId: "segment-gate46",
+          kind: "fact" as const,
+          priority: 95,
+          body: "W550 created the FirArt wiki architecture canvas and Friday verified that Obsidian can list it.",
+          updatedAt: "2026-07-01T07:10:00.000Z",
+          sourceRefs: [{ type: "workspace_file" as const, path: "Friday-memory/work/w550-skills-observation.md" }],
+        },
+        {
+          entryId: "gate46-objective-anchor",
+          segmentId: "segment-gate46",
+          kind: "constraint" as const,
+          priority: 100,
+          body: "Current active experiment: test whether session-memory helps Friday preserve the real objective of this W550 trial, not merely whether the requested canvas artifact exists.",
+          updatedAt: "2026-07-01T07:12:00.000Z",
+          sourceRefs: [
+            {
+              type: "workspace_file" as const,
+              path: "Friday-memory/plans/Friday/session-memory-gate46-objective-anchor-canary-2026-07-01.md",
+            },
+          ],
+        },
+        {
+          entryId: "gate46-failure-signal",
+          segmentId: "segment-gate46",
+          kind: "risk" as const,
+          priority: 90,
+          body: "Failure signal: answering only with canvas path, JSON validity, or Obsidian visibility misses the session-memory test objective.",
+          updatedAt: "2026-07-01T07:13:00.000Z",
+          sourceRefs: [
+            {
+              type: "workspace_file" as const,
+              path: "Friday-memory/plans/Friday/session-memory-gate46-objective-anchor-canary-2026-07-01.md",
+            },
+          ],
+        },
+      ],
+    };
+
+    const rendered = renderSessionMemoryOverlay(lookupResult, {
+      ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+      enabled: true,
+      maxTokens: 800,
+    });
+
+    if (!rendered.ok) {
+      throw new Error("expected rendered session-memory overlay");
+    }
+    expect(rendered.content.indexOf("Current active experiment: test whether session-memory")).toBeLessThan(
+      rendered.content.indexOf("W550 created the FirArt wiki architecture canvas"),
+    );
+    expect(rendered.content).toContain(
+      "Failure signal: answering only with canvas path, JSON validity, or Obsidian visibility misses the session-memory test objective.",
+    );
+  });
+
   it("renders a compact overlay profile with typed bullets and a smaller token footprint", async () => {
     const lookupResult = {
       ok: true as const,
