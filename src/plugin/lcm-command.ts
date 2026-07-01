@@ -111,6 +111,7 @@ type SessionMemoryCarryForwardCommand = {
   sourceMode: "explicit" | "same_session_key";
   fromConversationId?: number;
   fromSessionKey?: string;
+  toConversationId?: number;
   dbPath?: string;
   execute: boolean;
   confirm?: string;
@@ -324,6 +325,19 @@ function sessionMemoryCarryForwardConfirmationToken(params: {
     ].join("\n"))
     .digest("hex")
     .slice(0, 12)}`;
+}
+
+function parseConversationId(value: string | undefined, optionName: string):
+  | { ok: true; conversationId: number }
+  | { ok: false; error: string } {
+  if (!value) {
+    return { ok: false, error: `\`${optionName}\` requires a conversation id.` };
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    return { ok: false, error: `\`${optionName}\` must be a positive integer conversation id.` };
+  }
+  return { ok: true, conversationId: parsed };
 }
 
 function resolveSameSessionKeyReattachSource(params: {
@@ -773,6 +787,7 @@ function parseSessionMemoryReattachArgs(tokens: string[]):
   | { ok: true; command: SessionMemoryCarryForwardCommand }
   | { ok: false; error: string } {
   let fromSessionKey: string | undefined;
+  let toConversationId: number | undefined;
   let dbPath: string | undefined;
   let execute = false;
   let confirm: string | undefined;
@@ -795,6 +810,15 @@ function parseSessionMemoryReattachArgs(tokens: string[]):
         return { ok: false, error: "`--from-session-key` requires a session key." };
       }
       fromSessionKey = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--to-conversation") {
+      const parsed = parseConversationId(rest[index + 1], "--to-conversation");
+      if (!parsed.ok) {
+        return parsed;
+      }
+      toConversationId = parsed.conversationId;
       index += 1;
       continue;
     }
@@ -858,6 +882,7 @@ function parseSessionMemoryReattachArgs(tokens: string[]):
     command: {
       sourceMode: "same_session_key",
       fromSessionKey,
+      toConversationId,
       dbPath,
       execute,
       confirm,
@@ -1510,8 +1535,8 @@ function buildHelpText(error?: string): string {
         "Dry-run or temp-DB execute reviewed seed carry-forward and explicit replacement facts.",
       ),
       buildStatLine(
-        formatCommand(`${VISIBLE_COMMAND} session-memory reattach [--from-session-key <key>]`),
-        "Dry-run or temp-DB execute same-sessionKey fork reattach using reviewed active entries.",
+        formatCommand(`${VISIBLE_COMMAND} session-memory reattach [--from-session-key <key>] [--to-conversation <id>]`),
+        "Dry-run or temp-DB execute same-sessionKey fork reattach into the current or explicit target conversation.",
       ),
       buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory append-reviewed --entry <json>`),
@@ -1921,6 +1946,21 @@ async function buildSessionMemoryCarryForwardText(params: {
     return lines.join("\n");
   }
 
+  const targetStats = params.command.toConversationId != null
+    ? getConversationStatusStats(params.db, params.command.toConversationId)
+    : current.stats;
+
+  if (!targetStats) {
+    lines.push(
+      buildSection("📍 Target conversation", [
+        buildStatLine("status", "refused"),
+        buildStatLine("reason", "target conversation not found"),
+        buildStatLine("conversation id", formatNumber(params.command.toConversationId ?? 0)),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
   let fromConversationId = params.command.fromConversationId;
   let resolvedSourceSessionKey = params.command.fromSessionKey;
   let sameSessionKeyCandidateCount: number | undefined;
@@ -1929,8 +1969,8 @@ async function buildSessionMemoryCarryForwardText(params: {
     const source = resolveSameSessionKeyReattachSource({
       lcmDb: params.db,
       sessionMemoryDbPath: dbPath,
-      currentConversationId: current.stats.conversationId,
-      currentSessionKey: current.stats.sessionKey,
+      currentConversationId: targetStats.conversationId,
+      currentSessionKey: targetStats.sessionKey,
       requestedSessionKey: params.command.fromSessionKey,
     });
     if (!source.ok) {
@@ -1981,21 +2021,25 @@ async function buildSessionMemoryCarryForwardText(params: {
   const confirmation = sessionMemoryCarryForwardConfirmationToken({
     dbPath,
     fromConversationId,
-    toConversationId: current.stats.conversationId,
-    sessionId: current.stats.sessionId,
-    sessionKey: current.stats.sessionKey,
+    toConversationId: targetStats.conversationId,
+    sessionId: targetStats.sessionId,
+    sessionKey: targetStats.sessionKey,
     replacementsDigest: replacements.digest,
   });
   const maxEntries = params.command.maxEntries ?? 12;
 
   lines.push(
     buildSection("📍 Target conversation", [
-      buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
-      buildStatLine("session id", formatCommand(truncateMiddle(current.stats.sessionId, 44))),
+      buildStatLine("conversation id", formatNumber(targetStats.conversationId)),
+      buildStatLine("target mode", params.command.toConversationId != null ? "explicit" : "current"),
+      buildStatLine("session id", formatCommand(truncateMiddle(targetStats.sessionId, 44))),
       buildStatLine(
         "session key",
-        current.stats.sessionKey ? formatCommand(truncateMiddle(current.stats.sessionKey, 44)) : "missing",
+        targetStats.sessionKey ? formatCommand(truncateMiddle(targetStats.sessionKey, 44)) : "missing",
       ),
+      ...(params.command.toConversationId != null
+        ? [buildStatLine("current conversation id", formatNumber(current.stats.conversationId))]
+        : []),
     ]),
     "",
     buildSection("🧷 Source", [
@@ -2091,9 +2135,9 @@ async function buildSessionMemoryCarryForwardText(params: {
     fromConversationId,
     fromSessionKey: resolvedSourceSessionKey,
     to: {
-      sessionId: current.stats.sessionId,
-      conversationId: current.stats.conversationId,
-      sessionKey: current.stats.sessionKey ?? undefined,
+      sessionId: targetStats.sessionId,
+      conversationId: targetStats.conversationId,
+      sessionKey: targetStats.sessionKey ?? undefined,
     },
     maxEntries,
     replacementEntries: replacements.entries,

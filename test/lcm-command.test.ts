@@ -12,6 +12,11 @@ import { FocusBriefStore } from "../src/store/focus-brief-store.js";
 import { SummaryStore } from "../src/store/summary-store.js";
 import { createLcmCommand, __testing } from "../src/plugin/lcm-command.js";
 import { writeSessionMemorySeedPacket } from "../src/session-memory-writer.js";
+import {
+  DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+  lookupSessionMemoryOverlay,
+  renderSessionMemoryOverlay,
+} from "../src/session-memory.js";
 import type { LcmSummarizeFn } from "../src/summarize.js";
 import type { LcmDependencies } from "../src/types.js";
 import { assemblySourceTelemetry } from "../src/assembly-source-telemetry.js";
@@ -2323,6 +2328,170 @@ describe("lcm command", () => {
     } finally {
       sessionMemoryDb.close();
     }
+  });
+
+  it("reattaches into an explicit target conversation only through temp DB confirmation", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sourceSessionKey = "agent:main:dashboard:old-ui-session-key";
+    const currentSessionKey = "agent:main:dashboard:current-live-session-key";
+    const sourceConversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-target-source",
+      sessionKey: sourceSessionKey,
+      title: "Old UI conversation",
+    });
+    await fixture.conversationStore.archiveConversation(sourceConversation.conversationId);
+    const explicitTargetConversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-target-explicit",
+      sessionKey: sourceSessionKey,
+      title: "Old UI fork needing repair",
+    });
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-target-current",
+      sessionKey: currentSessionKey,
+      title: "Current live conversation",
+    });
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-explicit-target.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const runCommand = async (args: string): Promise<{ text: string }> => {
+      return await command.handler!(createCommandContext(args, {
+        sessionId: "session-memory-target-current",
+        sessionKey: currentSessionKey,
+      })) as { text: string };
+    };
+
+    const schemaDryRun = await runCommand(`session-memory schema apply --db ${sessionMemoryDbPath}`);
+    const schemaConfirmation = schemaDryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(schemaConfirmation).toBeTruthy();
+    const schemaCreated = await runCommand(
+      `session-memory schema apply --execute --confirm ${schemaConfirmation} --db ${sessionMemoryDbPath}`,
+    );
+    expect(schemaCreated.text).toContain("status: created");
+
+    const seed = writeSessionMemorySeedPacket({
+      dbPath: sessionMemoryDbPath,
+      lcmDbPath: fixture.dbPath,
+      packet: {
+        session: {
+          sessionId: "session-memory-target-source",
+          conversationId: sourceConversation.conversationId,
+          sessionKey: sourceSessionKey,
+        },
+        segment: {
+          segmentId: "segment-memory-target-source",
+          seq: 1,
+        },
+        entries: [
+          {
+            entryId: "entry-memory-target-boundary",
+            kind: "constraint",
+            confidence: 0.95,
+            priority: 80,
+            body: "Gate47F target selection may repair a specific old UI fork only after dry-run proof.",
+            sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+          },
+        ],
+      },
+    });
+    expect(seed).toMatchObject({ ok: true, entryCount: 1 });
+
+    const dryRun = await runCommand(
+      `session-memory reattach --from-session-key ${sourceSessionKey} --to-conversation ${explicitTargetConversation.conversationId}`,
+    );
+    const confirmation = dryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(dryRun.text).toContain("Session Memory Reattach");
+    expect(dryRun.text).toContain("status: dry_run");
+    expect(dryRun.text).toContain("target mode: explicit");
+    expect(dryRun.text).toContain(`conversation id: ${explicitTargetConversation.conversationId}`);
+    expect(dryRun.text).toContain(`current conversation id: ${currentConversation.conversationId}`);
+    expect(dryRun.text).toContain(`conversation id: ${sourceConversation.conversationId}`);
+    expect(confirmation).toBeTruthy();
+
+    const dryRunDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        (dryRunDb
+          .prepare("SELECT COUNT(*) AS count FROM sessions WHERE conversation_id = ?")
+          .get(explicitTargetConversation.conversationId) as { count: number }).count,
+      ).toBe(0);
+    } finally {
+      dryRunDb.close();
+    }
+
+    const executed = await runCommand(
+      `session-memory reattach --from-session-key ${sourceSessionKey} --to-conversation ${explicitTargetConversation.conversationId} --execute --confirm ${confirmation}`,
+    );
+    expect(executed.text).toContain("status: written");
+    expect(executed.text).toContain("entries carried: 1");
+
+    const currentLookup = await lookupSessionMemoryOverlay(
+      {
+        conversationId: currentConversation.conversationId,
+        sessionKey: currentSessionKey,
+      },
+      {
+        ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+        enabled: true,
+        dbPath: sessionMemoryDbPath,
+        lcmDbPath: fixture.dbPath,
+      },
+    );
+    expect(currentLookup).toMatchObject({ ok: false, reason: "no_active_entries" });
+
+    const targetLookup = await lookupSessionMemoryOverlay(
+      {
+        conversationId: explicitTargetConversation.conversationId,
+        sessionKey: sourceSessionKey,
+      },
+      {
+        ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+        enabled: true,
+        dbPath: sessionMemoryDbPath,
+        lcmDbPath: fixture.dbPath,
+      },
+    );
+    expect(targetLookup).toMatchObject({
+      ok: true,
+      source: "session_memory_overlay",
+      sessionId: "session-memory-target-explicit",
+    });
+    expect(targetLookup.ok ? targetLookup.entries : []).toEqual([
+      expect.objectContaining({
+        body: "Gate47F target selection may repair a specific old UI fork only after dry-run proof.",
+      }),
+    ]);
+    const postExecuteDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        (postExecuteDb
+          .prepare("SELECT COUNT(*) AS count FROM entries WHERE origin_entry_id = ?")
+          .get("entry-memory-target-boundary") as { count: number }).count,
+      ).toBe(1);
+    } finally {
+      postExecuteDb.close();
+    }
+
+    const rendered = renderSessionMemoryOverlay(targetLookup, {
+      ...DEFAULT_SESSION_MEMORY_OVERLAY_CONFIG,
+      enabled: true,
+      dbPath: sessionMemoryDbPath,
+      lcmDbPath: fixture.dbPath,
+    });
+    expect(rendered).toMatchObject({
+      ok: true,
+      source: "session_memory_overlay",
+      entryCount: 1,
+    });
+    expect(rendered.ok ? rendered.content : "").toContain("Gate47F target selection");
   });
 
   it("carries reviewed replacement facts from an explicit temp-DB replacement packet", async () => {
