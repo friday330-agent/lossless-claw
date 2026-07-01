@@ -114,6 +114,7 @@ type SessionMemoryCarryForwardCommand = {
   dbPath?: string;
   execute: boolean;
   confirm?: string;
+  allowRealDb: boolean;
   maxEntries?: number;
   replacementsPath?: string;
 };
@@ -664,6 +665,7 @@ function parseSessionMemoryCarryForwardArgs(tokens: string[]):
   let dbPath: string | undefined;
   let execute = false;
   let confirm: string | undefined;
+  let allowRealDb = false;
   let maxEntries: number | undefined;
   let replacementsPath: string | undefined;
 
@@ -740,6 +742,10 @@ function parseSessionMemoryCarryForwardArgs(tokens: string[]):
       index += 1;
       continue;
     }
+    if (token === "--allow-real-db") {
+      allowRealDb = true;
+      continue;
+    }
     return { ok: false, error: `Unknown session-memory carry-forward option \`${token}\`.` };
   }
 
@@ -756,6 +762,7 @@ function parseSessionMemoryCarryForwardArgs(tokens: string[]):
       dbPath,
       execute,
       confirm,
+      allowRealDb,
       maxEntries,
       replacementsPath,
     },
@@ -769,6 +776,7 @@ function parseSessionMemoryReattachArgs(tokens: string[]):
   let dbPath: string | undefined;
   let execute = false;
   let confirm: string | undefined;
+  let allowRealDb = false;
   let maxEntries: number | undefined;
   let replacementsPath: string | undefined;
 
@@ -838,6 +846,10 @@ function parseSessionMemoryReattachArgs(tokens: string[]):
       index += 1;
       continue;
     }
+    if (token === "--allow-real-db") {
+      allowRealDb = true;
+      continue;
+    }
     return { ok: false, error: `Unknown session-memory reattach option \`${token}\`.` };
   }
 
@@ -849,6 +861,7 @@ function parseSessionMemoryReattachArgs(tokens: string[]):
       dbPath,
       execute,
       confirm,
+      allowRealDb,
       maxEntries,
       replacementsPath,
     },
@@ -2011,6 +2024,7 @@ async function buildSessionMemoryCarryForwardText(params: {
       buildStatLine("session-memory db", dbPath),
       buildStatLine("overlay enabled", params.config.sessionMemoryOverlay.enabled ? "yes" : "no"),
       buildStatLine("mode", params.command.execute ? "execute" : "dry_run"),
+      buildStatLine("real DB execution", params.command.allowRealDb ? "allowed by explicit flag" : "blocked"),
       buildStatLine("execute confirmation", confirmation),
     ]),
   );
@@ -2050,12 +2064,22 @@ async function buildSessionMemoryCarryForwardText(params: {
     return lines.join("\n");
   }
   const isTempTarget = isTempPath(dbPath);
-  if (!isTempTarget) {
+  if (!isTempTarget && !params.command.allowRealDb) {
     lines.push(
       "",
       buildSection("🛠️ Result", [
         buildStatLine("status", "refused"),
         buildStatLine("reason", "real DB carry-forward requires a separate approved backup gate"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+  if (!isTempTarget && params.command.allowRealDb && params.command.dbPath) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", [
+        buildStatLine("status", "refused"),
+        buildStatLine("reason", "--allow-real-db uses the resolved session-memory DB path; omit --db"),
       ]),
     );
     return lines.join("\n");
@@ -2073,6 +2097,7 @@ async function buildSessionMemoryCarryForwardText(params: {
     },
     maxEntries,
     replacementEntries: replacements.entries,
+    allowRealDb: params.command.allowRealDb,
   });
 
   if (!result.ok) {

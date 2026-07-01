@@ -243,6 +243,7 @@ export type SessionMemoryCarryForwardResult =
         | "source_ref_missing"
         | "no_active_entries"
         | "no_carryable_entries"
+        | "target_already_has_entries"
         | "write_failed";
       detail?: string;
       schemaReason?: SessionMemoryOverlaySkipReason;
@@ -622,6 +623,21 @@ export function carryForwardSessionMemoryEntries(params: {
         status: "refused",
         reason: "no_carryable_entries",
         detail: "all active source entries require refresh before carry-forward",
+      };
+    }
+    const targetConflict = findExistingCarryForwardTargetEntries(db, {
+      toConversationId: params.to.conversationId,
+      sourceEntryIds: [
+        ...carryForwardSelection.entries.map((entry) => entry.entryId),
+        ...replacements.entries.map((entry) => entry.sourceEntryId),
+      ],
+    });
+    if (targetConflict) {
+      return {
+        ok: false,
+        status: "refused",
+        reason: "target_already_has_entries",
+        detail: `target conversation already has carried/replacement entry ${targetConflict.entryId} from source ${targetConflict.originEntryId}`,
       };
     }
 
@@ -1310,6 +1326,35 @@ function selectCarryForwardEntries(entries: CarryForwardSourceEntry[]): {
     }
   }
   return { entries: selected, skipped };
+}
+
+function findExistingCarryForwardTargetEntries(
+  db: DatabaseSync,
+  params: {
+    toConversationId: number;
+    sourceEntryIds: string[];
+  },
+): { entryId: string; originEntryId: string } | null {
+  const sourceEntryIds = [...new Set(params.sourceEntryIds.filter(isNonEmptyString))];
+  if (sourceEntryIds.length === 0) {
+    return null;
+  }
+  const placeholders = sourceEntryIds.map(() => "?").join(", ");
+  const row = db
+    .prepare(
+      `SELECT e.entry_id AS entry_id, e.origin_entry_id AS origin_entry_id
+       FROM sessions s
+       JOIN entries e ON e.session_id = s.session_id
+       WHERE s.conversation_id = ?
+         AND e.origin_entry_id IN (${placeholders})
+       ORDER BY e.updated_at DESC, e.entry_id ASC
+       LIMIT 1`,
+    )
+    .get(params.toConversationId, ...sourceEntryIds) as { entry_id?: unknown; origin_entry_id?: unknown } | undefined;
+  if (!row || !isNonEmptyString(row.entry_id) || !isNonEmptyString(row.origin_entry_id)) {
+    return null;
+  }
+  return { entryId: row.entry_id, originEntryId: row.origin_entry_id };
 }
 
 function getCarryForwardSkipReason(entry: CarryForwardSourceEntry): CarryForwardSkipReason | null {

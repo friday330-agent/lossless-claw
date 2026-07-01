@@ -2253,6 +2253,57 @@ describe("lcm command", () => {
     expect(nonTempRefused.text).toContain("status: refused");
     expect(nonTempRefused.text).toContain("reason: real DB carry-forward requires a separate approved backup gate");
 
+    const nonTempExplicitPathRefused = await runCommand(
+      `session-memory reattach --db ${nonTempDbPath} --allow-real-db --execute --confirm ${nonTempConfirmation}`,
+    );
+    expect(nonTempExplicitPathRefused.text).toContain("status: refused");
+    expect(nonTempExplicitPathRefused.text).toContain("reason: --allow-real-db uses the resolved session-memory DB path; omit --db");
+
+    const realConfig = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: nonTempDbPath,
+      },
+    });
+    const realCommand = createLcmCommand({ db: fixture.db, config: realConfig });
+    const runRealCommand = async (args: string): Promise<{ text: string }> => {
+      return await realCommand.handler!(createCommandContext(args, {
+        sessionId: "session-memory-reattach-target",
+        sessionKey: sharedSessionKey,
+      })) as { text: string };
+    };
+    const realDryRun = await runRealCommand("session-memory reattach --allow-real-db");
+    const realConfirmation = realDryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(realDryRun.text).toContain("real DB execution: allowed by explicit flag");
+    expect(realDryRun.text).toContain("status: dry_run");
+    expect(realConfirmation).toBeTruthy();
+    const realExecuted = await runRealCommand(
+      `session-memory reattach --allow-real-db --execute --confirm ${realConfirmation}`,
+    );
+    expect(realExecuted.text).toContain("status: written");
+    expect(realExecuted.text).toContain("entries carried: 1");
+    const realDuplicateRefused = await runRealCommand(
+      `session-memory reattach --allow-real-db --execute --confirm ${realConfirmation}`,
+    );
+    expect(realDuplicateRefused.text).toContain("status: refused");
+    expect(realDuplicateRefused.text).toContain("reason: target_already_has_entries");
+
+    const realSessionMemoryDb = new DatabaseSync(nonTempDbPath, { readOnly: true });
+    try {
+      expect(
+        (realSessionMemoryDb
+          .prepare("SELECT COUNT(*) AS count FROM sessions WHERE conversation_id = ?")
+          .get(targetConversation.conversationId) as { count: number }).count,
+      ).toBe(1);
+      expect(
+        (realSessionMemoryDb
+          .prepare("SELECT COUNT(*) AS count FROM entries WHERE origin_entry_id = ?")
+          .get("entry-memory-reattach-boundary") as { count: number }).count,
+      ).toBe(1);
+    } finally {
+      realSessionMemoryDb.close();
+    }
+
     const executed = await runCommand(`session-memory reattach --execute --confirm ${confirmation}`);
     expect(executed.text).toContain("status: written");
     expect(executed.text).toContain("entries carried: 1");
