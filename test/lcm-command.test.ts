@@ -2151,6 +2151,129 @@ describe("lcm command", () => {
     }
   });
 
+  it("reattaches reviewed session-memory entries from an archived same-sessionKey fork only through temp DB confirmation", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sharedSessionKey = "agent:main:dashboard:same-session-key-fork";
+    const sourceConversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-reattach-source",
+      sessionKey: sharedSessionKey,
+      title: "Old UI conversation",
+    });
+    await fixture.conversationStore.archiveConversation(sourceConversation.conversationId);
+    const targetConversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-reattach-target",
+      sessionKey: sharedSessionKey,
+      title: "Forked active conversation",
+    });
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-reattach.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const runCommand = async (args: string): Promise<{ text: string }> => {
+      return await command.handler!(createCommandContext(args, {
+        sessionId: "session-memory-reattach-target",
+        sessionKey: sharedSessionKey,
+      })) as { text: string };
+    };
+
+    const schemaDryRun = await runCommand(`session-memory schema apply --db ${sessionMemoryDbPath}`);
+    const schemaConfirmation = schemaDryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(schemaConfirmation).toBeTruthy();
+    const schemaCreated = await runCommand(
+      `session-memory schema apply --execute --confirm ${schemaConfirmation} --db ${sessionMemoryDbPath}`,
+    );
+    expect(schemaCreated.text).toContain("status: created");
+
+    const seed = writeSessionMemorySeedPacket({
+      dbPath: sessionMemoryDbPath,
+      lcmDbPath: fixture.dbPath,
+      packet: {
+        session: {
+          sessionId: "session-memory-reattach-source",
+          conversationId: sourceConversation.conversationId,
+          sessionKey: sharedSessionKey,
+        },
+        segment: {
+          segmentId: "segment-memory-reattach-source",
+          seq: 1,
+        },
+        entries: [
+          {
+            entryId: "entry-memory-reattach-boundary",
+            kind: "constraint",
+            confidence: 0.95,
+            priority: 80,
+            body: "Gate47D reattach should recover only reviewed durable entries from the old same-sessionKey conversation.",
+            sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+          },
+        ],
+      },
+    });
+    expect(seed).toMatchObject({ ok: true, entryCount: 1 });
+
+    const dryRun = await runCommand("session-memory reattach");
+    const confirmation = dryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(dryRun.text).toContain("Session Memory Reattach");
+    expect(dryRun.text).toContain("status: dry_run");
+    expect(dryRun.text).toContain(`conversation id: ${sourceConversation.conversationId}`);
+    expect(dryRun.text).toContain(`conversation id: ${targetConversation.conversationId}`);
+    expect(dryRun.text).toContain("same-sessionKey candidates: 1");
+    expect(confirmation).toBeTruthy();
+
+    const dryRunDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        (dryRunDb
+          .prepare("SELECT COUNT(*) AS count FROM sessions WHERE conversation_id = ?")
+          .get(targetConversation.conversationId) as { count: number }).count,
+      ).toBe(0);
+    } finally {
+      dryRunDb.close();
+    }
+
+    const nonTempDir = join(process.cwd(), ".session-memory-reattach-real");
+    tempDirs.add(nonTempDir);
+    mkdirSync(nonTempDir, { recursive: true });
+    const nonTempDbPath = join(nonTempDir, "session-memory.db");
+    copyFileSync(sessionMemoryDbPath, nonTempDbPath);
+    const nonTempDryRun = await runCommand(`session-memory reattach --db ${nonTempDbPath}`);
+    const nonTempConfirmation = nonTempDryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(nonTempConfirmation).toBeTruthy();
+    const nonTempRefused = await runCommand(
+      `session-memory reattach --db ${nonTempDbPath} --execute --confirm ${nonTempConfirmation}`,
+    );
+    expect(nonTempRefused.text).toContain("status: refused");
+    expect(nonTempRefused.text).toContain("reason: real DB carry-forward requires a separate approved backup gate");
+
+    const executed = await runCommand(`session-memory reattach --execute --confirm ${confirmation}`);
+    expect(executed.text).toContain("status: written");
+    expect(executed.text).toContain("entries carried: 1");
+
+    const sessionMemoryDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        (sessionMemoryDb
+          .prepare("SELECT COUNT(*) AS count FROM sessions WHERE conversation_id = ?")
+          .get(targetConversation.conversationId) as { count: number }).count,
+      ).toBe(1);
+      expect(
+        (sessionMemoryDb
+          .prepare("SELECT COUNT(*) AS count FROM entries WHERE origin_entry_id = ?")
+          .get("entry-memory-reattach-boundary") as { count: number }).count,
+      ).toBe(1);
+    } finally {
+      sessionMemoryDb.close();
+    }
+  });
+
   it("carries reviewed replacement facts from an explicit temp-DB replacement packet", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, sep } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import packageJson from "../../package.json" with { type: "json" };
 import { formatTimestamp } from "../compaction.js";
 import type { LcmConfig } from "../db/config.js";
@@ -108,7 +108,8 @@ type ParsedLcmCommand =
   | { kind: "help"; error?: string };
 
 type SessionMemoryCarryForwardCommand = {
-  fromConversationId: number;
+  sourceMode: "explicit" | "same_session_key";
+  fromConversationId?: number;
   fromSessionKey?: string;
   dbPath?: string;
   execute: boolean;
@@ -322,6 +323,118 @@ function sessionMemoryCarryForwardConfirmationToken(params: {
     ].join("\n"))
     .digest("hex")
     .slice(0, 12)}`;
+}
+
+function resolveSameSessionKeyReattachSource(params: {
+  lcmDb: DatabaseSync;
+  sessionMemoryDbPath: string;
+  currentConversationId: number;
+  currentSessionKey?: string | null;
+  requestedSessionKey?: string;
+}):
+  | {
+      ok: true;
+      conversationId: number;
+      sessionKey: string;
+      candidateCount: number;
+      activeEntryCount: number;
+    }
+  | {
+      ok: false;
+      reason: string;
+      detail?: string;
+      sessionKey?: string;
+      candidateCount?: number;
+    } {
+  const sessionKey = normalizeIdentity(params.requestedSessionKey ?? params.currentSessionKey ?? undefined);
+  if (!sessionKey) {
+    return {
+      ok: false,
+      reason: "missing_session_key",
+      detail: "same-sessionKey reattach requires a source session key or current session key",
+    };
+  }
+
+  const candidates = params.lcmDb
+    .prepare(
+      `SELECT conversation_id
+       FROM conversations
+       WHERE session_key = ?
+         AND conversation_id <> ?
+       ORDER BY active ASC, created_at DESC, conversation_id DESC`,
+    )
+    .all(sessionKey, params.currentConversationId) as Array<{ conversation_id: number }>;
+
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      reason: "no_same_session_key_candidates",
+      sessionKey,
+      candidateCount: 0,
+    };
+  }
+
+  if (!existsSync(params.sessionMemoryDbPath)) {
+    return {
+      ok: false,
+      reason: "session_memory_db_absent",
+      sessionKey,
+      candidateCount: candidates.length,
+      detail: params.sessionMemoryDbPath,
+    };
+  }
+
+  let db: DatabaseSync;
+  try {
+    db = new DatabaseSync(params.sessionMemoryDbPath, { readOnly: true });
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "session_memory_db_read_error",
+      sessionKey,
+      candidateCount: candidates.length,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  try {
+    const countActiveEntries = db.prepare(
+      `SELECT COUNT(*) AS count
+       FROM entries
+       JOIN sessions ON sessions.session_id = entries.session_id
+       WHERE sessions.conversation_id = ?
+         AND entries.status = 'active'`,
+    );
+    for (const candidate of candidates) {
+      const row = countActiveEntries.get(candidate.conversation_id) as { count: number };
+      if (row.count > 0) {
+        return {
+          ok: true,
+          conversationId: candidate.conversation_id,
+          sessionKey,
+          candidateCount: candidates.length,
+          activeEntryCount: row.count,
+        };
+      }
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "session_memory_candidate_query_failed",
+      sessionKey,
+      candidateCount: candidates.length,
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    db.close();
+  }
+
+  return {
+    ok: false,
+    reason: "no_candidates_with_active_entries",
+    sessionKey,
+    candidateCount: candidates.length,
+  };
 }
 
 function sessionMemoryAppendReviewedConfirmationToken(params: {
@@ -637,7 +750,101 @@ function parseSessionMemoryCarryForwardArgs(tokens: string[]):
   return {
     ok: true,
     command: {
+      sourceMode: "explicit",
       fromConversationId,
+      fromSessionKey,
+      dbPath,
+      execute,
+      confirm,
+      maxEntries,
+      replacementsPath,
+    },
+  };
+}
+
+function parseSessionMemoryReattachArgs(tokens: string[]):
+  | { ok: true; command: SessionMemoryCarryForwardCommand }
+  | { ok: false; error: string } {
+  let fromSessionKey: string | undefined;
+  let dbPath: string | undefined;
+  let execute = false;
+  let confirm: string | undefined;
+  let maxEntries: number | undefined;
+  let replacementsPath: string | undefined;
+
+  const rest = tokens.slice(1);
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (token === "--from") {
+      return {
+        ok: false,
+        error: "`/lossless session-memory reattach` resolves source by session key; use `carry-forward --from <conversation-id>` for explicit sources.",
+      };
+    }
+    if (token === "--from-session-key") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--from-session-key` requires a session key." };
+      }
+      fromSessionKey = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--db") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--db` requires a path." };
+      }
+      dbPath = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--max-entries") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--max-entries` requires a number." };
+      }
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        return { ok: false, error: "`--max-entries` must be a positive integer." };
+      }
+      maxEntries = parsed;
+      index += 1;
+      continue;
+    }
+    if (token === "--replacements") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--replacements` requires a JSON file path." };
+      }
+      replacementsPath = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--execute") {
+      execute = true;
+      continue;
+    }
+    if (token === "--dry-run") {
+      execute = false;
+      continue;
+    }
+    if (token === "--confirm") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--confirm` requires a token." };
+      }
+      confirm = value;
+      index += 1;
+      continue;
+    }
+    return { ok: false, error: `Unknown session-memory reattach option \`${token}\`.` };
+  }
+
+  return {
+    ok: true,
+    command: {
+      sourceMode: "same_session_key",
       fromSessionKey,
       dbPath,
       execute,
@@ -763,6 +970,12 @@ function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
       ? { kind: "session_memory_carry_forward", command: parsed.command }
       : { kind: "help", error: parsed.error };
   }
+  if (action === "reattach") {
+    const parsed = parseSessionMemoryReattachArgs(tokens);
+    return parsed.ok
+      ? { kind: "session_memory_carry_forward", command: parsed.command }
+      : { kind: "help", error: parsed.error };
+  }
   if (action === "append-reviewed") {
     const parsed = parseSessionMemoryAppendReviewedArgs(tokens);
     return parsed.ok
@@ -771,7 +984,7 @@ function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
   }
   return {
     kind: "help",
-    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, \`profile grouped|compact|clear\`, \`carry-forward\`, \`append-reviewed\`, and \`schema plan|check|apply\`.`,
+    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, \`profile grouped|compact|clear\`, \`carry-forward\`, \`reattach\`, \`append-reviewed\`, and \`schema plan|check|apply\`.`,
   };
 }
 
@@ -1284,6 +1497,10 @@ function buildHelpText(error?: string): string {
         "Dry-run or temp-DB execute reviewed seed carry-forward and explicit replacement facts.",
       ),
       buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} session-memory reattach [--from-session-key <key>]`),
+        "Dry-run or temp-DB execute same-sessionKey fork reattach using reviewed active entries.",
+      ),
+      buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory append-reviewed --entry <json>`),
         "Dry-run or temp-DB execute one reviewed semantic entry append.",
       ),
@@ -1673,10 +1890,11 @@ async function buildSessionMemoryCarryForwardText(params: {
     db: params.db,
   });
   const dbPath = params.command.dbPath?.trim() || params.config.sessionMemoryOverlay.dbPath;
+  const isReattach = params.command.sourceMode === "same_session_key";
   const lines = [
     ...buildHeaderLines(),
     "",
-    "🧠 Session Memory Carry-Forward",
+    isReattach ? "🧠 Session Memory Reattach" : "🧠 Session Memory Carry-Forward",
     "",
   ];
 
@@ -1685,6 +1903,52 @@ async function buildSessionMemoryCarryForwardText(params: {
       buildSection("📍 Target conversation", [
         buildStatLine("status", "unavailable"),
         buildStatLine("reason", current.reason),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  let fromConversationId = params.command.fromConversationId;
+  let resolvedSourceSessionKey = params.command.fromSessionKey;
+  let sameSessionKeyCandidateCount: number | undefined;
+  let sameSessionKeyActiveEntryCount: number | undefined;
+  if (isReattach) {
+    const source = resolveSameSessionKeyReattachSource({
+      lcmDb: params.db,
+      sessionMemoryDbPath: dbPath,
+      currentConversationId: current.stats.conversationId,
+      currentSessionKey: current.stats.sessionKey,
+      requestedSessionKey: params.command.fromSessionKey,
+    });
+    if (!source.ok) {
+      lines.push(
+        buildSection("🧷 Source", [
+          buildStatLine("source mode", "same-sessionKey reattach"),
+          buildStatLine(
+            "session key",
+            source.sessionKey ? formatCommand(truncateMiddle(source.sessionKey, 44)) : "missing",
+          ),
+          ...(source.candidateCount != null
+            ? [buildStatLine("same-sessionKey candidates", formatNumber(source.candidateCount))]
+            : []),
+          buildStatLine("status", "refused"),
+          buildStatLine("reason", source.reason),
+          ...(source.detail ? [buildStatLine("detail", source.detail)] : []),
+        ]),
+      );
+      return lines.join("\n");
+    }
+    fromConversationId = source.conversationId;
+    resolvedSourceSessionKey = source.sessionKey;
+    sameSessionKeyCandidateCount = source.candidateCount;
+    sameSessionKeyActiveEntryCount = source.activeEntryCount;
+  }
+
+  if (!fromConversationId) {
+    lines.push(
+      buildSection("🧷 Source", [
+        buildStatLine("status", "refused"),
+        buildStatLine("reason", "missing source conversation id"),
       ]),
     );
     return lines.join("\n");
@@ -1703,7 +1967,7 @@ async function buildSessionMemoryCarryForwardText(params: {
 
   const confirmation = sessionMemoryCarryForwardConfirmationToken({
     dbPath,
-    fromConversationId: params.command.fromConversationId,
+    fromConversationId,
     toConversationId: current.stats.conversationId,
     sessionId: current.stats.sessionId,
     sessionKey: current.stats.sessionKey,
@@ -1722,11 +1986,18 @@ async function buildSessionMemoryCarryForwardText(params: {
     ]),
     "",
     buildSection("🧷 Source", [
-      buildStatLine("conversation id", formatNumber(params.command.fromConversationId)),
+      buildStatLine("source mode", isReattach ? "same-sessionKey reattach" : "explicit conversation"),
+      buildStatLine("conversation id", formatNumber(fromConversationId)),
       buildStatLine(
         "session key filter",
-        params.command.fromSessionKey ? formatCommand(truncateMiddle(params.command.fromSessionKey, 44)) : "none",
+        resolvedSourceSessionKey ? formatCommand(truncateMiddle(resolvedSourceSessionKey, 44)) : "none",
       ),
+      ...(sameSessionKeyCandidateCount != null
+        ? [buildStatLine("same-sessionKey candidates", formatNumber(sameSessionKeyCandidateCount))]
+        : []),
+      ...(sameSessionKeyActiveEntryCount != null
+        ? [buildStatLine("source active entries", formatNumber(sameSessionKeyActiveEntryCount))]
+        : []),
       buildStatLine("max entries", formatNumber(maxEntries)),
     ]),
     "",
@@ -1793,8 +2064,8 @@ async function buildSessionMemoryCarryForwardText(params: {
   const result = carryForwardSessionMemoryEntries({
     dbPath,
     lcmDbPath: params.config.databasePath,
-    fromConversationId: params.command.fromConversationId,
-    fromSessionKey: params.command.fromSessionKey,
+    fromConversationId,
+    fromSessionKey: resolvedSourceSessionKey,
     to: {
       sessionId: current.stats.sessionId,
       conversationId: current.stats.conversationId,
