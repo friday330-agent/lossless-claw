@@ -2947,11 +2947,11 @@ describe("lcm command", () => {
 
     writeFileSync(entryPath, JSON.stringify({
       entry: {
-        entryId: "gate51-reviewed-explicit-target-entry",
+        entryId: "gate50a-reviewed-explicit-target-entry",
         kind: "decision",
         logicalKind: "reviewed_decision",
         projectId: "lossless-session-memory",
-        worklineId: "gate51-append-reviewed-target-selection",
+        worklineId: "gate50a-append-reviewed-target-selection",
         details: {
           decision: "append-reviewed target selection must bind dry-run and execute to the explicit conversation.",
           target_conversation_id: explicitTargetConversation.conversationId,
@@ -2976,7 +2976,7 @@ describe("lcm command", () => {
     expect(dryRun.text).toContain("target mode: explicit");
     expect(dryRun.text).toContain(`conversation id: ${explicitTargetConversation.conversationId}`);
     expect(dryRun.text).toContain(`current conversation id: ${currentConversation.conversationId}`);
-    expect(dryRun.text).toContain("entry id: `gate51-reviewed-explicit-target-entry`");
+    expect(dryRun.text).toContain("entry id: `gate50a-reviewed-explicit-target-entry`");
     expect(confirmation).toBeTruthy();
 
     const dryRunDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
@@ -2984,7 +2984,7 @@ describe("lcm command", () => {
       expect(
         (dryRunDb
           .prepare("SELECT COUNT(*) AS count FROM entries WHERE entry_id = ?")
-          .get("gate51-reviewed-explicit-target-entry") as { count: number }).count,
+          .get("gate50a-reviewed-explicit-target-entry") as { count: number }).count,
       ).toBe(0);
     } finally {
       dryRunDb.close();
@@ -2994,7 +2994,7 @@ describe("lcm command", () => {
       `session-memory append-reviewed --entry ${entryPath} --to-conversation ${explicitTargetConversation.conversationId} --execute --confirm ${confirmation}`,
     );
     expect(executed.text).toContain("status: written");
-    expect(executed.text).toContain("entry id: `gate51-reviewed-explicit-target-entry`");
+    expect(executed.text).toContain("entry id: `gate50a-reviewed-explicit-target-entry`");
     expect(executed.text).toContain("segment id: `segment-memory-append-explicit-target`");
 
     const postWriteDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
@@ -3007,12 +3007,12 @@ describe("lcm command", () => {
              JOIN sessions s ON s.session_id = e.session_id
              WHERE e.entry_id = ?`,
           )
-          .get("gate51-reviewed-explicit-target-entry"),
+          .get("gate50a-reviewed-explicit-target-entry"),
       ).toEqual({
         conversation_id: explicitTargetConversation.conversationId,
         logical_kind: "reviewed_decision",
         project_id: "lossless-session-memory",
-        workline_id: "gate51-append-reviewed-target-selection",
+        workline_id: "gate50a-append-reviewed-target-selection",
         evidence_level: "committed_plan_plus_reverse_review",
         review_state: "accepted",
       });
