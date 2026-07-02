@@ -124,6 +124,7 @@ type SessionMemoryAppendReviewedCommand = {
   entryPath: string;
   dbPath?: string;
   segmentId?: string;
+  toConversationId?: number;
   execute: boolean;
   confirm?: string;
   allowRealDb: boolean;
@@ -899,6 +900,7 @@ function parseSessionMemoryAppendReviewedArgs(tokens: string[]):
   let entryPath: string | undefined;
   let dbPath: string | undefined;
   let segmentId: string | undefined;
+  let toConversationId: number | undefined;
   let execute = false;
   let confirm: string | undefined;
   let allowRealDb = false;
@@ -930,6 +932,15 @@ function parseSessionMemoryAppendReviewedArgs(tokens: string[]):
         return { ok: false, error: "`--segment-id` requires an id." };
       }
       segmentId = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--to-conversation") {
+      const parsed = parseConversationId(rest[index + 1], "--to-conversation");
+      if (!parsed.ok) {
+        return parsed;
+      }
+      toConversationId = parsed.conversationId;
       index += 1;
       continue;
     }
@@ -967,6 +978,7 @@ function parseSessionMemoryAppendReviewedArgs(tokens: string[]):
       entryPath,
       dbPath,
       segmentId,
+      toConversationId,
       execute,
       confirm,
       allowRealDb,
@@ -1539,7 +1551,7 @@ function buildHelpText(error?: string): string {
         "Dry-run or temp-DB execute same-sessionKey fork reattach into the current or explicit target conversation.",
       ),
       buildStatLine(
-        formatCommand(`${VISIBLE_COMMAND} session-memory append-reviewed --entry <json>`),
+        formatCommand(`${VISIBLE_COMMAND} session-memory append-reviewed --entry <json> [--to-conversation <id>]`),
         "Dry-run or temp-DB execute one reviewed semantic entry append.",
       ),
       buildStatLine(
@@ -2199,6 +2211,20 @@ async function buildSessionMemoryAppendReviewedText(params: {
     );
     return lines.join("\n");
   }
+  const targetStats = params.command.toConversationId === undefined
+    ? current.stats
+    : getConversationStatusStats(params.db, params.command.toConversationId);
+  if (!targetStats) {
+    lines.push(
+      buildSection("📍 Target conversation", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("target mode", "explicit"),
+        buildStatLine("conversation id", formatNumber(params.command.toConversationId)),
+        buildStatLine("reason", "conversation not found in LCM"),
+      ]),
+    );
+    return lines.join("\n");
+  }
 
   const packet = loadSessionMemoryAppendPacket(params.command.entryPath);
   if (!packet.ok) {
@@ -2213,20 +2239,24 @@ async function buildSessionMemoryAppendReviewedText(params: {
 
   const confirmation = sessionMemoryAppendReviewedConfirmationToken({
     dbPath,
-    conversationId: current.stats.conversationId,
-    sessionId: current.stats.sessionId,
-    sessionKey: current.stats.sessionKey,
+    conversationId: targetStats.conversationId,
+    sessionId: targetStats.sessionId,
+    sessionKey: targetStats.sessionKey,
     segmentId: params.command.segmentId,
     entryDigest: packet.digest,
   });
 
   lines.push(
     buildSection("📍 Target conversation", [
-      buildStatLine("conversation id", formatNumber(current.stats.conversationId)),
-      buildStatLine("session id", formatCommand(truncateMiddle(current.stats.sessionId, 44))),
+      buildStatLine("target mode", params.command.toConversationId === undefined ? "current" : "explicit"),
+      buildStatLine("conversation id", formatNumber(targetStats.conversationId)),
+      ...(params.command.toConversationId === undefined
+        ? []
+        : [buildStatLine("current conversation id", formatNumber(current.stats.conversationId))]),
+      buildStatLine("session id", formatCommand(truncateMiddle(targetStats.sessionId, 44))),
       buildStatLine(
         "session key",
-        current.stats.sessionKey ? formatCommand(truncateMiddle(current.stats.sessionKey, 44)) : "missing",
+        targetStats.sessionKey ? formatCommand(truncateMiddle(targetStats.sessionKey, 44)) : "missing",
       ),
       buildStatLine("segment id", params.command.segmentId ? formatCommand(params.command.segmentId) : "active segment"),
     ]),
@@ -2310,8 +2340,8 @@ async function buildSessionMemoryAppendReviewedText(params: {
   const result = appendReviewedSessionMemoryEntry({
     dbPath,
     lcmDbPath: params.config.databasePath,
-    conversationId: current.stats.conversationId,
-    sessionKey: current.stats.sessionKey ?? undefined,
+    conversationId: targetStats.conversationId,
+    sessionKey: targetStats.sessionKey ?? undefined,
     segmentId: params.command.segmentId,
     entry: packet.entry,
     allowRealDb: params.command.allowRealDb,

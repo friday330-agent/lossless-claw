@@ -2855,6 +2855,182 @@ describe("lcm command", () => {
     }
   });
 
+  it("appends one reviewed semantic entry into an explicit target conversation", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const currentSessionKey = "agent:main:webchat:append-reviewed-current";
+    const explicitTargetSessionKey = "agent:main:webchat:append-reviewed-explicit-target";
+    const currentConversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-append-current",
+      sessionKey: currentSessionKey,
+    });
+    const explicitTargetConversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-append-explicit-target",
+      sessionKey: explicitTargetSessionKey,
+    });
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-append-reviewed-explicit-target.db");
+    const entryPath = join(fixture.tempDir, "append-reviewed-explicit-target-entry.json");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const runCommand = async (args: string): Promise<{ text: string }> => {
+      return await command.handler!(createCommandContext(args, {
+        sessionId: "session-memory-append-current",
+        sessionKey: currentSessionKey,
+      })) as { text: string };
+    };
+
+    const schemaDryRun = await runCommand(`session-memory schema apply --db ${sessionMemoryDbPath}`);
+    const schemaConfirmation = schemaDryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(schemaConfirmation).toBeTruthy();
+    const schemaCreated = await runCommand(
+      `session-memory schema apply --execute --confirm ${schemaConfirmation} --db ${sessionMemoryDbPath}`,
+    );
+    expect(schemaCreated.text).toContain("status: created");
+
+    writeSessionMemorySeedPacket({
+      dbPath: sessionMemoryDbPath,
+      lcmDbPath: fixture.dbPath,
+      packet: {
+        session: {
+          sessionId: "session-memory-append-explicit-target",
+          conversationId: explicitTargetConversation.conversationId,
+          sessionKey: explicitTargetSessionKey,
+        },
+        segment: {
+          segmentId: "segment-memory-append-explicit-target",
+          seq: 1,
+        },
+        entries: [
+          {
+            entryId: "entry-memory-append-explicit-existing",
+            kind: "decision",
+            confidence: 0.9,
+            priority: 30,
+            body: "Gate 50 proved reviewed append needs explicit target binding before real writes.",
+            sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+          },
+        ],
+      },
+    });
+    const sessionMemoryDb = new DatabaseSync(sessionMemoryDbPath);
+    try {
+      sessionMemoryDb.exec(`
+        ALTER TABLE entries ADD COLUMN logical_kind TEXT NULL;
+        ALTER TABLE entries ADD COLUMN project_id TEXT NULL;
+        ALTER TABLE entries ADD COLUMN workline_id TEXT NULL;
+        ALTER TABLE entries ADD COLUMN details_json TEXT NULL;
+        ALTER TABLE entries ADD COLUMN evidence_level TEXT NULL;
+        ALTER TABLE entries ADD COLUMN review_state TEXT NULL;
+        CREATE INDEX entries_project_workline_status_idx ON entries (project_id, workline_id, status);
+        CREATE INDEX entries_logical_kind_status_idx ON entries (logical_kind, status);
+        INSERT INTO schema_migrations (migration_id, schema_version, applied_at, checksum, description)
+        VALUES (
+          'session_memory_v0_2_entry_semantic_fields',
+          2,
+          '2026-06-28T12:45:00.000Z',
+          'test-semantic-append-explicit-target-command',
+          'Add semantic entry fields'
+        );
+        PRAGMA user_version = 2;
+      `);
+    } finally {
+      sessionMemoryDb.close();
+    }
+
+    writeFileSync(entryPath, JSON.stringify({
+      entry: {
+        entryId: "gate51-reviewed-explicit-target-entry",
+        kind: "decision",
+        logicalKind: "reviewed_decision",
+        projectId: "lossless-session-memory",
+        worklineId: "gate51-append-reviewed-target-selection",
+        details: {
+          decision: "append-reviewed target selection must bind dry-run and execute to the explicit conversation.",
+          target_conversation_id: explicitTargetConversation.conversationId,
+          not_types: ["automatic capture", "runtime overlay enablement", "real DB write"],
+        },
+        evidenceLevel: "committed_plan_plus_reverse_review",
+        reviewState: "accepted",
+        confidence: 0.92,
+        priority: 92,
+        title: "append-reviewed explicit target binding",
+        body: "append-reviewed should support explicit target conversation binding before any reviewed write to a repaired old UI fork.",
+        sourceRefs: [{ type: "workspace_file", path: "Friday-memory/CURRENT.md" }],
+      },
+    }));
+
+    const dryRun = await runCommand(
+      `session-memory append-reviewed --entry ${entryPath} --to-conversation ${explicitTargetConversation.conversationId}`,
+    );
+    const confirmation = dryRun.text.match(/execute confirmation: ([a-z0-9_:-]+)/)?.[1];
+    expect(dryRun.text).toContain("Session Memory Reviewed Append");
+    expect(dryRun.text).toContain("status: dry_run");
+    expect(dryRun.text).toContain("target mode: explicit");
+    expect(dryRun.text).toContain(`conversation id: ${explicitTargetConversation.conversationId}`);
+    expect(dryRun.text).toContain(`current conversation id: ${currentConversation.conversationId}`);
+    expect(dryRun.text).toContain("entry id: `gate51-reviewed-explicit-target-entry`");
+    expect(confirmation).toBeTruthy();
+
+    const dryRunDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        (dryRunDb
+          .prepare("SELECT COUNT(*) AS count FROM entries WHERE entry_id = ?")
+          .get("gate51-reviewed-explicit-target-entry") as { count: number }).count,
+      ).toBe(0);
+    } finally {
+      dryRunDb.close();
+    }
+
+    const executed = await runCommand(
+      `session-memory append-reviewed --entry ${entryPath} --to-conversation ${explicitTargetConversation.conversationId} --execute --confirm ${confirmation}`,
+    );
+    expect(executed.text).toContain("status: written");
+    expect(executed.text).toContain("entry id: `gate51-reviewed-explicit-target-entry`");
+    expect(executed.text).toContain("segment id: `segment-memory-append-explicit-target`");
+
+    const postWriteDb = new DatabaseSync(sessionMemoryDbPath, { readOnly: true });
+    try {
+      expect(
+        postWriteDb
+          .prepare(
+            `SELECT s.conversation_id, e.logical_kind, e.project_id, e.workline_id, e.evidence_level, e.review_state
+             FROM entries e
+             JOIN sessions s ON s.session_id = e.session_id
+             WHERE e.entry_id = ?`,
+          )
+          .get("gate51-reviewed-explicit-target-entry"),
+      ).toEqual({
+        conversation_id: explicitTargetConversation.conversationId,
+        logical_kind: "reviewed_decision",
+        project_id: "lossless-session-memory",
+        workline_id: "gate51-append-reviewed-target-selection",
+        evidence_level: "committed_plan_plus_reverse_review",
+        review_state: "accepted",
+      });
+      expect(
+        (postWriteDb
+          .prepare(
+            `SELECT COUNT(*) AS count
+             FROM entries e
+             JOIN sessions s ON s.session_id = e.session_id
+             WHERE s.conversation_id = ?`,
+          )
+          .get(currentConversation.conversationId) as { count: number }).count,
+      ).toBe(0);
+    } finally {
+      postWriteDb.close();
+    }
+  });
+
   it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
