@@ -3100,6 +3100,58 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("reports session-memory capture candidates from summaries when raw messages are stale", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-summary.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-summary";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-summary",
+      sessionKey,
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "assistant",
+        content: "最近只剩下一条实现完成摘要。",
+        tokenCount: 12,
+      },
+    ]);
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_session_memory_candidate_workline",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "用户确认接下来研究 Steam 上独立游戏的品类，更重要的是玩法，不是美术；不要优先恐怖 / 氛围探索。",
+      tokenCount: 28,
+      latestAt: new Date("2026-07-03T07:20:00.000Z"),
+    });
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 1",
+      {
+        sessionId: "session-memory-capture-candidates-summary",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Session Memory Candidate Capture");
+    expect(result.text).toContain("summary scan limit: 1");
+    expect(result.text).toContain("source: lcm_summary");
+    expect(result.text).toContain("source item: summary `sum_session_memory_candidate_workline`");
+    expect(result.text).toContain("review result: candidate_only");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");

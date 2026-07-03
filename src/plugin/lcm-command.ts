@@ -138,8 +138,9 @@ type SessionMemoryCaptureCandidatesCommand = {
 
 type SessionMemoryCaptureCandidate = {
   kind: "workline_shift" | "constraint_boundary" | "decision" | "next_action" | "verified_result";
-  source: "user_decision" | "friday_review" | "command_result";
-  seq: number;
+  source: "user_decision" | "friday_review" | "command_result" | "lcm_summary";
+  sourceKind: "message" | "summary";
+  sourceRef: string;
   role: string;
   createdAt: string;
   claim: string;
@@ -2444,9 +2445,10 @@ function includesAny(value: string, needles: string[]): boolean {
 }
 
 function classifySessionMemoryCaptureCandidate(params: {
+  sourceKind: "message" | "summary";
+  sourceRef: string;
   role: string;
   content: string;
-  seq: number;
   createdAt: string;
 }): SessionMemoryCaptureCandidate | null {
   const content = params.content.trim();
@@ -2455,16 +2457,21 @@ function classifySessionMemoryCaptureCandidate(params: {
   }
   const normalized = content.toLowerCase();
   const claim = truncateMiddle(content.replace(/\s+/g, " "), 220);
+  const userAuthoredSignal =
+    params.role === "user" ||
+    (params.sourceKind === "summary" &&
+      includesAny(normalized, ["user ", "user confirmed", "user directed", "user requested", "用户", "头儿"]));
 
-  if (params.role === "user") {
+  if (userAuthoredSignal) {
     const looksLikeWorklineShift =
       includesAny(normalized, ["接下来", "之后", "继续", "切换", "转到", "开始", "新方向", "主线", "工作线", "研究"]) &&
       includesAny(normalized, ["session memory", "session-memory", "独立游戏", "steam", "品类", "方向", "工作", "研究"]);
     if (looksLikeWorklineShift) {
       return {
         kind: "workline_shift",
-        source: "user_decision",
-        seq: params.seq,
+        source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
         role: params.role,
         createdAt: params.createdAt,
         claim,
@@ -2478,8 +2485,9 @@ function classifySessionMemoryCaptureCandidate(params: {
     if (includesAny(normalized, ["不要", "不能", "别", "不需要", "不优先", "必须", "更重要", "优先", "未经", "批准", "明确"])) {
       return {
         kind: "constraint_boundary",
-        source: "user_decision",
-        seq: params.seq,
+        source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
         role: params.role,
         createdAt: params.createdAt,
         claim,
@@ -2493,8 +2501,9 @@ function classifySessionMemoryCaptureCandidate(params: {
     if (includesAny(normalized, ["决定", "确认", "同意", "批准", "可以", "修一下", "落盘", "记下"])) {
       return {
         kind: "decision",
-        source: "user_decision",
-        seq: params.seq,
+        source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
         role: params.role,
         createdAt: params.createdAt,
         claim,
@@ -2508,8 +2517,9 @@ function classifySessionMemoryCaptureCandidate(params: {
     if (includesAny(normalized, ["下一步", "先做", "继续做", "开始做"])) {
       return {
         kind: "next_action",
-        source: "user_decision",
-        seq: params.seq,
+        source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
         role: params.role,
         createdAt: params.createdAt,
         claim,
@@ -2528,7 +2538,8 @@ function classifySessionMemoryCaptureCandidate(params: {
     return {
       kind: "verified_result",
       source: "friday_review",
-      seq: params.seq,
+      sourceKind: params.sourceKind,
+      sourceRef: params.sourceRef,
       role: params.role,
       createdAt: params.createdAt,
       claim,
@@ -2599,18 +2610,49 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
       created_at: string;
     }>;
 
-  const candidates = rows
+  const summaryRows = params.db
+    .prepare(
+      `SELECT summary_id, kind, content, COALESCE(latest_at, created_at) AS created_at
+       FROM summaries
+       WHERE conversation_id = ?
+       ORDER BY COALESCE(latest_at, created_at) DESC, created_at DESC
+       LIMIT ?`,
+    )
+    .all(targetStats.conversationId, params.command.limit) as Array<{
+      summary_id: string;
+      kind: string;
+      content: string;
+      created_at: string;
+    }>;
+
+  const messageCandidates = rows
     .slice()
     .reverse()
     .map((row) =>
       classifySessionMemoryCaptureCandidate({
+        sourceKind: "message",
+        sourceRef: `#${formatNumber(row.seq)}`,
         role: row.role,
         content: row.content,
-        seq: row.seq,
         createdAt: row.created_at,
       }),
     )
-    .filter((candidate): candidate is SessionMemoryCaptureCandidate => candidate !== null)
+    .filter((candidate): candidate is SessionMemoryCaptureCandidate => candidate !== null);
+  const summaryCandidates = summaryRows
+    .slice()
+    .reverse()
+    .map((row) =>
+      classifySessionMemoryCaptureCandidate({
+        sourceKind: "summary",
+        sourceRef: row.summary_id,
+        role: row.kind,
+        content: row.content,
+        createdAt: row.created_at,
+      }),
+    )
+    .filter((candidate): candidate is SessionMemoryCaptureCandidate => candidate !== null);
+  const candidates = [...messageCandidates, ...summaryCandidates]
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
     .slice(0, 8);
 
   lines.push(
@@ -2625,6 +2667,7 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
         targetStats.sessionKey ? formatCommand(truncateMiddle(targetStats.sessionKey, 44)) : "missing",
       ),
       buildStatLine("message scan limit", formatNumber(params.command.limit)),
+      buildStatLine("summary scan limit", formatNumber(params.command.limit)),
     ]),
     "",
     buildSection("🧪 Mode", [
@@ -2656,7 +2699,7 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
       "",
       buildSection(`Candidate ${index + 1} - ${candidate.kind}`, [
         buildStatLine("source", candidate.source),
-        buildStatLine("message", `#${formatNumber(candidate.seq)} ${candidate.role} at ${candidate.createdAt}`),
+        buildStatLine("source item", `${candidate.sourceKind} ${formatCommand(candidate.sourceRef)} (${candidate.role}) at ${candidate.createdAt}`),
         buildStatLine("why candidate", candidate.why),
         buildStatLine("claim", candidate.claim),
         buildStatLine("confidence", candidate.confidence),
