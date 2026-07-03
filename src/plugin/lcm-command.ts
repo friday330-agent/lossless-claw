@@ -105,6 +105,7 @@ type ParsedLcmCommand =
   | { kind: "session_memory_schema"; command: SessionMemorySchemaCommand }
   | { kind: "session_memory_carry_forward"; command: SessionMemoryCarryForwardCommand }
   | { kind: "session_memory_append_reviewed"; command: SessionMemoryAppendReviewedCommand }
+  | { kind: "session_memory_capture_candidates"; command: SessionMemoryCaptureCandidatesCommand }
   | { kind: "help"; error?: string };
 
 type SessionMemoryCarryForwardCommand = {
@@ -128,6 +129,24 @@ type SessionMemoryAppendReviewedCommand = {
   execute: boolean;
   confirm?: string;
   allowRealDb: boolean;
+};
+
+type SessionMemoryCaptureCandidatesCommand = {
+  conversationId?: number;
+  limit: number;
+};
+
+type SessionMemoryCaptureCandidate = {
+  kind: "workline_shift" | "constraint_boundary" | "decision" | "next_action" | "verified_result";
+  source: "user_decision" | "friday_review" | "command_result";
+  seq: number;
+  role: string;
+  createdAt: string;
+  claim: string;
+  why: string;
+  confidence: "high" | "medium";
+  riskIfWrong: string;
+  suggestedDestination: string;
 };
 
 type SessionMemoryReplacementPacketLoadResult =
@@ -986,6 +1005,43 @@ function parseSessionMemoryAppendReviewedArgs(tokens: string[]):
   };
 }
 
+function parseSessionMemoryCaptureCandidatesArgs(tokens: string[]):
+  | { ok: true; command: SessionMemoryCaptureCandidatesCommand }
+  | { ok: false; error: string } {
+  let conversationId: number | undefined;
+  let limit = 24;
+
+  const rest = tokens.slice(1);
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index];
+    if (token === "--conversation") {
+      const parsed = parseConversationId(rest[index + 1], "--conversation");
+      if (!parsed.ok) {
+        return parsed;
+      }
+      conversationId = parsed.conversationId;
+      index += 1;
+      continue;
+    }
+    if (token === "--limit") {
+      const value = rest[index + 1];
+      if (!value) {
+        return { ok: false, error: "`--limit` requires a number." };
+      }
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+        return { ok: false, error: "`--limit` must be an integer from 1 to 100." };
+      }
+      limit = parsed;
+      index += 1;
+      continue;
+    }
+    return { ok: false, error: `Unknown session-memory capture-candidates option \`${token}\`.` };
+  }
+
+  return { ok: true, command: { conversationId, limit } };
+}
+
 function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
   const action = tokens[0]?.toLowerCase();
   if (!action || action === "status") {
@@ -1032,9 +1088,15 @@ function parseSessionMemoryArgs(tokens: string[]): ParsedLcmCommand {
       ? { kind: "session_memory_append_reviewed", command: parsed.command }
       : { kind: "help", error: parsed.error };
   }
+  if (action === "capture-candidates") {
+    const parsed = parseSessionMemoryCaptureCandidatesArgs(tokens);
+    return parsed.ok
+      ? { kind: "session_memory_capture_candidates", command: parsed.command }
+      : { kind: "help", error: parsed.error };
+  }
   return {
     kind: "help",
-    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, \`profile grouped|compact|clear\`, \`carry-forward\`, \`reattach\`, \`append-reviewed\`, and \`schema plan|check|apply\`.`,
+    error: `\`${VISIBLE_COMMAND} session-memory\` supports \`status\`, \`native\`, \`overlay-readonly\`, \`clear\`, \`profile grouped|compact|clear\`, \`carry-forward\`, \`reattach\`, \`append-reviewed\`, \`capture-candidates\`, and \`schema plan|check|apply\`.`,
   };
 }
 
@@ -1553,6 +1615,10 @@ function buildHelpText(error?: string): string {
       buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory append-reviewed --entry <json> [--to-conversation <id>]`),
         "Dry-run or temp-DB execute one reviewed semantic entry append.",
+      ),
+      buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} session-memory capture-candidates [--conversation <id>] [--limit <n>]`),
+        "Read recent LCM messages and report review-only session-memory capture candidates.",
       ),
       buildStatLine(
         formatCommand(`${VISIBLE_COMMAND} session-memory schema plan|check|apply`),
@@ -2370,6 +2436,237 @@ async function buildSessionMemoryAppendReviewedText(params: {
       buildStatLine("updated at", result.updatedAt),
     ]),
   );
+  return lines.join("\n");
+}
+
+function includesAny(value: string, needles: string[]): boolean {
+  return needles.some((needle) => value.includes(needle));
+}
+
+function classifySessionMemoryCaptureCandidate(params: {
+  role: string;
+  content: string;
+  seq: number;
+  createdAt: string;
+}): SessionMemoryCaptureCandidate | null {
+  const content = params.content.trim();
+  if (!content || content.startsWith("You are a memory search agent.")) {
+    return null;
+  }
+  const normalized = content.toLowerCase();
+  const claim = truncateMiddle(content.replace(/\s+/g, " "), 220);
+
+  if (params.role === "user") {
+    const looksLikeWorklineShift =
+      includesAny(normalized, ["接下来", "之后", "继续", "切换", "转到", "开始", "新方向", "主线", "工作线", "研究"]) &&
+      includesAny(normalized, ["session memory", "session-memory", "独立游戏", "steam", "品类", "方向", "工作", "研究"]);
+    if (looksLikeWorklineShift) {
+      return {
+        kind: "workline_shift",
+        source: "user_decision",
+        seq: params.seq,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        why: "User appears to move or restate the current workline.",
+        confidence: "high",
+        riskIfWrong: "The active seed may stay on the previous workline and miss the new objective.",
+        suggestedDestination: "Friday session-memory candidate",
+      };
+    }
+
+    if (includesAny(normalized, ["不要", "不能", "别", "不需要", "不优先", "必须", "更重要", "优先", "未经", "批准", "明确"])) {
+      return {
+        kind: "constraint_boundary",
+        source: "user_decision",
+        seq: params.seq,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        why: "User states a boundary, priority, or exclusion that can affect future behavior.",
+        confidence: "high",
+        riskIfWrong: "A future answer may violate the user's stated boundary or over-prioritize the wrong axis.",
+        suggestedDestination: "Friday session-memory candidate or instruction review",
+      };
+    }
+
+    if (includesAny(normalized, ["决定", "确认", "同意", "批准", "可以", "修一下", "落盘", "记下"])) {
+      return {
+        kind: "decision",
+        source: "user_decision",
+        seq: params.seq,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        why: "User appears to make or approve a decision.",
+        confidence: "medium",
+        riskIfWrong: "A tentative or local choice may be treated as durable without review.",
+        suggestedDestination: "Friday review",
+      };
+    }
+
+    if (includesAny(normalized, ["下一步", "先做", "继续做", "开始做"])) {
+      return {
+        kind: "next_action",
+        source: "user_decision",
+        seq: params.seq,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        why: "User appears to set or refine the next action.",
+        confidence: "medium",
+        riskIfWrong: "The next handoff may point at stale work.",
+        suggestedDestination: "Friday session-memory candidate or CURRENT.md",
+      };
+    }
+  }
+
+  if (
+    params.role === "assistant" &&
+    includesAny(normalized, ["status: written", "integrity ok", "integrity_check=ok", "通过", "完成", "commit", "pushed", "已推送"])
+  ) {
+    return {
+      kind: "verified_result",
+      source: "friday_review",
+      seq: params.seq,
+      role: params.role,
+      createdAt: params.createdAt,
+      claim,
+      why: "Assistant reports a concrete verified result or commit that may need review.",
+      confidence: "medium",
+      riskIfWrong: "An unverified status claim may be preserved as fact.",
+      suggestedDestination: "Friday review",
+    };
+  }
+
+  return null;
+}
+
+async function buildSessionMemoryCaptureCandidatesText(params: {
+  ctx: PluginCommandContext;
+  db: DatabaseSync;
+  command: SessionMemoryCaptureCandidatesCommand;
+}): Promise<string> {
+  const current = await resolveCurrentConversation({
+    ctx: params.ctx,
+    db: params.db,
+  });
+  const lines = [
+    ...buildHeaderLines(),
+    "",
+    "🧠 Session Memory Candidate Capture",
+    "",
+  ];
+
+  if (current.kind === "unavailable" && params.command.conversationId === undefined) {
+    lines.push(
+      buildSection("📍 Target conversation", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("reason", current.reason),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const targetStats = params.command.conversationId === undefined
+    ? (current.kind === "resolved" ? current.stats : null)
+    : getConversationStatusStats(params.db, params.command.conversationId);
+  if (!targetStats) {
+    lines.push(
+      buildSection("📍 Target conversation", [
+        buildStatLine("status", "unavailable"),
+        buildStatLine("target mode", "explicit"),
+        buildStatLine("conversation id", formatNumber(params.command.conversationId ?? 0)),
+        buildStatLine("reason", "conversation not found in LCM"),
+      ]),
+    );
+    return lines.join("\n");
+  }
+
+  const rows = params.db
+    .prepare(
+      `SELECT seq, role, content, created_at
+       FROM messages
+       WHERE conversation_id = ?
+         AND role IN ('user', 'assistant')
+       ORDER BY seq DESC
+       LIMIT ?`,
+    )
+    .all(targetStats.conversationId, params.command.limit) as Array<{
+      seq: number;
+      role: string;
+      content: string;
+      created_at: string;
+    }>;
+
+  const candidates = rows
+    .slice()
+    .reverse()
+    .map((row) =>
+      classifySessionMemoryCaptureCandidate({
+        role: row.role,
+        content: row.content,
+        seq: row.seq,
+        createdAt: row.created_at,
+      }),
+    )
+    .filter((candidate): candidate is SessionMemoryCaptureCandidate => candidate !== null)
+    .slice(0, 8);
+
+  lines.push(
+    buildSection("📍 Target conversation", [
+      buildStatLine("target mode", params.command.conversationId === undefined ? "current" : "explicit"),
+      buildStatLine("conversation id", formatNumber(targetStats.conversationId)),
+      ...(params.command.conversationId === undefined || current.kind !== "resolved"
+        ? []
+        : [buildStatLine("current conversation id", formatNumber(current.stats.conversationId))]),
+      buildStatLine(
+        "session key",
+        targetStats.sessionKey ? formatCommand(truncateMiddle(targetStats.sessionKey, 44)) : "missing",
+      ),
+      buildStatLine("message scan limit", formatNumber(params.command.limit)),
+    ]),
+    "",
+    buildSection("🧪 Mode", [
+      buildStatLine("mode", "dry_run_report"),
+      buildStatLine("writes", "none"),
+      buildStatLine("accepted memory", "none"),
+      buildStatLine("review result", "candidate_only"),
+    ]),
+  );
+
+  if (candidates.length === 0) {
+    lines.push(
+      "",
+      buildSection("🛠️ Result", ["No candidate-worthy events detected in the scanned message window."]),
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(
+    "",
+    buildSection("🧩 Candidate Summary", [
+      buildStatLine("candidates", formatNumber(candidates.length)),
+      buildStatLine("max emitted", "8"),
+    ]),
+  );
+
+  for (const [index, candidate] of candidates.entries()) {
+    lines.push(
+      "",
+      buildSection(`Candidate ${index + 1} - ${candidate.kind}`, [
+        buildStatLine("source", candidate.source),
+        buildStatLine("message", `#${formatNumber(candidate.seq)} ${candidate.role} at ${candidate.createdAt}`),
+        buildStatLine("why candidate", candidate.why),
+        buildStatLine("claim", candidate.claim),
+        buildStatLine("confidence", candidate.confidence),
+        buildStatLine("risk if wrong", candidate.riskIfWrong),
+        buildStatLine("suggested destination", candidate.suggestedDestination),
+        buildStatLine("review result", "candidate_only"),
+      ]),
+    );
+  }
+
   return lines.join("\n");
 }
 
@@ -3959,6 +4256,14 @@ export function createLcmCommand(params: {
               ctx,
               db: await getDb(),
               config: params.config,
+              command: parsed.command,
+            }),
+          };
+        case "session_memory_capture_candidates":
+          return {
+            text: await buildSessionMemoryCaptureCandidatesText({
+              ctx,
+              db: await getDb(),
               command: parsed.command,
             }),
           };

@@ -3031,6 +3031,75 @@ describe("lcm command", () => {
     }
   });
 
+  it("reports session-memory capture candidates without writing session-memory DB", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates.db");
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates";
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "我们继续 session memory 的工作，先修没有自动化导致验证费劲的问题。",
+        tokenCount: 18,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 1,
+        role: "assistant",
+        content: "我会先做只读候选报告，不写真实 DB。",
+        tokenCount: 14,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 2,
+        role: "user",
+        content: "所以我们接下来就是要研究 Steam 上独立游戏的品类，但更重要的是玩法，不是美术。",
+        tokenCount: 24,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 3,
+        role: "user",
+        content: "不要优先恐怖 / 氛围探索，也不优先 Cozy / 收集养成。",
+        tokenCount: 18,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 10",
+      {
+        sessionId: "session-memory-capture-candidates",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Session Memory Candidate Capture");
+    expect(result.text).toContain("mode: dry_run_report");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(result.text).toContain("Candidate 1 - workline_shift");
+    expect(result.text).toContain("source: user_decision");
+    expect(result.text).toContain("constraint_boundary");
+    expect(result.text).toContain("review result: candidate_only");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
