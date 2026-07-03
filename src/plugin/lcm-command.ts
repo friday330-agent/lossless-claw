@@ -2444,6 +2444,15 @@ function includesAny(value: string, needles: string[]): boolean {
   return needles.some((needle) => value.includes(needle));
 }
 
+function looksLikeSessionMemoryCandidateReport(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["lossless claw", "session memory candidate capture"]) &&
+    includesAny(normalized, ["candidate summary", "candidate 1 -", "review result: candidate_only"]) &&
+    includesAny(normalized, ["writes: none", "accepted memory: none"])
+  );
+}
+
 function classifySessionMemoryCaptureCandidate(params: {
   sourceKind: "message" | "summary";
   sourceRef: string;
@@ -2452,7 +2461,7 @@ function classifySessionMemoryCaptureCandidate(params: {
   createdAt: string;
 }): SessionMemoryCaptureCandidate | null {
   const content = params.content.trim();
-  if (!content || content.startsWith("You are a memory search agent.")) {
+  if (!content || content.startsWith("You are a memory search agent.") || looksLikeSessionMemoryCandidateReport(content)) {
     return null;
   }
   const normalized = content.toLowerCase();

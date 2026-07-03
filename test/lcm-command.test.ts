@@ -3203,6 +3203,65 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("ignores pasted session-memory candidate reports", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-report-noise.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-report-noise";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-report-noise",
+      sessionKey,
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: [
+          "**🦀 Lossless Claw v0.11.3**",
+          "🧠 Session Memory Candidate Capture",
+          "**🧩 Candidate Summary**",
+          "candidates: 8",
+          "**Candidate 1 - workline_shift**",
+          "claim: 所以我们接下来是暂停session memory?还是继续讨论一会再转其他话题?",
+          "writes: none",
+          "accepted memory: none",
+          "review result: candidate_only",
+        ].join("\n"),
+        tokenCount: 80,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 1,
+        role: "user",
+        content: "ok 这两份规划都同意",
+        tokenCount: 8,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-report-noise",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Candidate 1 - decision");
+    expect(result.text).toContain("ok 这两份规划都同意");
+    expect(result.text).not.toContain("所以我们接下来是暂停session memory");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
