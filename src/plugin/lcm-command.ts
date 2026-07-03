@@ -2553,6 +2553,35 @@ function classifySessionMemoryCaptureCandidate(params: {
   return null;
 }
 
+function getSessionMemoryCaptureCandidateRank(candidate: SessionMemoryCaptureCandidate): number {
+  const kindRank: Record<SessionMemoryCaptureCandidate["kind"], number> = {
+    decision: 500,
+    constraint_boundary: 480,
+    workline_shift: 460,
+    next_action: 430,
+    verified_result: 120,
+  };
+  const sourceRank: Record<SessionMemoryCaptureCandidate["source"], number> = {
+    user_decision: 300,
+    lcm_summary: 220,
+    command_result: 120,
+    friday_review: 0,
+  };
+  const confidenceRank = candidate.confidence === "high" ? 50 : 0;
+  return kindRank[candidate.kind] + sourceRank[candidate.source] + confidenceRank;
+}
+
+function compareSessionMemoryCaptureCandidates(
+  left: SessionMemoryCaptureCandidate,
+  right: SessionMemoryCaptureCandidate,
+): number {
+  const rankDelta = getSessionMemoryCaptureCandidateRank(right) - getSessionMemoryCaptureCandidateRank(left);
+  if (rankDelta !== 0) {
+    return rankDelta;
+  }
+  return right.createdAt.localeCompare(left.createdAt);
+}
+
 async function buildSessionMemoryCaptureCandidatesText(params: {
   ctx: PluginCommandContext;
   db: DatabaseSync;
@@ -2652,7 +2681,7 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
     )
     .filter((candidate): candidate is SessionMemoryCaptureCandidate => candidate !== null);
   const candidates = [...messageCandidates, ...summaryCandidates]
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .sort(compareSessionMemoryCaptureCandidates)
     .slice(0, 8);
 
   lines.push(

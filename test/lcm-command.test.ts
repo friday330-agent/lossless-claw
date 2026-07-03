@@ -3093,7 +3093,8 @@ describe("lcm command", () => {
     expect(result.text).toContain("mode: dry_run_report");
     expect(result.text).toContain("writes: none");
     expect(result.text).toContain("accepted memory: none");
-    expect(result.text).toContain("Candidate 1 - workline_shift");
+    expect(result.text).toContain("Candidate 1 - constraint_boundary");
+    expect(result.text).toContain("workline_shift");
     expect(result.text).toContain("source: user_decision");
     expect(result.text).toContain("constraint_boundary");
     expect(result.text).toContain("review result: candidate_only");
@@ -3149,6 +3150,56 @@ describe("lcm command", () => {
     expect(result.text).toContain("source: lcm_summary");
     expect(result.text).toContain("source item: summary `sum_session_memory_candidate_workline`");
     expect(result.text).toContain("review result: candidate_only");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
+  it("prioritizes user-authored session-memory candidates over assistant status noise", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-priority.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-priority";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-priority",
+      sessionKey,
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      ...Array.from({ length: 10 }, (_, index) => ({
+        conversationId: conversation.conversationId,
+        seq: index,
+        role: "assistant",
+        content: `验证完成，commit pushed，build 通过。status item ${index}`,
+        tokenCount: 12,
+      })),
+      {
+        conversationId: conversation.conversationId,
+        seq: 10,
+        role: "user",
+        content: "这两份规划都同意，但今晚不直接接自动写入。",
+        tokenCount: 16,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-priority",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Candidate 1 - decision");
+    expect(result.text).toContain("source: user_decision");
+    expect(result.text).toContain("这两份规划都同意");
+    expect(result.text).toContain("max emitted: 8");
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
