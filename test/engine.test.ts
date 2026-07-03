@@ -1286,6 +1286,85 @@ describe("LcmContextEngine before_reset lifecycle", () => {
     expect(remainingItems[0]?.summaryId).toBe("sum_keep");
   });
 
+  it("creates a fresh active row and carries session-memory entries on /new when lifecycle carry-forward is enabled", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "lossless-claw-engine-"));
+    tempDirs.push(tempDir);
+    const config = createTestConfig(join(tempDir, "lcm.db"));
+    config.sessionMemoryOverlay = {
+      ...config.sessionMemoryOverlay,
+      lifecycleCarryForwardEnabled: true,
+    };
+    const db = createLcmDatabaseConnection(config.databasePath);
+    const engine = new LcmContextEngine(createTestDeps(config), db);
+    (engine as unknown as { ensureMigrated(): void }).ensureMigrated();
+    const store = engine.getConversationStore();
+
+    const original = await store.getOrCreateConversation("uuid-1", {
+      sessionKey: "agent:main:main",
+    });
+    await store.createMessage({
+      conversationId: original.conversationId,
+      seq: 1,
+      role: "user",
+      content: "seed",
+      tokenCount: 5,
+    });
+    createSessionMemoryOverlayFixture({
+      dbPath: config.sessionMemoryOverlay.dbPath,
+      conversationId: original.conversationId,
+      body: "Carry this reviewed seed across before_reset /new.",
+    });
+
+    await engine.handleBeforeReset({
+      reason: "new",
+      sessionId: "uuid-1",
+      sessionKey: "agent:main:main",
+    });
+
+    const active = await store.getConversationBySessionKey("agent:main:main");
+    const archived = await store.getConversation(original.conversationId);
+
+    expect(active).not.toBeNull();
+    expect(active?.conversationId).not.toBe(original.conversationId);
+    expect(active?.sessionId).toBe("uuid-1");
+    expect(active?.active).toBe(true);
+    expect(archived?.active).toBe(false);
+    expect(archived?.archivedAt).not.toBeNull();
+
+    const sessionMemoryDb = new DatabaseSync(config.sessionMemoryOverlay.dbPath, { readOnly: true });
+    try {
+      const carried = sessionMemoryDb
+        .prepare(
+          `SELECT
+             s.session_id AS session_id,
+             s.conversation_id AS conversation_id,
+             s.session_key AS session_key,
+             e.body AS body,
+             e.origin_entry_id AS origin_entry_id
+           FROM sessions s
+           JOIN entries e ON e.session_id = s.session_id
+           WHERE s.conversation_id = ?`,
+        )
+        .get(active?.conversationId) as {
+        session_id: string;
+        conversation_id: number;
+        session_key: string | null;
+        body: string;
+        origin_entry_id: string | null;
+      } | undefined;
+
+      expect(carried).toEqual({
+        session_id: "uuid-1",
+        conversation_id: active?.conversationId,
+        session_key: "agent:main:main",
+        body: "Carry this reviewed seed across before_reset /new.",
+        origin_entry_id: "entry-active",
+      });
+    } finally {
+      sessionMemoryDb.close();
+    }
+  });
+
   it("archives the prior active conversation and creates a fresh active row on /reset", async () => {
     const engine = createEngine();
     (engine as unknown as { ensureMigrated(): void }).ensureMigrated();

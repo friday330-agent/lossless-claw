@@ -7904,6 +7904,17 @@ export class LcmContextEngine implements ContextEngine {
       async () =>
         this.conversationStore.withTransaction(async () => {
           if (reason === "new") {
+            if (this.config.sessionMemoryOverlay.lifecycleCarryForwardEnabled) {
+              await this.applySessionReplacement({
+                reason: "/new",
+                sessionId: params.sessionId,
+                sessionKey: params.sessionKey,
+                createReplacement: true,
+                carryForwardSessionMemory: true,
+              });
+              return;
+            }
+
             const conversation = await this.conversationStore.getConversationForSession({
               sessionId: params.sessionId,
               sessionKey: params.sessionKey,
