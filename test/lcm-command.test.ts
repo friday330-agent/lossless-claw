@@ -3456,6 +3456,42 @@ describe("lcm command", () => {
       tokenCount: 24,
       latestAt: new Date("2026-07-04T14:55:59.000Z"),
     });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_card_sheet",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Completed 棋牌精选 sheet 的 30 个候选数据填充（从 Steam API 拉取评论数、好评率、标签并分类写入）。头部优先深拆杀戮尖塔、小丑牌、Cobalt Core。",
+      tokenCount: 42,
+      latestAt: new Date("2026-07-04T15:56:57.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_rpg_sheet",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Completed RPG build screening: 30 games written to new sheet \"RPG精选\" (Stoneshard, Darkest Dungeon I/II, Path of Achra).",
+      tokenCount: 36,
+      latestAt: new Date("2026-07-04T16:03:29.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_auto_battler_sheet",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Completed auto battler/inventory screening category: committed and pushed commit d3ee8af. Current next category is 刷宝 / Loot / ARPG / 装备驱动.",
+      tokenCount: 40,
+      latestAt: new Date("2026-07-04T16:36:36.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_field_suggestions",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Excel文件（first-batch-screening-2026-07-04.xlsx）已生成并提交推送（14a39a6）。用户要求在新版字段中额外添加“玩法结构”、“心理与情绪”、“游戏本体大小”。",
+      tokenCount: 44,
+      latestAt: new Date("2026-07-04T18:27:00.000Z"),
+    });
 
     const result = await command.handler!(createCommandContext(
       "session-memory capture-candidates --limit 80",
@@ -3473,6 +3509,11 @@ describe("lcm command", () => {
     expect(result.text).toContain("next_action:");
     expect(result.text).toContain("开始深拆");
     expect(result.text).toContain("newest_evidence: 4f03a90");
+    expect(result.text).not.toContain("latest_completed: Completed auto battler");
+    expect(result.text).not.toContain("latest_completed: Completed RPG build");
+    expect(result.text).not.toContain("latest_completed: Completed 棋牌精选");
+    expect(result.text).not.toContain("next_action: Excel文件");
+    expect(result.text).not.toContain("next_action: 用户要求在新版字段");
     expect(result.text).not.toContain("latest_completed: 有。方案别大改");
     expect(result.text).not.toContain("latest_completed: 改完了");
     expect(result.text).not.toContain("next_action: 改完了");

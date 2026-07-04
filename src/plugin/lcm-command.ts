@@ -2530,6 +2530,7 @@ function reviewSessionMemoryCaptureCandidates(
 ): ReviewedSessionMemoryCaptureCandidate[] {
   const strongestByClaim = new Map<string, SessionMemoryCaptureCandidate>();
   const maxGateOrdinalByGate = new Map<string, number>();
+  const latestSteamPhaseRank = Math.max(0, ...probe.latestCompleted.map((signal) => getSteamScreeningPhaseRank(signal)));
 
   for (const candidate of candidates) {
     const claimKey = normalizeSessionMemoryCandidateClaim(candidate.claim);
@@ -2576,6 +2577,15 @@ function reviewSessionMemoryCaptureCandidates(
         ...candidate,
         reviewBucket: "stale_superseded",
         reviewNote: "Older implementation phase is superseded by newer completed-state evidence in the scan window.",
+      };
+    }
+
+    const candidateSteamPhaseRank = getSteamScreeningPhaseRank(candidate.claim);
+    if (latestSteamPhaseRank > 0 && candidateSteamPhaseRank > 0 && candidateSteamPhaseRank < latestSteamPhaseRank) {
+      return {
+        ...candidate,
+        reviewBucket: "stale_superseded",
+        reviewNote: "Older Steam screening phase is superseded by a later completed category sheet.",
       };
     }
 
@@ -2707,7 +2717,12 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
 function selectCurrentStateProbeTexts(candidates: SessionMemoryCurrentStateProbeCandidate[]): string[] {
   const seen = new Set<string>();
   const selected: string[] = [];
+  const latestSteamPhaseRank = Math.max(0, ...candidates.map((candidate) => getSteamScreeningPhaseRank(candidate.text)));
   for (const candidate of candidates.slice().sort(compareCurrentStateProbeCandidates)) {
+    const steamPhaseRank = getSteamScreeningPhaseRank(candidate.text);
+    if (latestSteamPhaseRank > 0 && steamPhaseRank > 0 && steamPhaseRank < latestSteamPhaseRank) {
+      continue;
+    }
     const key = normalizeSessionMemoryCandidateClaim(candidate.text);
     if (seen.has(key)) {
       continue;
@@ -2738,6 +2753,7 @@ function scoreCurrentStateCompleted(value: string): number {
     return 0;
   }
   let score = 0;
+  score += scoreSteamScreeningPhase(value);
   if (includesAny(normalized, ["抓完", "已继续抓", "已完成", "completed"])) {
     score += 80;
   }
@@ -2762,7 +2778,9 @@ function scoreCurrentStateNextAction(value: string): number {
     return 0;
   }
   let score = 0;
-  if (includesAny(normalized, ["下一步", "next action", "转入", "开始深拆", "深拆"])) {
+  if (includesAny(normalized, ["下一步适合", "next action", "转入深拆", "开始深拆", "适合开始深拆"])) {
+    score += 180;
+  } else if (includesAny(normalized, ["下一步", "转入"])) {
     score += 100;
   }
   if (includesAny(normalized, ["游戏", "steam", "刷宝", "精选", "候选", "目录", "独游"])) {
@@ -2772,6 +2790,77 @@ function scoreCurrentStateNextAction(value: string): number {
     score += 30;
   }
   return score >= 100 ? score : 0;
+}
+
+function scoreSteamScreeningPhase(value: string): number {
+  const normalized = value.toLowerCase();
+  let score = 0;
+  if (
+    includesAny(normalized, ["刷宝装备精选", "add loot equipment screening sheet"]) ||
+    (includesAny(normalized, ["刷宝 / loot", "loot / arpg"]) &&
+      includesAny(normalized, ["抓完", "新增", "完成", "completed"]) &&
+      !looksLikeFutureSteamCategoryReference(normalized))
+  ) {
+    score += 500;
+  }
+  if (includesAny(normalized, ["自走棋库存精选", "auto battler/inventory", "add auto battler inventory screening sheet"])) {
+    score += 300;
+  }
+  if (includesAny(normalized, ["rpg精选", "rpg build screening"])) {
+    score += 220;
+  }
+  if (includesAny(normalized, ["棋牌精选", "card deckbuilding"])) {
+    score += 180;
+  }
+  if (includesAny(normalized, ["战棋精选", "tactics screening"])) {
+    score += 160;
+  }
+  if (includesAny(normalized, ["五条精选", "刷宝装备精选"]) && includesAny(normalized, ["战棋精选", "棋牌精选", "rpg精选", "自走棋库存精选"])) {
+    score += 260;
+  }
+  if (includesAny(normalized, ["字段调整建议", "用户要求在新版字段", "玩法结构", "心理与情绪", "游戏本体大小"])) {
+    score -= 180;
+  }
+  return score;
+}
+
+function getSteamScreeningPhaseRank(value: string): number {
+  const normalized = value.toLowerCase();
+  if (
+    includesAny(normalized, ["刷宝装备精选", "add loot equipment screening sheet"]) ||
+    (includesAny(normalized, ["刷宝 / loot", "loot / arpg"]) &&
+      includesAny(normalized, ["抓完", "新增", "完成", "completed"]) &&
+      !looksLikeFutureSteamCategoryReference(normalized))
+  ) {
+    return 5;
+  }
+  if (includesAny(normalized, ["自走棋库存精选", "auto battler/inventory", "add auto battler inventory screening sheet"])) {
+    return 4;
+  }
+  if (includesAny(normalized, ["rpg精选", "rpg build screening"])) {
+    return 3;
+  }
+  if (includesAny(normalized, ["棋牌精选", "card deckbuilding"])) {
+    return 2;
+  }
+  if (includesAny(normalized, ["战棋精选", "tactics screening"])) {
+    return 1;
+  }
+  return 0;
+}
+
+function looksLikeFutureSteamCategoryReference(normalizedValue: string): boolean {
+  return includesAny(normalizedValue, [
+    "next category",
+    "current next category",
+    "remaining category",
+    "next directory",
+    "下一类",
+    "下一条",
+    "下一路线",
+    "剩余类别",
+    "剩余目录",
+  ]);
 }
 
 function looksLikeCurrentStateMetaDiscussion(value: string): boolean {
