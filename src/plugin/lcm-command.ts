@@ -2654,7 +2654,7 @@ function collectCurrentStateSignals(values: string[]): string[] {
 function collectCurrentStateProbe(items: Array<{ content: string; createdAt: string }>): SessionMemoryCurrentStateProbe {
   const latestCompleted: string[] = [];
   const nextAction: string[] = [];
-  const newestEvidence = collectCurrentStateSignals(items.map((item) => item.content));
+  const currentStateEvidenceTexts: string[] = [];
   const sortedItems = items
     .filter((item) => !looksLikeSessionMemoryCandidateReport(item.content))
     .slice()
@@ -2666,12 +2666,16 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
       continue;
     }
     const normalized = compactContent.toLowerCase();
+    if (looksLikeCurrentStateMetaDiscussion(compactContent)) {
+      continue;
+    }
     if (
       latestCompleted.length < 3 &&
       includesAny(normalized, ["完成", "抓完", "已继续抓", "新增", "写入", "提交", "推送", "completed", "wrote", "generated", "created", "pushed"]) &&
       includesAny(normalized, ["sheet", "精选", "commit", "提交", "推送", "xlsx", "excel", "文件", "已完成", "completed"])
     ) {
       latestCompleted.push(truncateMiddle(compactContent, 180));
+      currentStateEvidenceTexts.push(compactContent);
     }
     if (
       nextAction.length < 3 &&
@@ -2679,6 +2683,7 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
         (includesAny(normalized, ["继续"]) && includesAny(normalized, ["工作", "研究", "目录", "深拆", "抓"])))
     ) {
       nextAction.push(truncateMiddle(compactContent, 180));
+      currentStateEvidenceTexts.push(compactContent);
     }
     if (latestCompleted.length >= 3 && nextAction.length >= 3) {
       break;
@@ -2688,8 +2693,23 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
   return {
     latestCompleted,
     nextAction,
-    newestEvidence,
+    newestEvidence: collectCurrentStateSignals(currentStateEvidenceTexts).slice(0, 12),
   };
+}
+
+function looksLikeCurrentStateMetaDiscussion(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return includesAny(normalized, [
+    "superpower start",
+    "我的想法",
+    "有。方案",
+    "方案别大改",
+    "成功标准",
+    "这刀如果过了",
+    "candidate-only 现在证明",
+    "不是“从摘要里捞候选”",
+    "让 `capture-candidates`",
+  ]);
 }
 
 function compareTimestampDesc(left: string, right: string): number {
@@ -2705,9 +2725,17 @@ function findMissedCurrentStateSignals(params: {
   signals: string[];
   emittedCandidates: SessionMemoryCaptureCandidate[];
 }): string[] {
-  return params.signals.filter((signal) =>
-    !params.emittedCandidates.some((candidate) => candidate.claim.includes(signal)),
-  );
+  return params.signals
+    .filter((signal) => isUsefulCurrentStateSignal(signal))
+    .filter((signal) => !params.emittedCandidates.some((candidate) => candidate.claim.includes(signal)))
+    .slice(0, 12);
+}
+
+function isUsefulCurrentStateSignal(signal: string): boolean {
+  if (/^\d{6,}$/.test(signal) && !/^[0-9a-f]{7,40}$/i.test(signal)) {
+    return false;
+  }
+  return !/[,.，。;；:"”)]$/.test(signal);
 }
 
 function classifySessionMemoryCaptureCandidate(params: {

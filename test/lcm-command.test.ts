@@ -3406,6 +3406,14 @@ describe("lcm command", () => {
           "抓完了 `刷宝 / Loot / ARPG / 装备驱动`。Excel 新增 `刷宝装备精选` sheet，五条精选目录都齐了：`战棋精选`、`棋牌精选`、`RPG精选`、`自走棋库存精选`、`刷宝装备精选`。提交并推送：`4f03a90 Add loot equipment screening sheet`。下一步适合开始深拆。",
         tokenCount: 64,
       },
+      {
+        conversationId: conversation.conversationId,
+        seq: 2,
+        role: "assistant",
+        content:
+          "有。方案别大改，先做一刀“当前态优先裁决层”。目标是让 `capture-candidates` 不再只是从摘要里捞候选。如果这刀过了，再考虑第二步。",
+        tokenCount: 38,
+      },
     ]);
 
     await fixture.summaryStore.insertSummary({
@@ -3449,6 +3457,8 @@ describe("lcm command", () => {
     expect(result.text).toContain("next_action:");
     expect(result.text).toContain("开始深拆");
     expect(result.text).toContain("newest_evidence: 4f03a90");
+    expect(result.text).not.toContain("latest_completed: 有。方案别大改");
+    expect(result.text).not.toContain("newest_evidence: 14a39a6");
     expect(result.text).toContain("local_flow: message `#0`");
     expect(result.text).toContain("review bucket: local_flow");
     expect(result.text).toContain("stale/superseded: summary `sum_old_first_batch`");
