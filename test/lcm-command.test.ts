@@ -3262,6 +3262,115 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("buckets duplicate stale and missed-current-state session-memory capture candidates", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-buckets.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-buckets";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-buckets",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "批准只读 Chrome bilibili.com cookie 只用于抓这三条圣兽之王字幕，cookie 值不能打印或保存。",
+        tokenCount: 24,
+      },
+      ...Array.from({ length: 9 }, (_, index) => ({
+        conversationId: conversation.conversationId,
+        seq: index + 1,
+        role: "user",
+        content: `不要把自动写入当默认路径，边界规则 ${index} 必须保留。`,
+        tokenCount: 14,
+      })),
+      {
+        conversationId: conversation.conversationId,
+        seq: 10,
+        role: "assistant",
+        content: "字幕已抓取并提交 497240e Add Unicorn Overlord subtitles，随后写入 Friday-memory/work/unicorn-overlord/combat-mechanics-summary-2026-07-04.md。",
+        tokenCount: 32,
+      },
+    ]);
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_duplicate_cookie_boundary",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "用户批准只读 Chrome bilibili.com cookie 只用于抓这三条圣兽之王字幕，cookie 值不能打印或保存。",
+      tokenCount: 24,
+      latestAt: new Date("2026-07-04T00:01:00.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_gate50f_old_dry_run",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "Gate50F dry-run completed and committed; reviewed packets are still only staged dry-run.",
+      tokenCount: 20,
+      latestAt: new Date("2026-07-04T00:02:00.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_gate50g_old_preflight",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "Gate50G preflight completed with byte-exact backup before the reviewed append.",
+      tokenCount: 18,
+      latestAt: new Date("2026-07-04T00:03:00.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_gate50h_real_append",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "Gate50H executed the real reviewed append; entries=75, 2997=>6 active, integrity_check=ok.",
+      tokenCount: 22,
+      latestAt: new Date("2026-07-04T00:04:00.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_process_startup_ok",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "User said OK 继续, assistant re-read STARTUP.md and CURRENT.md to rebuild context before continuing work.",
+      tokenCount: 18,
+      latestAt: new Date("2026-07-04T00:05:00.000Z"),
+    });
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 100",
+      {
+        sessionId: "session-memory-capture-candidates-buckets",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Review Buckets");
+    expect(result.text).toContain("promotable:");
+    expect(result.text).toContain("evidence_only:");
+    expect(result.text).toContain("duplicate:");
+    expect(result.text).toContain("stale/superseded:");
+    expect(result.text).toContain("missed_current_state:");
+    expect(result.text).toContain("duplicate: summary `sum_duplicate_cookie_boundary`");
+    expect(result.text).toContain("stale/superseded: summary `sum_gate50f_old_dry_run`");
+    expect(result.text).toContain("stale/superseded: summary `sum_gate50g_old_preflight`");
+    expect(result.text).toContain("evidence_only: summary `sum_process_startup_ok`");
+    expect(result.text).toContain("missed_current_state: 497240e");
+    expect(result.text).toContain("missed_current_state: Friday-memory/work/unicorn-overlord/combat-mechanics-summary-2026-07-04.md");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");

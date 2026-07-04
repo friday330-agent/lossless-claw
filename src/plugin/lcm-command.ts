@@ -150,6 +150,13 @@ type SessionMemoryCaptureCandidate = {
   suggestedDestination: string;
 };
 
+type SessionMemoryCaptureReviewBucket = "promotable" | "evidence_only" | "duplicate" | "stale_superseded";
+
+type ReviewedSessionMemoryCaptureCandidate = SessionMemoryCaptureCandidate & {
+  reviewBucket: SessionMemoryCaptureReviewBucket;
+  reviewNote: string;
+};
+
 type SessionMemoryReplacementPacketLoadResult =
   | {
       ok: true;
@@ -2453,6 +2460,150 @@ function looksLikeSessionMemoryCandidateReport(value: string): boolean {
   );
 }
 
+function normalizeSessionMemoryCandidateClaim(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\b(user|assistant|confirmed|directed|requested)\b/g, "")
+    .replace(/用户|助手/g, "")
+    .replace(/[`*_~()[\]{}"'“”‘’]/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+function extractGateRefs(value: string): Array<{ gate: string; ordinal: number }> {
+  const refs: Array<{ gate: string; ordinal: number }> = [];
+  const pattern = /\bgate\s*(\d+)([a-z])\b/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(value)) !== null) {
+    const number = Number.parseInt(match[1] ?? "", 10);
+    const letter = (match[2] ?? "").toLowerCase();
+    if (!Number.isFinite(number) || letter.length !== 1) {
+      continue;
+    }
+    refs.push({
+      gate: `gate${number}`,
+      ordinal: number * 100 + letter.charCodeAt(0) - 96,
+    });
+  }
+  return refs;
+}
+
+function looksLikeProcessContext(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["startup.md", "current.md", "read startup", "re-read startup", "重读", "回读", "读 startup"]) ||
+    (includesAny(normalized, ["ok 继续", "继续"]) && includesAny(normalized, ["startup", "current", "context", "上下文"]))
+  );
+}
+
+function formatSessionMemoryCaptureSource(candidate: SessionMemoryCaptureCandidate): string {
+  return `${candidate.sourceKind} ${formatCommand(candidate.sourceRef)}`;
+}
+
+function reviewSessionMemoryCaptureCandidates(
+  candidates: SessionMemoryCaptureCandidate[],
+): ReviewedSessionMemoryCaptureCandidate[] {
+  const strongestByClaim = new Map<string, SessionMemoryCaptureCandidate>();
+  const maxGateOrdinalByGate = new Map<string, number>();
+
+  for (const candidate of candidates) {
+    const claimKey = normalizeSessionMemoryCandidateClaim(candidate.claim);
+    const current = strongestByClaim.get(claimKey);
+    if (!current || getSessionMemoryCaptureCandidateRank(candidate) > getSessionMemoryCaptureCandidateRank(current)) {
+      strongestByClaim.set(claimKey, candidate);
+    }
+    for (const ref of extractGateRefs(candidate.claim)) {
+      maxGateOrdinalByGate.set(ref.gate, Math.max(maxGateOrdinalByGate.get(ref.gate) ?? 0, ref.ordinal));
+    }
+  }
+
+  return candidates.map((candidate) => {
+    const claimKey = normalizeSessionMemoryCandidateClaim(candidate.claim);
+    const strongest = strongestByClaim.get(claimKey);
+    if (strongest && strongest !== candidate) {
+      return {
+        ...candidate,
+        reviewBucket: "duplicate",
+        reviewNote: `Duplicate of stronger ${formatSessionMemoryCaptureSource(strongest)}.`,
+      };
+    }
+
+    const staleGate = extractGateRefs(candidate.claim).find((ref) => ref.ordinal < (maxGateOrdinalByGate.get(ref.gate) ?? ref.ordinal));
+    if (staleGate) {
+      return {
+        ...candidate,
+        reviewBucket: "stale_superseded",
+        reviewNote: `${staleGate.gate.toUpperCase()} has a newer gate state in the scan window.`,
+      };
+    }
+
+    if (looksLikeProcessContext(candidate.claim)) {
+      return {
+        ...candidate,
+        reviewBucket: "evidence_only",
+        reviewNote: "Process context is evidence, not a durable session-memory candidate.",
+      };
+    }
+
+    if (candidate.sourceKind === "summary" && candidate.claim.length > 160) {
+      return {
+        ...candidate,
+        reviewBucket: "evidence_only",
+        reviewNote: "LCM summary claim should be compressed before review.",
+      };
+    }
+
+    return {
+      ...candidate,
+      reviewBucket: "promotable",
+      reviewNote: "Concise enough for human review; still candidate-only.",
+    };
+  });
+}
+
+function compareReviewedSessionMemoryCaptureCandidates(
+  left: ReviewedSessionMemoryCaptureCandidate,
+  right: ReviewedSessionMemoryCaptureCandidate,
+): number {
+  const bucketRank: Record<SessionMemoryCaptureReviewBucket, number> = {
+    promotable: 400,
+    evidence_only: 300,
+    duplicate: 200,
+    stale_superseded: 100,
+  };
+  const bucketDelta = bucketRank[right.reviewBucket] - bucketRank[left.reviewBucket];
+  if (bucketDelta !== 0) {
+    return bucketDelta;
+  }
+  return compareSessionMemoryCaptureCandidates(left, right);
+}
+
+function collectCurrentStateSignals(values: string[]): string[] {
+  const signals = new Set<string>();
+  for (const value of values) {
+    const normalized = value.replace(/\s+/g, " ");
+    if (!includesAny(normalized.toLowerCase(), ["commit", "提交", "写入", "落盘", "已抓取", "summary", "transcript"])) {
+      continue;
+    }
+    for (const match of normalized.matchAll(/\b[0-9a-f]{7,40}\b/g)) {
+      signals.add(match[0]!);
+    }
+    for (const match of normalized.matchAll(/\b(?:Friday-memory|memory|self-improving)\/[^\s`，。)）]+/g)) {
+      signals.add(match[0]!);
+    }
+  }
+  return [...signals].sort();
+}
+
+function findMissedCurrentStateSignals(params: {
+  signals: string[];
+  emittedCandidates: SessionMemoryCaptureCandidate[];
+}): string[] {
+  return params.signals.filter((signal) =>
+    !params.emittedCandidates.some((candidate) => candidate.claim.includes(signal)),
+  );
+}
+
 function classifySessionMemoryCaptureCandidate(params: {
   sourceKind: "message" | "summary";
   sourceRef: string;
@@ -2470,6 +2621,22 @@ function classifySessionMemoryCaptureCandidate(params: {
     params.role === "user" ||
     (params.sourceKind === "summary" &&
       includesAny(normalized, ["user ", "user confirmed", "user directed", "user requested", "用户", "头儿"]));
+
+  if (looksLikeProcessContext(content)) {
+    return {
+      kind: "workline_shift",
+      source: params.sourceKind === "summary" ? "lcm_summary" : "friday_review",
+      sourceKind: params.sourceKind,
+      sourceRef: params.sourceRef,
+      role: params.role,
+      createdAt: params.createdAt,
+      claim,
+      why: "Content records orientation or startup-reading context.",
+      confidence: "medium",
+      riskIfWrong: "A process step may be mistaken for the active workline.",
+      suggestedDestination: "Evidence only; do not promote without a concrete current-state claim.",
+    };
+  }
 
   if (userAuthoredSignal) {
     const looksLikeWorklineShift =
@@ -2541,8 +2708,21 @@ function classifySessionMemoryCaptureCandidate(params: {
   }
 
   if (
-    params.role === "assistant" &&
-    includesAny(normalized, ["status: written", "integrity ok", "integrity_check=ok", "通过", "完成", "commit", "pushed", "已推送"])
+    (params.role === "assistant" || params.sourceKind === "summary") &&
+    includesAny(normalized, [
+      "status: written",
+      "integrity ok",
+      "integrity_check=ok",
+      "通过",
+      "完成",
+      "completed",
+      "executed",
+      "commit",
+      "pushed",
+      "已推送",
+      "提交",
+      "已抓取",
+    ])
   ) {
     return {
       kind: "verified_result",
@@ -2663,6 +2843,10 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
       created_at: string;
     }>;
 
+  const scannedContents = [
+    ...rows.map((row) => row.content),
+    ...summaryRows.map((row) => row.content),
+  ];
   const messageCandidates = rows
     .slice()
     .reverse()
@@ -2689,9 +2873,16 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
       }),
     )
     .filter((candidate): candidate is SessionMemoryCaptureCandidate => candidate !== null);
-  const candidates = [...messageCandidates, ...summaryCandidates]
-    .sort(compareSessionMemoryCaptureCandidates)
+  const candidates = [...messageCandidates, ...summaryCandidates].sort(compareSessionMemoryCaptureCandidates);
+  const reviewedCandidates = reviewSessionMemoryCaptureCandidates(candidates);
+  const emittedCandidates = reviewedCandidates
+    .slice()
+    .sort(compareReviewedSessionMemoryCaptureCandidates)
     .slice(0, 8);
+  const missedCurrentStateSignals = findMissedCurrentStateSignals({
+    signals: collectCurrentStateSignals(scannedContents),
+    emittedCandidates,
+  });
 
   lines.push(
     buildSection("📍 Target conversation", [
@@ -2730,9 +2921,28 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
       buildStatLine("candidates", formatNumber(candidates.length)),
       buildStatLine("max emitted", "8"),
     ]),
+    "",
+    buildSection("🪣 Review Buckets", [
+      ...reviewedCandidates
+        .filter((candidate) => candidate.reviewBucket === "promotable")
+        .map((candidate) => buildStatLine("promotable", formatSessionMemoryCaptureSource(candidate))),
+      ...reviewedCandidates
+        .filter((candidate) => candidate.reviewBucket === "evidence_only")
+        .map((candidate) => buildStatLine("evidence_only", formatSessionMemoryCaptureSource(candidate))),
+      ...reviewedCandidates
+        .filter((candidate) => candidate.reviewBucket === "duplicate")
+        .map((candidate) => buildStatLine("duplicate", formatSessionMemoryCaptureSource(candidate))),
+      ...reviewedCandidates
+        .filter((candidate) => candidate.reviewBucket === "stale_superseded")
+        .map((candidate) => buildStatLine("stale/superseded", formatSessionMemoryCaptureSource(candidate))),
+      ...missedCurrentStateSignals.map((signal) => buildStatLine("missed_current_state", signal)),
+      ...(reviewedCandidates.length === 0 && missedCurrentStateSignals.length === 0
+        ? ["No review buckets detected."]
+        : []),
+    ]),
   );
 
-  for (const [index, candidate] of candidates.entries()) {
+  for (const [index, candidate] of emittedCandidates.entries()) {
     lines.push(
       "",
       buildSection(`Candidate ${index + 1} - ${candidate.kind}`, [
@@ -2743,6 +2953,8 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
         buildStatLine("confidence", candidate.confidence),
         buildStatLine("risk if wrong", candidate.riskIfWrong),
         buildStatLine("suggested destination", candidate.suggestedDestination),
+        buildStatLine("review bucket", candidate.reviewBucket === "stale_superseded" ? "stale/superseded" : candidate.reviewBucket),
+        buildStatLine("review note", candidate.reviewNote),
         buildStatLine("review result", "candidate_only"),
       ]),
     );
