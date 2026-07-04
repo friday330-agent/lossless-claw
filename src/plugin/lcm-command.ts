@@ -150,11 +150,17 @@ type SessionMemoryCaptureCandidate = {
   suggestedDestination: string;
 };
 
-type SessionMemoryCaptureReviewBucket = "promotable" | "evidence_only" | "duplicate" | "stale_superseded";
+type SessionMemoryCaptureReviewBucket = "promotable" | "evidence_only" | "duplicate" | "local_flow" | "stale_superseded";
 
 type ReviewedSessionMemoryCaptureCandidate = SessionMemoryCaptureCandidate & {
   reviewBucket: SessionMemoryCaptureReviewBucket;
   reviewNote: string;
+};
+
+type SessionMemoryCurrentStateProbe = {
+  latestCompleted: string[];
+  nextAction: string[];
+  newestEvidence: string[];
 };
 
 type SessionMemoryReplacementPacketLoadResult =
@@ -2496,12 +2502,25 @@ function looksLikeProcessContext(value: string): boolean {
   );
 }
 
+function looksLikeLocalFlowApproval(value: string): boolean {
+  const compact = value
+    .toLowerCase()
+    .replace(/[`*_~()[\]{}"'“”‘’。，、！？!?:：；;,.]/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+  if (!compact || compact.length > 12) {
+    return false;
+  }
+  return /^(ok|okay|好|好的|可以|可以吧|继续|继续吧|可以继续|可以继续吧|行|行吧|嗯|收到|go)$/.test(compact);
+}
+
 function formatSessionMemoryCaptureSource(candidate: SessionMemoryCaptureCandidate): string {
   return `${candidate.sourceKind} ${formatCommand(candidate.sourceRef)}`;
 }
 
 function reviewSessionMemoryCaptureCandidates(
   candidates: SessionMemoryCaptureCandidate[],
+  probe: SessionMemoryCurrentStateProbe = { latestCompleted: [], nextAction: [], newestEvidence: [] },
 ): ReviewedSessionMemoryCaptureCandidate[] {
   const strongestByClaim = new Map<string, SessionMemoryCaptureCandidate>();
   const maxGateOrdinalByGate = new Map<string, number>();
@@ -2520,6 +2539,15 @@ function reviewSessionMemoryCaptureCandidates(
   return candidates.map((candidate) => {
     const claimKey = normalizeSessionMemoryCandidateClaim(candidate.claim);
     const strongest = strongestByClaim.get(claimKey);
+
+    if (looksLikeLocalFlowApproval(candidate.claim)) {
+      return {
+        ...candidate,
+        reviewBucket: "local_flow",
+        reviewNote: "Short local approval/continuation signal; not durable memory.",
+      };
+    }
+
     if (strongest && strongest !== candidate) {
       return {
         ...candidate,
@@ -2534,6 +2562,14 @@ function reviewSessionMemoryCaptureCandidates(
         ...candidate,
         reviewBucket: "stale_superseded",
         reviewNote: `${staleGate.gate.toUpperCase()} has a newer gate state in the scan window.`,
+      };
+    }
+
+    if (probe.latestCompleted.length > 0 && candidate.sourceKind === "summary" && looksLikeSupersededHistoricalPhase(candidate.claim)) {
+      return {
+        ...candidate,
+        reviewBucket: "stale_superseded",
+        reviewNote: "Older implementation phase is superseded by newer completed-state evidence in the scan window.",
       };
     }
 
@@ -2561,6 +2597,25 @@ function reviewSessionMemoryCaptureCandidates(
   });
 }
 
+function looksLikeSupersededHistoricalPhase(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return includesAny(normalized, [
+    "first batch",
+    "first-batch",
+    "第一批",
+    "10 samples",
+    "10个样本",
+    "v2 field",
+    "v2字段",
+    "storage",
+    "安装包容量",
+    "tag map",
+    "标签地图",
+    "template",
+    "模板",
+  ]);
+}
+
 function compareReviewedSessionMemoryCaptureCandidates(
   left: ReviewedSessionMemoryCaptureCandidate,
   right: ReviewedSessionMemoryCaptureCandidate,
@@ -2569,6 +2624,7 @@ function compareReviewedSessionMemoryCaptureCandidates(
     promotable: 400,
     evidence_only: 300,
     duplicate: 200,
+    local_flow: 150,
     stale_superseded: 100,
   };
   const bucketDelta = bucketRank[right.reviewBucket] - bucketRank[left.reviewBucket];
@@ -2593,6 +2649,56 @@ function collectCurrentStateSignals(values: string[]): string[] {
     }
   }
   return [...signals].sort();
+}
+
+function collectCurrentStateProbe(items: Array<{ content: string; createdAt: string }>): SessionMemoryCurrentStateProbe {
+  const latestCompleted: string[] = [];
+  const nextAction: string[] = [];
+  const newestEvidence = collectCurrentStateSignals(items.map((item) => item.content));
+  const sortedItems = items
+    .filter((item) => !looksLikeSessionMemoryCandidateReport(item.content))
+    .slice()
+    .sort((left, right) => compareTimestampDesc(left.createdAt, right.createdAt));
+
+  for (const item of sortedItems) {
+    const compactContent = item.content.replace(/\s+/g, " ").trim();
+    if (!compactContent) {
+      continue;
+    }
+    const normalized = compactContent.toLowerCase();
+    if (
+      latestCompleted.length < 3 &&
+      includesAny(normalized, ["完成", "抓完", "已继续抓", "新增", "写入", "提交", "推送", "completed", "wrote", "generated", "created", "pushed"]) &&
+      includesAny(normalized, ["sheet", "精选", "commit", "提交", "推送", "xlsx", "excel", "文件", "已完成", "completed"])
+    ) {
+      latestCompleted.push(truncateMiddle(compactContent, 180));
+    }
+    if (
+      nextAction.length < 3 &&
+      (includesAny(normalized, ["下一步", "next action", "转入", "开始深拆", "深拆"]) ||
+        (includesAny(normalized, ["继续"]) && includesAny(normalized, ["工作", "研究", "目录", "深拆", "抓"])))
+    ) {
+      nextAction.push(truncateMiddle(compactContent, 180));
+    }
+    if (latestCompleted.length >= 3 && nextAction.length >= 3) {
+      break;
+    }
+  }
+
+  return {
+    latestCompleted,
+    nextAction,
+    newestEvidence,
+  };
+}
+
+function compareTimestampDesc(left: string, right: string): number {
+  const leftMs = Date.parse(left.includes("T") ? left : `${left.replace(" ", "T")}Z`);
+  const rightMs = Date.parse(right.includes("T") ? right : `${right.replace(" ", "T")}Z`);
+  if (Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs !== rightMs) {
+    return rightMs - leftMs;
+  }
+  return right.localeCompare(left);
 }
 
 function findMissedCurrentStateSignals(params: {
@@ -2847,6 +2953,10 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
     ...rows.map((row) => row.content),
     ...summaryRows.map((row) => row.content),
   ];
+  const currentStateProbe = collectCurrentStateProbe([
+    ...rows.map((row) => ({ content: row.content, createdAt: row.created_at })),
+    ...summaryRows.map((row) => ({ content: row.content, createdAt: row.created_at })),
+  ]);
   const messageCandidates = rows
     .slice()
     .reverse()
@@ -2874,13 +2984,13 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
     )
     .filter((candidate): candidate is SessionMemoryCaptureCandidate => candidate !== null);
   const candidates = [...messageCandidates, ...summaryCandidates].sort(compareSessionMemoryCaptureCandidates);
-  const reviewedCandidates = reviewSessionMemoryCaptureCandidates(candidates);
+  const reviewedCandidates = reviewSessionMemoryCaptureCandidates(candidates, currentStateProbe);
   const emittedCandidates = reviewedCandidates
     .slice()
     .sort(compareReviewedSessionMemoryCaptureCandidates)
     .slice(0, 8);
   const missedCurrentStateSignals = findMissedCurrentStateSignals({
-    signals: collectCurrentStateSignals(scannedContents),
+    signals: currentStateProbe.newestEvidence.length > 0 ? currentStateProbe.newestEvidence : collectCurrentStateSignals(scannedContents),
     emittedCandidates,
   });
 
@@ -2922,6 +3032,22 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
       buildStatLine("max emitted", "8"),
     ]),
     "",
+    buildSection("🔎 Current State Probe", [
+      buildStatLine(
+        "status",
+        currentStateProbe.latestCompleted.length > 0 || currentStateProbe.nextAction.length > 0 ? "detected" : "weak",
+      ),
+      ...(currentStateProbe.latestCompleted.length > 0
+        ? currentStateProbe.latestCompleted.map((signal) => buildStatLine("latest_completed", signal))
+        : [buildStatLine("latest_completed", "missing")]),
+      ...(currentStateProbe.nextAction.length > 0
+        ? currentStateProbe.nextAction.map((signal) => buildStatLine("next_action", signal))
+        : [buildStatLine("next_action", "missing")]),
+      ...(currentStateProbe.newestEvidence.length > 0
+        ? currentStateProbe.newestEvidence.slice(0, 8).map((signal) => buildStatLine("newest_evidence", signal))
+        : [buildStatLine("newest_evidence", "missing")]),
+    ]),
+    "",
     buildSection("🪣 Review Buckets", [
       ...reviewedCandidates
         .filter((candidate) => candidate.reviewBucket === "promotable")
@@ -2932,6 +3058,9 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
       ...reviewedCandidates
         .filter((candidate) => candidate.reviewBucket === "duplicate")
         .map((candidate) => buildStatLine("duplicate", formatSessionMemoryCaptureSource(candidate))),
+      ...reviewedCandidates
+        .filter((candidate) => candidate.reviewBucket === "local_flow")
+        .map((candidate) => buildStatLine("local_flow", formatSessionMemoryCaptureSource(candidate))),
       ...reviewedCandidates
         .filter((candidate) => candidate.reviewBucket === "stale_superseded")
         .map((candidate) => buildStatLine("stale/superseded", formatSessionMemoryCaptureSource(candidate))),

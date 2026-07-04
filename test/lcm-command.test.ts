@@ -3371,6 +3371,93 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("reports current-state probe and local-flow approvals for post-category completion turns", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-current-probe.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-current-probe";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-current-probe",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "可以 继续吧",
+        tokenCount: 4,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 1,
+        role: "assistant",
+        content:
+          "抓完了 `刷宝 / Loot / ARPG / 装备驱动`。Excel 新增 `刷宝装备精选` sheet，五条精选目录都齐了：`战棋精选`、`棋牌精选`、`RPG精选`、`自走棋库存精选`、`刷宝装备精选`。提交并推送：`4f03a90 Add loot equipment screening sheet`。下一步适合开始深拆。",
+        tokenCount: 64,
+      },
+    ]);
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_first_batch",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "第一批10个样本数据已填充并提交。使用Steam API抓取Balatro等10个A类游戏。",
+      tokenCount: 24,
+      latestAt: new Date("2026-07-04T10:27:53.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_tag_map",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "肉鸽/构筑标签地图已生成：完成8个样本和标签地图模板。",
+      tokenCount: 20,
+      latestAt: new Date("2026-07-04T14:07:49.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_workbook_base",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content: "Steam独立游戏分类工作簿已升级为多sheet主表，包含6条类型线和145唯一appid。",
+      tokenCount: 24,
+      latestAt: new Date("2026-07-04T14:55:59.000Z"),
+    });
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-current-probe",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Current State Probe");
+    expect(result.text).toContain("status: detected");
+    expect(result.text).toContain("latest_completed:");
+    expect(result.text).toContain("刷宝装备精选");
+    expect(result.text).toContain("战棋精选");
+    expect(result.text).toContain("next_action:");
+    expect(result.text).toContain("开始深拆");
+    expect(result.text).toContain("newest_evidence: 4f03a90");
+    expect(result.text).toContain("local_flow: message `#0`");
+    expect(result.text).toContain("review bucket: local_flow");
+    expect(result.text).toContain("stale/superseded: summary `sum_old_first_batch`");
+    expect(result.text).toContain("stale/superseded: summary `sum_old_tag_map`");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");
