@@ -3414,6 +3414,22 @@ describe("lcm command", () => {
           "有。方案别大改，先做一刀“当前态优先裁决层”。目标是让 `capture-candidates` 不再只是从摘要里捞候选。如果这刀过了，再考虑第二步。",
         tokenCount: 38,
       },
+      {
+        conversationId: conversation.conversationId,
+        seq: 3,
+        role: "assistant",
+        content:
+          "改完了。在 `lossless-claw` 做了报告层修正，只动 `capture-candidates`，不碰 DB、不自动写入、不启用 overlay。提交并推送：`2996792 Prioritize current state in capture candidates`。",
+        tokenCount: 42,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 4,
+        role: "assistant",
+        content:
+          "这次 live 验证说明 `Current State Probe` 已经生效，但第一刀还太贪，需要继续收窄 session-memory 工具验证噪音。",
+        tokenCount: 32,
+      },
     ]);
 
     await fixture.summaryStore.insertSummary({
@@ -3458,7 +3474,13 @@ describe("lcm command", () => {
     expect(result.text).toContain("开始深拆");
     expect(result.text).toContain("newest_evidence: 4f03a90");
     expect(result.text).not.toContain("latest_completed: 有。方案别大改");
+    expect(result.text).not.toContain("latest_completed: 改完了");
+    expect(result.text).not.toContain("next_action: 改完了");
     expect(result.text).not.toContain("newest_evidence: 14a39a6");
+    expect(result.text).not.toContain("newest_evidence: 2996792");
+    expect(result.text).not.toContain("promotable: message `#3`");
+    expect(result.text).toContain("evidence_only: message `#3`");
+    expect(result.text).toContain("evidence_only: message `#4`");
     expect(result.text).toContain("local_flow: message `#0`");
     expect(result.text).toContain("review bucket: local_flow");
     expect(result.text).toContain("stale/superseded: summary `sum_old_first_batch`");

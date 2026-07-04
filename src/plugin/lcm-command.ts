@@ -163,6 +163,12 @@ type SessionMemoryCurrentStateProbe = {
   newestEvidence: string[];
 };
 
+type SessionMemoryCurrentStateProbeCandidate = {
+  text: string;
+  createdAt: string;
+  score: number;
+};
+
 type SessionMemoryReplacementPacketLoadResult =
   | {
       ok: true;
@@ -2573,11 +2579,11 @@ function reviewSessionMemoryCaptureCandidates(
       };
     }
 
-    if (looksLikeProcessContext(candidate.claim)) {
+    if (looksLikeProcessContext(candidate.claim) || looksLikeSessionMemoryToolingMeta(candidate.claim)) {
       return {
         ...candidate,
         reviewBucket: "evidence_only",
-        reviewNote: "Process context is evidence, not a durable session-memory candidate.",
+        reviewNote: "Process/tooling context is evidence, not a durable session-memory candidate.",
       };
     }
 
@@ -2652,8 +2658,8 @@ function collectCurrentStateSignals(values: string[]): string[] {
 }
 
 function collectCurrentStateProbe(items: Array<{ content: string; createdAt: string }>): SessionMemoryCurrentStateProbe {
-  const latestCompleted: string[] = [];
-  const nextAction: string[] = [];
+  const latestCompletedCandidates: SessionMemoryCurrentStateProbeCandidate[] = [];
+  const nextActionCandidates: SessionMemoryCurrentStateProbeCandidate[] = [];
   const currentStateEvidenceTexts: string[] = [];
   const sortedItems = items
     .filter((item) => !looksLikeSessionMemoryCandidateReport(item.content))
@@ -2669,26 +2675,27 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
     if (looksLikeCurrentStateMetaDiscussion(compactContent)) {
       continue;
     }
-    if (
-      latestCompleted.length < 3 &&
-      includesAny(normalized, ["完成", "抓完", "已继续抓", "新增", "写入", "提交", "推送", "completed", "wrote", "generated", "created", "pushed"]) &&
-      includesAny(normalized, ["sheet", "精选", "commit", "提交", "推送", "xlsx", "excel", "文件", "已完成", "completed"])
-    ) {
-      latestCompleted.push(truncateMiddle(compactContent, 180));
-      currentStateEvidenceTexts.push(compactContent);
+    const completedScore = scoreCurrentStateCompleted(compactContent);
+    if (completedScore > 0) {
+      latestCompletedCandidates.push({
+        text: compactContent,
+        createdAt: item.createdAt,
+        score: completedScore,
+      });
     }
-    if (
-      nextAction.length < 3 &&
-      (includesAny(normalized, ["下一步", "next action", "转入", "开始深拆", "深拆"]) ||
-        (includesAny(normalized, ["继续"]) && includesAny(normalized, ["工作", "研究", "目录", "深拆", "抓"])))
-    ) {
-      nextAction.push(truncateMiddle(compactContent, 180));
-      currentStateEvidenceTexts.push(compactContent);
-    }
-    if (latestCompleted.length >= 3 && nextAction.length >= 3) {
-      break;
+    const nextActionScore = scoreCurrentStateNextAction(compactContent);
+    if (nextActionScore > 0) {
+      nextActionCandidates.push({
+        text: compactContent,
+        createdAt: item.createdAt,
+        score: nextActionScore,
+      });
     }
   }
+
+  const latestCompleted = selectCurrentStateProbeTexts(latestCompletedCandidates);
+  const nextAction = selectCurrentStateProbeTexts(nextActionCandidates);
+  currentStateEvidenceTexts.push(...latestCompleted, ...nextAction);
 
   return {
     latestCompleted,
@@ -2697,9 +2704,79 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
   };
 }
 
+function selectCurrentStateProbeTexts(candidates: SessionMemoryCurrentStateProbeCandidate[]): string[] {
+  const seen = new Set<string>();
+  const selected: string[] = [];
+  for (const candidate of candidates.slice().sort(compareCurrentStateProbeCandidates)) {
+    const key = normalizeSessionMemoryCandidateClaim(candidate.text);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    selected.push(truncateMiddle(candidate.text, 180));
+    if (selected.length >= 3) {
+      break;
+    }
+  }
+  return selected;
+}
+
+function compareCurrentStateProbeCandidates(
+  left: SessionMemoryCurrentStateProbeCandidate,
+  right: SessionMemoryCurrentStateProbeCandidate,
+): number {
+  const scoreDelta = right.score - left.score;
+  if (scoreDelta !== 0) {
+    return scoreDelta;
+  }
+  return compareTimestampDesc(left.createdAt, right.createdAt);
+}
+
+function scoreCurrentStateCompleted(value: string): number {
+  const normalized = value.toLowerCase();
+  if (looksLikeSessionMemoryToolingMeta(value)) {
+    return 0;
+  }
+  let score = 0;
+  if (includesAny(normalized, ["抓完", "已继续抓", "已完成", "completed"])) {
+    score += 80;
+  }
+  if (includesAny(normalized, ["新增", "写入", "提交", "推送", "created", "wrote", "generated", "pushed", "modified"])) {
+    score += 40;
+  }
+  if (includesAny(normalized, ["sheet", "精选", "xlsx", "excel", "workbook", "first-batch-screening"])) {
+    score += 80;
+  }
+  if (includesAny(normalized, ["刷宝", "steam-indie-category-research", "独游", "游戏深拆", "五条精选", "候选"])) {
+    score += 40;
+  }
+  if (includesAny(normalized, ["files: modified", "files:"])) {
+    score -= 20;
+  }
+  return score >= 100 ? score : 0;
+}
+
+function scoreCurrentStateNextAction(value: string): number {
+  const normalized = value.toLowerCase();
+  if (looksLikeSessionMemoryToolingMeta(value)) {
+    return 0;
+  }
+  let score = 0;
+  if (includesAny(normalized, ["下一步", "next action", "转入", "开始深拆", "深拆"])) {
+    score += 100;
+  }
+  if (includesAny(normalized, ["游戏", "steam", "刷宝", "精选", "候选", "目录", "独游"])) {
+    score += 40;
+  }
+  if (includesAny(normalized, ["继续"]) && includesAny(normalized, ["工作", "研究", "目录", "深拆", "抓"])) {
+    score += 30;
+  }
+  return score >= 100 ? score : 0;
+}
+
 function looksLikeCurrentStateMetaDiscussion(value: string): boolean {
   const normalized = value.toLowerCase();
-  return includesAny(normalized, [
+  return looksLikeSessionMemoryToolingMeta(value) || includesAny(normalized, [
     "superpower start",
     "我的想法",
     "有。方案",
@@ -2709,6 +2786,38 @@ function looksLikeCurrentStateMetaDiscussion(value: string): boolean {
     "candidate-only 现在证明",
     "不是“从摘要里捞候选”",
     "让 `capture-candidates`",
+  ]);
+}
+
+function looksLikeSessionMemoryToolingMeta(value: string): boolean {
+  const normalized = value.toLowerCase();
+  const mentionsSessionMemoryTooling = includesAny(normalized, [
+    "lossless-claw",
+    "lossless claw",
+    "/lossless",
+    "capture-candidates",
+    "current state probe",
+    "session-memory",
+    "session memory",
+  ]);
+  if (!mentionsSessionMemoryTooling) {
+    return false;
+  }
+  return includesAny(normalized, [
+    "报告层",
+    "不碰 db",
+    "自动写入",
+    "overlay",
+    "live 验证",
+    "重启生效",
+    "重启/重载",
+    "reload",
+    "candidate-only",
+    "accepted memory",
+    "不能自动写入",
+    "不该自动",
+    "修正",
+    "验证",
   ]);
 }
 
