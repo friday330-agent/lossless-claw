@@ -3717,7 +3717,7 @@ describe("lcm command", () => {
       conversationId: conversation.conversationId,
       kind: "leaf",
       content:
-        "Agent loaded Friday Guardrail (11-point operational discipline) and HOT tier memory rules. Found existing steam-indie-category-research work folder. All 5 Bilibili video metadata lookups returned Browser session is required.\n\nExpand for details about: Bilibili subtitle command parameters, all 5 BV video titles/metadata if retrievable",
+        "Agent loaded Friday Guardrail (11-point operational discipline) and HOT tier memory rules. Found existing steam-indie-category-research work folder. All 5 Bilibili video metadata lookups returned Browser session is required. Slay the Spire analysis folder not yet created. Subtitle extraction for 5 videos not started. No new files written. Files: none\n\nExpand for details about: Bilibili subtitle command parameters, all 5 BV video titles/metadata if retrievable",
       tokenCount: 62,
       latestAt: new Date("2026-07-05T12:22:51.000Z"),
     });
@@ -3742,6 +3742,8 @@ describe("lcm command", () => {
     expect(result.text).not.toContain("latest_completed: Agent loaded Friday Guardrail");
     expect(result.text).not.toContain("next_action: 用户审查lossless-claw dry_run_report");
     expect(result.text).not.toContain("next_action: Ran focused vitest tests");
+    expect(result.text).not.toContain("next_action: 好了，已按游戏单独建目录并完成第一版深拆报告");
+    expect(result.text).not.toContain("next_action: 已完成Slay the Spire深拆报告构建");
     expect(result.text).not.toContain("newest_evidence: self-improving/memory.md内容");
     expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md");
     expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-official-snapshot-2026-07-05.md");

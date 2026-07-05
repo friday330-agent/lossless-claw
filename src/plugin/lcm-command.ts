@@ -2737,7 +2737,9 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
 
   const filteredCompletedCandidates = filterSupersededCurrentStateProbeCandidates(latestCompletedCandidates);
   const filteredNextActionCandidates = filterSupersededCurrentStateProbeCandidates(
-    nextActionCandidates,
+    nextActionCandidates.filter((candidate) =>
+      !filteredCompletedCandidates.some((completed) => completed.text === candidate.text),
+    ),
     filteredCompletedCandidates,
   );
   const latestCompleted = selectCurrentStateProbeTexts(filteredCompletedCandidates);
@@ -2804,7 +2806,7 @@ function compareCurrentStateProbeCandidates(
 
 function scoreCurrentStateCompleted(value: string): number {
   const normalized = value.toLowerCase();
-  if (looksLikeSessionMemoryToolingMeta(value)) {
+  if (looksLikeSessionMemoryToolingMeta(value) || looksLikeIncompleteOrBlockedProgress(value)) {
     return 0;
   }
   let score = 0;
@@ -2828,6 +2830,26 @@ function scoreCurrentStateCompleted(value: string): number {
     score -= 20;
   }
   return score >= 100 ? score : 0;
+}
+
+function looksLikeIncompleteOrBlockedProgress(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return includesAny(normalized, [
+    "not yet created",
+    "not started",
+    "no new files written",
+    "files: none",
+    "failed",
+    "blocked",
+    "未开始",
+    "未创建",
+    "未写入",
+    "未执行",
+    "没有写入",
+    "无文件",
+    "失败",
+    "阻塞",
+  ]);
 }
 
 function scoreCurrentStateNextAction(value: string): number {
