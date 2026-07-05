@@ -2472,6 +2472,21 @@ function looksLikeSessionMemoryCandidateReport(value: string): boolean {
   );
 }
 
+function stripPastedSessionMemoryCandidateReport(value: string): string {
+  if (!looksLikeSessionMemoryCandidateReport(value)) {
+    return value;
+  }
+  const reportStartCandidates = [
+    value.search(/\*\*[^*\n]*Lossless Claw/i),
+    value.search(/🧠\s*Session Memory Candidate Capture/i),
+  ].filter((index) => index >= 0);
+  const reportStart = Math.min(...reportStartCandidates);
+  if (!Number.isFinite(reportStart) || reportStart <= 0) {
+    return "";
+  }
+  return value.slice(0, reportStart).trim();
+}
+
 function normalizeSessionMemoryCandidateClaim(value: string): string {
   return value
     .toLowerCase()
@@ -2943,8 +2958,8 @@ function classifySessionMemoryCaptureCandidate(params: {
   content: string;
   createdAt: string;
 }): SessionMemoryCaptureCandidate | null {
-  const content = params.content.trim();
-  if (!content || content.startsWith("You are a memory search agent.") || looksLikeSessionMemoryCandidateReport(content)) {
+  const content = stripPastedSessionMemoryCandidateReport(params.content).trim();
+  if (!content || content.startsWith("You are a memory search agent.")) {
     return null;
   }
   const normalized = content.toLowerCase();
@@ -2990,7 +3005,7 @@ function classifySessionMemoryCaptureCandidate(params: {
       };
     }
 
-    if (includesAny(normalized, ["不要", "不能", "别", "不需要", "不优先", "必须", "更重要", "优先", "未经", "批准", "明确"])) {
+    if (includesAny(normalized, ["不要", "不能", "别", "不需要", "不优先", "必须", "更重要", "优先", "未经", "批准", "明确", "我没说过", "没说过这话", "错误归因"])) {
       return {
         kind: "constraint_boundary",
         source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",

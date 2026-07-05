@@ -3262,6 +3262,72 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("keeps user corrections before pasted session-memory candidate reports", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-report-wrapper.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-report-wrapper";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-report-wrapper",
+      sessionKey,
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: [
+          "我没说过这话 可能是active memory的问题",
+          "**🦀 Lossless Claw v0.11.3**",
+          "Help: `/lossless help` · Alias: `/lcm`",
+          "",
+          "🧠 Session Memory Candidate Capture",
+          "",
+          "**📍 Target conversation**",
+          "  target mode: current",
+          "  conversation id: 3,100",
+          "  session key: `agent:main:dashboard:c…1fe-b375-c442de37ff90`",
+          "  message scan limit: 80",
+          "  summary scan limit: 80",
+          "",
+          "**🧪 Mode**",
+          "  mode: dry_run_report",
+          "  writes: none",
+          "  accepted memory: none",
+          "  review result: candidate_only",
+          "",
+          "**🛠️ Result**",
+          "  No candidate-worthy events detected in the scanned message window.",
+        ].join("\n"),
+        tokenCount: 90,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-report-wrapper",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Candidate 1 - constraint_boundary");
+    expect(result.text).toContain("claim: 我没说过这话 可能是active memory的问题");
+    expect(result.text).not.toContain("claim: 我没说过这话 可能是active memory的问题 **🦀 Lossless Claw");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("buckets duplicate stale and missed-current-state session-memory capture candidates", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
