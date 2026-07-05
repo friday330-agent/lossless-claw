@@ -3641,6 +3641,85 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("supersedes stale subtitle evidence next-actions after a deep-dive report is completed", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-report-complete.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-report-complete";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-report-complete",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 316,
+        role: "assistant",
+        content:
+          "已建目录并抓完字幕： [slay-the-spire](/Users/shige/.openclaw/workspace/Friday-memory/work/steam-indie-category-research/slay-the-spire/)。提交并推送：`497e105 Add Slay the Spire subtitle sources` 下一步适合做“字幕证据表”：从 4 份 transcript 里标注决策、随机性/控制、卡牌/奖励/路线设计、情绪词、重复投入来源。",
+        tokenCount: 70,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 317,
+        role: "user",
+        content: "可以 你需要给我的是详细的报告 按照你的深度拆解模版 ,如果里面并没有提到,那就先空着别瞎编",
+        tokenCount: 30,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 436,
+        role: "assistant",
+        content:
+          "好了，已按游戏单独建目录并完成第一版深拆报告。主报告在：Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md。验证：cookie 值扫描未发现具体 cookie 值落盘，git diff --check 通过，commit + push：`1b29114 Add Slay the Spire deep dive report`。",
+        tokenCount: 68,
+      },
+    ]);
+    fixture.db
+      .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
+      .run("2026-07-05 08:28:28", conversation.conversationId, 316);
+    fixture.db
+      .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
+      .run("2026-07-05 08:58:55", conversation.conversationId, 317);
+    fixture.db
+      .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
+      .run("2026-07-05 08:58:56", conversation.conversationId, 436);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-report-complete",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Current State Probe");
+    expect(result.text).toContain("latest_completed:");
+    expect(result.text).toContain("第一版深拆报告");
+    expect(result.text).toContain("newest_evidence: 1b29114");
+    expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md");
+    expect(result.text).toContain("promotable: message `#317`");
+    expect(result.text).toContain("promotable: message `#436`");
+    expect(result.text).toContain("stale/superseded: message `#316`");
+    expect(result.text).not.toContain("promotable: message `#316`");
+    expect(result.text).not.toContain("next_action: 已建目录并抓完字幕");
+    expect(result.text).not.toContain("latest_completed: 已建目录并抓完字幕");
+    expect(result.text).not.toContain("newest_evidence: 497e105");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");

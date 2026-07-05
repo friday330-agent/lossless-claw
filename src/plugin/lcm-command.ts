@@ -2549,6 +2549,7 @@ function reviewSessionMemoryCaptureCandidates(
   const strongestByClaim = new Map<string, SessionMemoryCaptureCandidate>();
   const maxGateOrdinalByGate = new Map<string, number>();
   const latestSteamPhaseRank = Math.max(0, ...probe.latestCompleted.map((signal) => getSteamScreeningPhaseRank(signal)));
+  const completedCandidates = candidates.filter((candidate) => candidate.kind === "verified_result");
 
   for (const candidate of candidates) {
     const claimKey = normalizeSessionMemoryCandidateClaim(candidate.claim);
@@ -2604,6 +2605,14 @@ function reviewSessionMemoryCaptureCandidates(
         ...candidate,
         reviewBucket: "stale_superseded",
         reviewNote: "Older Steam screening phase is superseded by a later completed category sheet.",
+      };
+    }
+
+    if (completedCandidates.some((completed) => completed !== candidate && currentStateCompletionSupersedes(completed, candidate))) {
+      return {
+        ...candidate,
+        reviewBucket: "stale_superseded",
+        reviewNote: "Older next-step/progress claim is superseded by a later completed result in the same workline.",
       };
     }
 
@@ -2721,15 +2730,38 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
     }
   }
 
-  const latestCompleted = selectCurrentStateProbeTexts(latestCompletedCandidates);
-  const nextAction = selectCurrentStateProbeTexts(nextActionCandidates);
-  currentStateEvidenceTexts.push(...latestCompleted, ...nextAction);
+  const filteredCompletedCandidates = filterSupersededCurrentStateProbeCandidates(latestCompletedCandidates);
+  const filteredNextActionCandidates = filterSupersededCurrentStateProbeCandidates(
+    nextActionCandidates,
+    filteredCompletedCandidates,
+  );
+  const latestCompleted = selectCurrentStateProbeTexts(filteredCompletedCandidates);
+  const nextAction = selectCurrentStateProbeTexts(filteredNextActionCandidates);
+  currentStateEvidenceTexts.push(
+    ...filteredCompletedCandidates.map((candidate) => candidate.text),
+    ...filteredNextActionCandidates.map((candidate) => candidate.text),
+  );
 
   return {
     latestCompleted,
     nextAction,
     newestEvidence: collectCurrentStateSignals(currentStateEvidenceTexts).slice(0, 12),
   };
+}
+
+function filterSupersededCurrentStateProbeCandidates(
+  candidates: SessionMemoryCurrentStateProbeCandidate[],
+  completedCandidates: SessionMemoryCurrentStateProbeCandidate[] = candidates,
+): SessionMemoryCurrentStateProbeCandidate[] {
+  return candidates.filter(
+    (candidate) =>
+      !completedCandidates.some(
+        (completed) =>
+          completed !== candidate &&
+          compareTimestampDesc(completed.createdAt, candidate.createdAt) < 0 &&
+          currentStateCompletionTextSupersedes(completed.text, candidate.text),
+      ),
+  );
 }
 
 function selectCurrentStateProbeTexts(candidates: SessionMemoryCurrentStateProbeCandidate[]): string[] {
@@ -2783,6 +2815,9 @@ function scoreCurrentStateCompleted(value: string): number {
   }
   if (includesAny(normalized, ["刷宝", "steam-indie-category-research", "独游", "游戏深拆", "五条精选", "候选"])) {
     score += 40;
+  }
+  if (includesAny(normalized, ["深拆报告", "deep-dive report", "deep-dive-report", "detailed report", "证据表", "evidence table"])) {
+    score += 60;
   }
   if (includesAny(normalized, ["files: modified", "files:"])) {
     score -= 20;
@@ -2879,6 +2914,60 @@ function looksLikeFutureSteamCategoryReference(normalizedValue: string): boolean
     "剩余类别",
     "剩余目录",
   ]);
+}
+
+function currentStateCompletionSupersedes(
+  completed: SessionMemoryCaptureCandidate,
+  candidate: SessionMemoryCaptureCandidate,
+): boolean {
+  return (
+    compareTimestampDesc(completed.createdAt, candidate.createdAt) < 0 &&
+    currentStateCompletionTextSupersedes(completed.claim, candidate.claim)
+  );
+}
+
+function currentStateCompletionTextSupersedes(completedValue: string, candidateValue: string): boolean {
+  return (
+    looksLikeFinalWorklineCompletion(completedValue) &&
+    looksLikeSupersededProgressOrNextStep(candidateValue) &&
+    sharesCurrentWorklineAnchor(completedValue, candidateValue)
+  );
+}
+
+function looksLikeFinalWorklineCompletion(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["完成", "completed", "已按", "commit", "提交", "pushed", "推送"]) &&
+    includesAny(normalized, ["报告", "report", "deep-dive", "deep dive", "证据表", "evidence table"])
+  );
+}
+
+function looksLikeSupersededProgressOrNextStep(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return includesAny(normalized, [
+    "下一步",
+    "next action",
+    "下一步适合",
+    "证据表",
+    "evidence table",
+    "抓完字幕",
+    "subtitle sources",
+    "subtitle",
+    "已建目录",
+  ]);
+}
+
+function sharesCurrentWorklineAnchor(leftValue: string, rightValue: string): boolean {
+  const left = leftValue.toLowerCase();
+  const right = rightValue.toLowerCase();
+  const anchors = [
+    "slay-the-spire",
+    "杀戮尖塔",
+    "steam-indie-category-research",
+    "steam deep dive",
+    "steam 深拆",
+  ];
+  return anchors.some((anchor) => left.includes(anchor) && right.includes(anchor));
 }
 
 function looksLikeCurrentStateMetaDiscussion(value: string): boolean {
