@@ -2765,7 +2765,7 @@ function filterSupersededCurrentStateProbeCandidates(
       !completedCandidates.some(
         (completed) =>
           completed !== candidate &&
-          compareTimestampDesc(completed.createdAt, candidate.createdAt) < 0 &&
+          compareTimestampDesc(completed.createdAt, candidate.createdAt) <= 0 &&
           currentStateCompletionTextSupersedes(completed.text, candidate.text),
       ),
   );
@@ -2825,6 +2825,9 @@ function scoreCurrentStateCompleted(value: string): number {
   }
   if (includesAny(normalized, ["深拆报告", "deep-dive report", "deep-dive-report", "detailed report", "证据表", "evidence table"])) {
     score += 60;
+  }
+  if (includesAny(normalized, ["steam-review-keyword-analysis", "review keyword analysis", "评论关键词", "review keyword"])) {
+    score += 80;
   }
   if (includesAny(normalized, ["files: modified", "files:"])) {
     score -= 20;
@@ -2948,16 +2951,20 @@ function currentStateCompletionSupersedes(
   candidate: SessionMemoryCaptureCandidate,
 ): boolean {
   return (
-    compareTimestampDesc(completed.createdAt, candidate.createdAt) < 0 &&
+    isSameTimeOrLaterCandidate(completed, candidate) &&
     currentStateCompletionTextSupersedes(completed.claim, candidate.claim)
   );
 }
 
 function currentStateCompletionTextSupersedes(completedValue: string, candidateValue: string): boolean {
+  if (looksLikeFutureSlayDeepDiveNextAction(candidateValue)) {
+    return false;
+  }
   return (
     looksLikeFinalWorklineCompletion(completedValue) &&
     looksLikeSupersededProgressOrNextStep(candidateValue) &&
-    sharesCurrentWorklineAnchor(completedValue, candidateValue)
+    sharesCurrentWorklineAnchor(completedValue, candidateValue) &&
+    completedWorklinePhaseRank(completedValue) >= candidateWorklinePhaseRank(candidateValue)
   );
 }
 
@@ -2975,26 +2982,90 @@ function looksLikeSupersededProgressOrNextStep(value: string): boolean {
     "下一步",
     "next action",
     "下一步适合",
+    "先做",
+    "先跑",
     "证据表",
     "evidence table",
+    "评论关键词",
+    "review keyword",
     "抓完字幕",
     "subtitle sources",
     "subtitle",
     "已建目录",
+    "选下一个游戏",
   ]);
 }
 
 function sharesCurrentWorklineAnchor(leftValue: string, rightValue: string): boolean {
   const left = leftValue.toLowerCase();
   const right = rightValue.toLowerCase();
+  const anchorGroups = [
+    ["slay-the-spire", "slay the spire", "杀戮尖塔"],
+    ["steam-indie-category-research", "steam deep dive", "steam 深拆"],
+  ];
+  if (anchorGroups.some((group) => group.some((anchor) => left.includes(anchor)) && group.some((anchor) => right.includes(anchor)))) {
+    return true;
+  }
   const anchors = [
     "slay-the-spire",
+    "slay the spire",
     "杀戮尖塔",
     "steam-indie-category-research",
     "steam deep dive",
     "steam 深拆",
   ];
   return anchors.some((anchor) => left.includes(anchor) && right.includes(anchor));
+}
+
+function isSameTimeOrLaterCandidate(completed: SessionMemoryCaptureCandidate, candidate: SessionMemoryCaptureCandidate): boolean {
+  const timestampDelta = compareTimestampDesc(completed.createdAt, candidate.createdAt);
+  if (timestampDelta < 0) {
+    return true;
+  }
+  if (timestampDelta > 0) {
+    return false;
+  }
+  const completedSeq = parseMessageSourceRef(completed.sourceRef);
+  const candidateSeq = parseMessageSourceRef(candidate.sourceRef);
+  return completedSeq !== null && candidateSeq !== null && completedSeq > candidateSeq;
+}
+
+function parseMessageSourceRef(value: string): number | null {
+  const match = /^#([0-9,]+)$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number.parseInt((match[1] ?? "").replace(/,/g, ""), 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function completedWorklinePhaseRank(value: string): number {
+  return Math.max(1, candidateWorklinePhaseRank(value));
+}
+
+function candidateWorklinePhaseRank(value: string): number {
+  const normalized = value.toLowerCase();
+  if (includesAny(normalized, ["实况", "gameplay", "30 秒", "30秒", "3 分钟", "3分钟", "设计转译", "策略探索型小队"])) {
+    return 4;
+  }
+  if (includesAny(normalized, ["steam-review-keyword-analysis", "review keyword", "评论关键词", "1e56c29"])) {
+    return 3;
+  }
+  if (includesAny(normalized, ["deep-dive report", "deep-dive-report", "深拆报告", "第一版深拆", "1b29114"])) {
+    return 2;
+  }
+  if (includesAny(normalized, ["subtitle sources", "抓完字幕", "字幕证据表", "497e105"])) {
+    return 1;
+  }
+  return 0;
+}
+
+function looksLikeFutureSlayDeepDiveNextAction(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["slay-the-spire", "杀戮尖塔", "steam-indie-category-research"]) &&
+    includesAny(normalized, ["实况", "gameplay", "30 秒", "30秒", "3 分钟", "3分钟", "设计转译", "策略探索型小队"])
+  );
 }
 
 function looksLikeCurrentStateMetaDiscussion(value: string): boolean {
@@ -3022,6 +3093,15 @@ function looksLikeSessionMemoryToolingMeta(value: string): boolean {
     "current state probe",
     "session-memory",
     "session memory",
+    "candidate-only",
+    "next_action:",
+    "latest_completed:",
+    "newest_evidence:",
+    "promotable:",
+    "evidence_only:",
+    "没有写 db",
+    "没写 db",
+    "report 美观",
   ]);
   if (!mentionsSessionMemoryTooling) {
     return false;

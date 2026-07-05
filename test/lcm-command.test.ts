@@ -3684,6 +3684,36 @@ describe("lcm command", () => {
           "好了，已按游戏单独建目录并完成第一版深拆报告。主报告在：Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md。支撑文件：Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-official-snapshot-2026-07-05.md 和 Friday-memory/work/steam-indie-category-research/slay-the-spire/subtitle-evidence-table-2026-07-05.md。验证：cookie 值扫描未发现具体 cookie 值落盘，git diff --check 通过，commit + push：`1b29114 Add Slay the Spire deep dive report`。",
         tokenCount: 68,
       },
+      {
+        conversationId: conversation.conversationId,
+        seq: 760,
+        role: "assistant",
+        content:
+          "这次基本过线了。好的变化：`next_action: missing`，不再把完成态误当下一步。`self-improving/memory.md内容` 没了。我的判断：这一轮可以先收口，不值得继续为 report 美观再修。当前输出已经满足 candidate-only 观察用途：没有旧 next_action、没有假 evidence、没有写 DB。",
+        tokenCount: 76,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 761,
+        role: "user",
+        content: "下一步我们是来分析杀戮尖塔 还是继续选下一个游戏?如果选下一个游戏就等我找到相应的视频",
+        tokenCount: 32,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 785,
+        role: "user",
+        content: "先跑《杀戮尖塔》Steam 评论关键词分析，把情绪兑现、重复投入、耐玩性证据补上。先做这个",
+        tokenCount: 34,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 844,
+        role: "assistant",
+        content:
+          "已完成并提交推送：`1e56c29 Add Slay the Spire review keyword analysis`。新增 Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-review-keyword-analysis-2026-07-05.md，更新 slay-the-spire-deep-dive-report-2026-07-05.md；来源：Steam Reviews API store.steampowered.com/appreviews/646570。",
+        tokenCount: 62,
+      },
     ]);
     fixture.db
       .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
@@ -3694,6 +3724,18 @@ describe("lcm command", () => {
     fixture.db
       .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
       .run("2026-07-05 08:58:56", conversation.conversationId, 436);
+    fixture.db
+      .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
+      .run("2026-07-05 14:23:26", conversation.conversationId, 760);
+    fixture.db
+      .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
+      .run("2026-07-05 14:26:37", conversation.conversationId, 761);
+    fixture.db
+      .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
+      .run("2026-07-05 14:36:23", conversation.conversationId, 785);
+    fixture.db
+      .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
+      .run("2026-07-05 14:36:23", conversation.conversationId, 844);
     await fixture.summaryStore.insertSummary({
       summaryId: "sum_review_noise",
       conversationId: conversation.conversationId,
@@ -3721,6 +3763,15 @@ describe("lcm command", () => {
       tokenCount: 62,
       latestAt: new Date("2026-07-05T12:22:51.000Z"),
     });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_read_noise",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "User read existing files for verification: `self-improving/domains/agent-guardrail.md`, lossless-claw SKILL.md, test/lcm-command.test.ts, and src/plugin/lcm-command.ts. Git log shows 3137fa8, 3b1980b, 4fbd7e6. No new writes, modifications, or file operations in this segment. Files: none",
+      tokenCount: 76,
+      latestAt: new Date("2026-07-05T14:22:05.000Z"),
+    });
 
     const result = await command.handler!(createCommandContext(
       "session-memory capture-candidates --limit 80",
@@ -3732,26 +3783,40 @@ describe("lcm command", () => {
 
     expect(result.text).toContain("Current State Probe");
     expect(result.text).toContain("latest_completed:");
-    expect(result.text).toContain("第一版深拆报告");
-    expect(result.text).toContain("newest_evidence: 1b29114");
-    expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md");
-    expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-official-snapshot-2026-07-05.md");
-    expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/subtitle-evidence-table-2026-07-05.md");
+    expect(result.text).toContain("review keyword analysis");
+    expect(result.text).toContain("newest_evidence: 1e56c29");
+    expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-review-keyword-analysis-2026-07-05.md");
     expect(result.text).not.toContain("latest_completed: 用户审查lossless-claw dry_run_report");
     expect(result.text).not.toContain("latest_completed: Ran focused vitest tests");
     expect(result.text).not.toContain("latest_completed: Agent loaded Friday Guardrail");
+    expect(result.text).not.toContain("latest_completed: User read existing files");
     expect(result.text).not.toContain("next_action: 用户审查lossless-claw dry_run_report");
     expect(result.text).not.toContain("next_action: Ran focused vitest tests");
+    expect(result.text).not.toContain("next_action: User read existing files");
+    expect(result.text).not.toContain("next_action: 我建议**先继续分析《杀戮尖塔》");
+    expect(result.text).not.toContain("next_action: 下一步我们是来分析杀戮尖塔");
+    expect(result.text).not.toContain("next_action: 先跑《杀戮尖塔》Steam 评论关键词分析");
     expect(result.text).not.toContain("next_action: 好了，已按游戏单独建目录并完成第一版深拆报告");
     expect(result.text).not.toContain("next_action: 已完成Slay the Spire深拆报告构建");
     expect(result.text).not.toContain("newest_evidence: self-improving/memory.md内容");
+    expect(result.text).not.toContain("newest_evidence: 3137fa8");
+    expect(result.text).not.toContain("missed_current_state: 3137fa8");
+    expect(result.text).not.toContain("missed_current_state: self-improving/domains/agent-guardrail.md");
     expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md");
+    expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-review-keyword-analysis-2026-07-05.md");
     expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-official-snapshot-2026-07-05.md");
     expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/subtitle-evidence-table-2026-07-05.md");
     expect(result.text).toContain("promotable: message `#317`");
     expect(result.text).toContain("promotable: message `#436`");
+    expect(result.text).toContain("promotable: message `#844`");
     expect(result.text).toContain("stale/superseded: message `#316`");
+    expect(result.text).toContain("stale/superseded: message `#761`");
+    expect(result.text).toContain("stale/superseded: message `#785`");
+    expect(result.text).toContain("evidence_only: message `#760`");
     expect(result.text).not.toContain("promotable: message `#316`");
+    expect(result.text).not.toContain("promotable: message `#760`");
+    expect(result.text).not.toContain("promotable: message `#761`");
+    expect(result.text).not.toContain("promotable: message `#785`");
     expect(result.text).not.toContain("next_action: 已建目录并抓完字幕");
     expect(result.text).not.toContain("latest_completed: 已建目录并抓完字幕");
     expect(result.text).not.toContain("newest_evidence: 497e105");
