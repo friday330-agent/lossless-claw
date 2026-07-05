@@ -3681,7 +3681,7 @@ describe("lcm command", () => {
         seq: 436,
         role: "assistant",
         content:
-          "好了，已按游戏单独建目录并完成第一版深拆报告。主报告在：Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md。验证：cookie 值扫描未发现具体 cookie 值落盘，git diff --check 通过，commit + push：`1b29114 Add Slay the Spire deep dive report`。",
+          "好了，已按游戏单独建目录并完成第一版深拆报告。主报告在：Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md。支撑文件：Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-official-snapshot-2026-07-05.md 和 Friday-memory/work/steam-indie-category-research/slay-the-spire/subtitle-evidence-table-2026-07-05.md。验证：cookie 值扫描未发现具体 cookie 值落盘，git diff --check 通过，commit + push：`1b29114 Add Slay the Spire deep dive report`。",
         tokenCount: 68,
       },
     ]);
@@ -3708,6 +3708,11 @@ describe("lcm command", () => {
     expect(result.text).toContain("第一版深拆报告");
     expect(result.text).toContain("newest_evidence: 1b29114");
     expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md");
+    expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-official-snapshot-2026-07-05.md");
+    expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/subtitle-evidence-table-2026-07-05.md");
+    expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md");
+    expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-official-snapshot-2026-07-05.md");
+    expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/subtitle-evidence-table-2026-07-05.md");
     expect(result.text).toContain("promotable: message `#317`");
     expect(result.text).toContain("promotable: message `#436`");
     expect(result.text).toContain("stale/superseded: message `#316`");

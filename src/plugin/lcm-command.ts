@@ -144,6 +144,7 @@ type SessionMemoryCaptureCandidate = {
   role: string;
   createdAt: string;
   claim: string;
+  evidenceSignals?: string[];
   why: string;
   confidence: "high" | "medium";
   riskIfWrong: string;
@@ -3032,8 +3033,12 @@ function findMissedCurrentStateSignals(params: {
 }): string[] {
   return params.signals
     .filter((signal) => isUsefulCurrentStateSignal(signal))
-    .filter((signal) => !params.emittedCandidates.some((candidate) => candidate.claim.includes(signal)))
+    .filter((signal) => !params.emittedCandidates.some((candidate) => candidateCoversCurrentStateSignal(candidate, signal)))
     .slice(0, 12);
+}
+
+function candidateCoversCurrentStateSignal(candidate: SessionMemoryCaptureCandidate, signal: string): boolean {
+  return candidate.claim.includes(signal) || (candidate.evidenceSignals ?? []).includes(signal);
 }
 
 function isUsefulCurrentStateSignal(signal: string): boolean {
@@ -3056,6 +3061,7 @@ function classifySessionMemoryCaptureCandidate(params: {
   }
   const normalized = content.toLowerCase();
   const claim = truncateMiddle(content.replace(/\s+/g, " "), 220);
+  const evidenceSignals = collectCurrentStateSignals([content]);
   const userAuthoredSignal =
     params.role === "user" ||
     (params.sourceKind === "summary" &&
@@ -3070,6 +3076,7 @@ function classifySessionMemoryCaptureCandidate(params: {
       role: params.role,
       createdAt: params.createdAt,
       claim,
+      evidenceSignals,
       why: "Content records orientation or startup-reading context.",
       confidence: "medium",
       riskIfWrong: "A process step may be mistaken for the active workline.",
@@ -3090,6 +3097,7 @@ function classifySessionMemoryCaptureCandidate(params: {
         role: params.role,
         createdAt: params.createdAt,
         claim,
+        evidenceSignals,
         why: "User appears to move or restate the current workline.",
         confidence: "high",
         riskIfWrong: "The active seed may stay on the previous workline and miss the new objective.",
@@ -3106,6 +3114,7 @@ function classifySessionMemoryCaptureCandidate(params: {
         role: params.role,
         createdAt: params.createdAt,
         claim,
+        evidenceSignals,
         why: "User states a boundary, priority, or exclusion that can affect future behavior.",
         confidence: "high",
         riskIfWrong: "A future answer may violate the user's stated boundary or over-prioritize the wrong axis.",
@@ -3122,6 +3131,7 @@ function classifySessionMemoryCaptureCandidate(params: {
         role: params.role,
         createdAt: params.createdAt,
         claim,
+        evidenceSignals,
         why: "User appears to make or approve a decision.",
         confidence: "medium",
         riskIfWrong: "A tentative or local choice may be treated as durable without review.",
@@ -3138,6 +3148,7 @@ function classifySessionMemoryCaptureCandidate(params: {
         role: params.role,
         createdAt: params.createdAt,
         claim,
+        evidenceSignals,
         why: "User appears to set or refine the next action.",
         confidence: "medium",
         riskIfWrong: "The next handoff may point at stale work.",
@@ -3171,6 +3182,7 @@ function classifySessionMemoryCaptureCandidate(params: {
       role: params.role,
       createdAt: params.createdAt,
       claim,
+      evidenceSignals,
       why: "Assistant reports a concrete verified result or commit that may need review.",
       confidence: "medium",
       riskIfWrong: "An unverified status claim may be preserved as fact.",
