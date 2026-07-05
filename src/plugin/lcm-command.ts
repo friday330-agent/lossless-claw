@@ -2529,10 +2529,13 @@ function looksLikeLocalFlowApproval(value: string): boolean {
     .replace(/[`*_~()[\]{}"'“”‘’。，、！？!?:：；;,.]/g, "")
     .replace(/\s+/g, "")
     .trim();
-  if (!compact || compact.length > 12) {
+  if (!compact || compact.length > 20) {
     return false;
   }
-  return /^(ok|okay|好|好的|可以|可以吧|继续|继续吧|可以继续|可以继续吧|行|行吧|嗯|收到|go)$/.test(compact);
+  return (
+    /^(ok|okay|好|好的|可以|可以吧|继续|继续吧|可以继续|可以继续吧|行|行吧|嗯|收到|go)$/.test(compact) ||
+    /^(ok|okay|好|好的|可以|行|行吧)(先)?(开始|开始修|修|处理|继续)(吧)?$/.test(compact)
+  );
 }
 
 function formatSessionMemoryCaptureSource(candidate: SessionMemoryCaptureCandidate): string {

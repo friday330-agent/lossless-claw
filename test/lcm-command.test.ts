@@ -3328,6 +3328,50 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("demotes short operational approvals with task wording to local flow", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-operational-approval.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-operational-approval";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-operational-approval",
+      sessionKey,
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 0,
+        role: "user",
+        content: "可以 先开始修吧",
+        tokenCount: 6,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-operational-approval",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("local_flow: message `#0`");
+    expect(result.text).toContain("review bucket: local_flow");
+    expect(result.text).not.toContain("promotable: message `#0`");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("buckets duplicate stale and missed-current-state session-memory capture candidates", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
