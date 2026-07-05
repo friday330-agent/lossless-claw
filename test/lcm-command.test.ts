@@ -3694,6 +3694,33 @@ describe("lcm command", () => {
     fixture.db
       .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
       .run("2026-07-05 08:58:56", conversation.conversationId, 436);
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_review_noise",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "用户审查lossless-claw dry_run_report，发现Current State Probe仍显示旧状态（“做字幕证据表”），但实际已完成第一版深拆报告并提交1b29114。决策：保留#317、提升#436、降级#316。\n\nExpand for details about: 14个candidate具体claim、用户逐条分析、agent-guardrail全文、lossless-claw SKILL全文、self-improving/memory.md内容",
+      tokenCount: 84,
+      latestAt: new Date("2026-07-05T12:22:51.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_test_noise",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Ran focused vitest tests for session-memory capture-candidates: initially one failure in \"supersedes stale subtitle evidence next-actions after a deep-dive report is completed\" due to truncated path in newest_evidence assertion. Fixed by adding currentStateCompletionSupersedes logic.\n\nExpand for details about: test case messages and assertions, git diff --check result",
+      tokenCount: 78,
+      latestAt: new Date("2026-07-05T12:22:51.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_loaded_noise",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Agent loaded Friday Guardrail (11-point operational discipline) and HOT tier memory rules. Found existing steam-indie-category-research work folder. All 5 Bilibili video metadata lookups returned Browser session is required.\n\nExpand for details about: Bilibili subtitle command parameters, all 5 BV video titles/metadata if retrievable",
+      tokenCount: 62,
+      latestAt: new Date("2026-07-05T12:22:51.000Z"),
+    });
 
     const result = await command.handler!(createCommandContext(
       "session-memory capture-candidates --limit 80",
@@ -3710,6 +3737,12 @@ describe("lcm command", () => {
     expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md");
     expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-official-snapshot-2026-07-05.md");
     expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/subtitle-evidence-table-2026-07-05.md");
+    expect(result.text).not.toContain("latest_completed: 用户审查lossless-claw dry_run_report");
+    expect(result.text).not.toContain("latest_completed: Ran focused vitest tests");
+    expect(result.text).not.toContain("latest_completed: Agent loaded Friday Guardrail");
+    expect(result.text).not.toContain("next_action: 用户审查lossless-claw dry_run_report");
+    expect(result.text).not.toContain("next_action: Ran focused vitest tests");
+    expect(result.text).not.toContain("newest_evidence: self-improving/memory.md内容");
     expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/slay-the-spire-deep-dive-report-2026-07-05.md");
     expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-official-snapshot-2026-07-05.md");
     expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/subtitle-evidence-table-2026-07-05.md");

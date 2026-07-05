@@ -2681,7 +2681,7 @@ function compareReviewedSessionMemoryCaptureCandidates(
 function collectCurrentStateSignals(values: string[]): string[] {
   const signals = new Set<string>();
   for (const value of values) {
-    const normalized = value.replace(/\s+/g, " ");
+    const normalized = stripLcmExpansionDetails(value).replace(/\s+/g, " ");
     if (!includesAny(normalized.toLowerCase(), ["commit", "提交", "写入", "落盘", "已抓取", "summary", "transcript"])) {
       continue;
     }
@@ -2695,6 +2695,10 @@ function collectCurrentStateSignals(values: string[]): string[] {
   return [...signals].sort();
 }
 
+function stripLcmExpansionDetails(value: string): string {
+  return value.replace(/(?:\n|\s)Expand for details about:.*$/s, "").trim();
+}
+
 function collectCurrentStateProbe(items: Array<{ content: string; createdAt: string }>): SessionMemoryCurrentStateProbe {
   const latestCompletedCandidates: SessionMemoryCurrentStateProbeCandidate[] = [];
   const nextActionCandidates: SessionMemoryCurrentStateProbeCandidate[] = [];
@@ -2705,7 +2709,7 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
     .sort((left, right) => compareTimestampDesc(left.createdAt, right.createdAt));
 
   for (const item of sortedItems) {
-    const compactContent = item.content.replace(/\s+/g, " ").trim();
+    const compactContent = stripLcmExpansionDetails(item.content).replace(/\s+/g, " ").trim();
     if (!compactContent) {
       continue;
     }
@@ -3001,6 +3005,17 @@ function looksLikeSessionMemoryToolingMeta(value: string): boolean {
     return false;
   }
   return includesAny(normalized, [
+    "dry_run_report",
+    "vitest",
+    "focused tests",
+    "focused vitest",
+    "git diff --check",
+    "review buckets",
+    "review bucket",
+    "审查",
+    "读取",
+    "查看",
+    "测试",
     "报告层",
     "不碰 db",
     "自动写入",
