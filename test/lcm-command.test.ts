@@ -3825,6 +3825,84 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("filters provenance evidence noise and classifies correction and memory boundaries", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-boundary-noise.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-boundary-noise";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-boundary-noise",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 244,
+        role: "assistant",
+        content:
+          "对，先空着更稳。我已经把之前那版“可升级为 30s / 3min 结论”的口径降回去了。改动：Friday-memory/work/steam-indie-category-research/slay-the-spire/gameplay-expectation-analysis-2026-07-08.md 和 self-improving/domains/steam-indie-research.md。已提交并推送：`e88a5e8 Downgrade Slay the Spire timing evidence`。",
+        tokenCount: 72,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 322,
+        role: "assistant",
+        content:
+          "查完了。结论：session-memory 真实 DB 是健康的，但当前 7 月 8 日会话没有接入/写入 session-memory。active-memory 在后台收集；session-memory 仍是 reviewed/carry-forward/受控写入路径。已提交推送：`567c661 Record LCM schema keys for session memory checks`。",
+        tokenCount: 70,
+      },
+    ]);
+    fixture.db
+      .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
+      .run("2026-07-08 13:49:38", conversation.conversationId, 244);
+    fixture.db
+      .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
+      .run("2026-07-08 13:56:20", conversation.conversationId, 322);
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_gameplay_artifacts",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "User approved read-only Chrome bilibili.com cookie access. Created: Friday-memory/work/steam-indie-category-research/slay-the-spire/gameplay-subtitles-2026-07-08/{README.md, BV1nW411Y75v-p1-ai-zh.subtitle.json, BV1nW411Y75v-p1-ai-zh.transcript.md}. Large cleanup touched memory/, memory/.dreams/events.jsonl, memory/.dreams/{daily-ingestion.json,phase-signals.json}, memory/2026-04-27-lcm-summaries.md, memory/2026-04-29-lcm-summaries.md.",
+      tokenCount: 94,
+      latestAt: new Date("2026-07-08T13:42:00.000Z"),
+    });
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-boundary-noise",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Candidate 1 - system_boundary");
+    expect(result.text).toContain("Candidate 2 - correction");
+    expect(result.text).toContain("promotable: message `#322`");
+    expect(result.text).toContain("promotable: message `#244`");
+    expect(result.text).toContain("newest_evidence: Friday-memory/work/steam-indie-category-research/slay-the-spire/gameplay-expectation-analysis-2026-07-08.md");
+    expect(result.text).toContain("newest_evidence: self-improving/domains/steam-indie-research.md");
+    expect(result.text).not.toContain("newest_evidence: memory/");
+    expect(result.text).not.toContain("newest_evidence: memory/.dreams");
+    expect(result.text).not.toContain("newest_evidence: memory/2026-04-27-lcm-summaries.md");
+    expect(result.text).not.toContain("newest_evidence: memory/2026-04-29-lcm-summaries.md");
+    expect(result.text).not.toContain("Candidate 1 - workline_shift");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("rotates the current session and replaces the latest rotate backup", async () => {
     const transcriptPath = join(tmpdir(), `lossless-claw-rotate-${Date.now()}.jsonl`);
     writeFileSync(transcriptPath, "{\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"existing\"}]}}\n");

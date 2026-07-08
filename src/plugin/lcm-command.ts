@@ -137,7 +137,15 @@ type SessionMemoryCaptureCandidatesCommand = {
 };
 
 type SessionMemoryCaptureCandidate = {
-  kind: "workline_shift" | "constraint_boundary" | "decision" | "next_action" | "verified_result";
+  kind:
+    | "workline_shift"
+    | "constraint_boundary"
+    | "decision"
+    | "next_action"
+    | "verified_result"
+    | "completed_state"
+    | "correction"
+    | "system_boundary";
   source: "user_decision" | "friday_review" | "command_result" | "lcm_summary";
   sourceKind: "message" | "summary";
   sourceRef: string;
@@ -2524,6 +2532,23 @@ function looksLikeProcessContext(value: string): boolean {
   );
 }
 
+function looksLikeCorrectionOrDowngrade(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["纠正", "降回", "降级", "不要强行", "不能把", "不能升级", "先空着", "继续空着", "不再当", "不再作为"]) ||
+    (includesAny(normalized, ["30s", "30 秒", "30秒", "3min", "3 分钟", "3分钟"]) &&
+      includesAny(normalized, ["未确认", "不确认", "unsupported", "unconfirmed", "blank", "空着"]))
+  );
+}
+
+function looksLikeSystemBoundaryCheck(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["session-memory", "session memory", "active-memory", "active memory"]) &&
+    includesAny(normalized, ["db", "数据库", "写入", "没写入", "没有写入", "没有接入", "边界", "真实状态", "健康", "integrity_check=ok"])
+  );
+}
+
 function looksLikeLocalFlowApproval(value: string): boolean {
   const compact = value
     .toLowerCase()
@@ -2550,7 +2575,9 @@ function reviewSessionMemoryCaptureCandidates(
   const strongestByClaim = new Map<string, SessionMemoryCaptureCandidate>();
   const maxGateOrdinalByGate = new Map<string, number>();
   const latestSteamPhaseRank = Math.max(0, ...probe.latestCompleted.map((signal) => getSteamScreeningPhaseRank(signal)));
-  const completedCandidates = candidates.filter((candidate) => candidate.kind === "verified_result");
+  const completedCandidates = candidates.filter((candidate) =>
+    candidate.kind === "verified_result" || candidate.kind === "completed_state"
+  );
 
   for (const candidate of candidates) {
     const claimKey = normalizeSessionMemoryCandidateClaim(candidate.claim);
@@ -2689,10 +2716,33 @@ function collectCurrentStateSignals(values: string[]): string[] {
       signals.add(match[0]!);
     }
     for (const match of normalized.matchAll(/\b(?:Friday-memory|memory|self-improving)\/[^\s`，。)）]+/g)) {
-      signals.add(match[0]!);
+      const pathSignal = normalizeCurrentStatePathSignal(match[0]!);
+      if (pathSignal && isUsefulCurrentStatePathSignal(pathSignal)) {
+        signals.add(pathSignal);
+      }
     }
   }
   return [...signals].sort();
+}
+
+function normalizeCurrentStatePathSignal(value: string): string {
+  return value.replace(/[,.，。;；:：]+$/g, "");
+}
+
+function isUsefulCurrentStatePathSignal(value: string): boolean {
+  if (value.startsWith("memory/")) {
+    return false;
+  }
+  if (value.includes("/.dreams/") || value.includes(".dreams/")) {
+    return false;
+  }
+  if (/(?:^|\/)[0-9]{4}-[0-9]{2}-[0-9]{2}-lcm-summaries\.md$/i.test(value)) {
+    return false;
+  }
+  if (value === "self-improving/memory.md" || value === "self-improving/memory.md内容") {
+    return false;
+  }
+  return true;
 }
 
 function stripLcmExpansionDetails(value: string): string {
@@ -2828,6 +2878,12 @@ function scoreCurrentStateCompleted(value: string): number {
   }
   if (includesAny(normalized, ["steam-review-keyword-analysis", "review keyword analysis", "评论关键词", "review keyword"])) {
     score += 80;
+  }
+  if (
+    (looksLikeCorrectionOrDowngrade(value) || looksLikeSystemBoundaryCheck(value)) &&
+    includesAny(normalized, ["查完", "结论", "改动", "已提交", "提交推送", "提交并推送", "已推送", "pushed"])
+  ) {
+    score += 120;
   }
   if (includesAny(normalized, ["files: modified", "files:"])) {
     score -= 20;
@@ -3184,6 +3240,42 @@ function classifySessionMemoryCaptureCandidate(params: {
     (params.sourceKind === "summary" &&
       includesAny(normalized, ["user ", "user confirmed", "user directed", "user requested", "用户", "头儿"]));
 
+  if (params.role === "assistant" || params.sourceKind === "summary") {
+    if (looksLikeCorrectionOrDowngrade(content)) {
+      return {
+        kind: "correction",
+        source: params.sourceKind === "summary" ? "lcm_summary" : "friday_review",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        evidenceSignals,
+        why: "Content records a correction or downgrade of an earlier claim.",
+        confidence: "medium",
+        riskIfWrong: "A corrected conclusion may be re-promoted later as if it were still valid.",
+        suggestedDestination: "Friday review",
+      };
+    }
+
+    if (looksLikeSystemBoundaryCheck(content)) {
+      return {
+        kind: "system_boundary",
+        source: params.sourceKind === "summary" ? "lcm_summary" : "friday_review",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        evidenceSignals,
+        why: "Content records a checked runtime or memory-system boundary.",
+        confidence: "medium",
+        riskIfWrong: "A runtime boundary may be misstated in later handoffs.",
+        suggestedDestination: "Friday review",
+      };
+    }
+  }
+
   if (looksLikeProcessContext(content)) {
     return {
       kind: "workline_shift",
@@ -3292,7 +3384,7 @@ function classifySessionMemoryCaptureCandidate(params: {
     ])
   ) {
     return {
-      kind: "verified_result",
+      kind: "completed_state",
       source: "friday_review",
       sourceKind: params.sourceKind,
       sourceRef: params.sourceRef,
@@ -3300,7 +3392,7 @@ function classifySessionMemoryCaptureCandidate(params: {
       createdAt: params.createdAt,
       claim,
       evidenceSignals,
-      why: "Assistant reports a concrete verified result or commit that may need review.",
+      why: "Assistant reports a concrete completed state or commit that may need review.",
       confidence: "medium",
       riskIfWrong: "An unverified status claim may be preserved as fact.",
       suggestedDestination: "Friday review",
@@ -3314,8 +3406,11 @@ function getSessionMemoryCaptureCandidateRank(candidate: SessionMemoryCaptureCan
   const kindRank: Record<SessionMemoryCaptureCandidate["kind"], number> = {
     decision: 500,
     constraint_boundary: 480,
+    system_boundary: 470,
     workline_shift: 460,
+    correction: 455,
     next_action: 430,
+    completed_state: 120,
     verified_result: 120,
   };
   const sourceRank: Record<SessionMemoryCaptureCandidate["source"], number> = {
