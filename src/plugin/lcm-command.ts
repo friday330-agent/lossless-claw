@@ -166,6 +166,7 @@ type SessionMemoryCaptureCandidate = {
 type SessionMemoryCaptureReviewBucket =
   | "promotable"
   | "open_question"
+  | "resolved_question"
   | "evidence_only"
   | "duplicate"
   | "local_flow"
@@ -2694,6 +2695,17 @@ function reviewSessionMemoryCaptureCandidates(
       };
     }
 
+    const resolvingCompleted = candidate.kind === "open_question"
+      ? completedCandidates.find((completed) => completed !== candidate && currentStateCompletionResolvesQuestion(completed, candidate))
+      : undefined;
+    if (resolvingCompleted) {
+      return {
+        ...candidate,
+        reviewBucket: "resolved_question",
+        reviewNote: `Open question resolved by later completed_state ${formatSessionMemoryCaptureSource(resolvingCompleted)}.`,
+      };
+    }
+
     if (candidate.kind === "open_question") {
       return {
         ...candidate,
@@ -3077,6 +3089,17 @@ function currentStateCompletionSupersedes(
   );
 }
 
+function currentStateCompletionResolvesQuestion(
+  completed: SessionMemoryCaptureCandidate,
+  question: SessionMemoryCaptureCandidate,
+): boolean {
+  return (
+    isSameTimeOrLaterCandidate(completed, question) &&
+    looksLikeFinalWorklineCompletion(completed.claim) &&
+    sharesResolvedQuestionAnchor(completed.claim, question.claim)
+  );
+}
+
 function currentStateCompletionTextSupersedes(completedValue: string, candidateValue: string): boolean {
   if (looksLikeFutureSlayDeepDiveNextAction(candidateValue)) {
     return false;
@@ -3087,6 +3110,22 @@ function currentStateCompletionTextSupersedes(completedValue: string, candidateV
     sharesCurrentWorklineAnchor(completedValue, candidateValue) &&
     completedWorklinePhaseRank(completedValue) >= candidateWorklinePhaseRank(candidateValue)
   );
+}
+
+function sharesResolvedQuestionAnchor(completedValue: string, questionValue: string): boolean {
+  const completed = completedValue.toLowerCase();
+  const question = questionValue.toLowerCase();
+  const anchorGroups = [
+    ["默认索敌", "默认攻击", "默认原则", "默认"],
+    ["目标", "双目标", "多目标", "打两个", "另一发", "补位", "补"],
+    ["条件", "满足", "条件命中"],
+    ["号位", "前排", "后排", "2号位", "3号位", "6号位", "456"],
+    ["代号2-godot", "code name 2", "职业大分类"],
+  ];
+  const sharedGroups = anchorGroups.filter(
+    (group) => group.some((anchor) => completed.includes(anchor)) && group.some((anchor) => question.includes(anchor)),
+  );
+  return sharedGroups.length >= 2;
 }
 
 function looksLikeFinalWorklineCompletion(value: string): boolean {
@@ -3783,7 +3822,7 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
         : [buildStatLine("latest_completed", "missing")]),
       ...(currentStateProbe.nextAction.length > 0
         ? currentStateProbe.nextAction.map((signal) => buildStatLine("next_action", signal))
-        : [buildStatLine("next_action", "missing")]),
+        : [buildStatLine("next_action", currentStateProbe.latestCompleted.length > 0 ? "completed" : "missing")]),
       ...(currentStateProbe.newestEvidence.length > 0
         ? currentStateProbe.newestEvidence.slice(0, 8).map((signal) => buildStatLine("newest_evidence", signal))
         : [buildStatLine("newest_evidence", "missing")]),
@@ -3796,6 +3835,9 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
       ...reviewedCandidates
         .filter((candidate) => candidate.reviewBucket === "open_question")
         .map((candidate) => buildStatLine("open_question", formatSessionMemoryCaptureSource(candidate))),
+      ...reviewedCandidates
+        .filter((candidate) => candidate.reviewBucket === "resolved_question")
+        .map((candidate) => buildStatLine("resolved_question", formatSessionMemoryCaptureSource(candidate))),
       ...reviewedCandidates
         .filter((candidate) => candidate.reviewBucket === "evidence_only")
         .map((candidate) => buildStatLine("evidence_only", formatSessionMemoryCaptureSource(candidate))),

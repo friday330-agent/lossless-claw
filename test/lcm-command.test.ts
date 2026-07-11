@@ -3954,6 +3954,81 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("marks open design questions resolved after a later committed completed state", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-resolved-question.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-resolved-question";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-resolved-question",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 8,
+        role: "user",
+        content:
+          "这里要注意，当我方后排攻击时候也是走默认原则，但是6号位攻击的最近不是敌方6号位，而是3号位。远程/法系双目标有设定条件时，满足目标不足怎么办?",
+        tokenCount: 42,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 12,
+        role: "user",
+        content:
+          "如果技能描述打两个，只有1个满足条件，另一个应该回落默认原则。6号位法师命中3号位时应补2号位。那么2号位有敌人且456号位有敌人，其中2号位满足条件，另一发集中哪个?",
+        tokenCount: 54,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 14,
+        role: "user",
+        content: "是的没错，所以默认攻击原则落盘吧",
+        tokenCount: 12,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 37,
+        role: "assistant",
+        content:
+          "已落盘并推送。写入位置：Friday-memory/work/代号2-godot/代号2-godot - 职业大分类与编成边界.md:66。这次新增默认索敌原则：6 -> 条件命中 3，补 2；2 -> 条件命中 2，补 5。提交：`ef7edf4 Record code name 2 default targeting rules`，已 push。",
+        tokenCount: 62,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-resolved-question",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Current State Probe");
+    expect(result.text).toContain("latest_completed:");
+    expect(result.text).toContain("ef7edf4");
+    expect(result.text).toContain("next_action: completed");
+    expect(result.text).toContain("resolved_question: message `#8`");
+    expect(result.text).toContain("resolved_question: message `#12`");
+    expect(result.text).not.toContain("open_question: message `#8`");
+    expect(result.text).not.toContain("open_question: message `#12`");
+    expect(result.text).toContain("resolved by later completed_state");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("filters provenance evidence noise and classifies correction and memory boundaries", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
