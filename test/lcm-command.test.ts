@@ -3372,6 +3372,135 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("classifies design questions and task requests conservatively while keeping the latest project state", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-design-discussion.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-design-discussion";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-design-discussion",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 65,
+        role: "user",
+        content:
+          "圣兽之王确实没有冷却,但是冷却这个是否有必要?还有就是ap/pp其实是为了控制战斗时长的,这个点上我们是否要吸收?",
+        tokenCount: 36,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 67,
+        role: "user",
+        content:
+          "面对小怪/boss可以增加比如 越少的轮数会带来更好的奖励这种机制,但是也会带来一个问题,强着越强 弱者更弱,这种情况怎么处理?",
+        tokenCount: 42,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 69,
+        role: "user",
+        content:
+          "我觉得我们可以分析下背包乱斗,杀戮尖塔等等这些他们是如何做到策略深度的,是数量 机制 类型?",
+        tokenCount: 32,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 105,
+        role: "user",
+        content:
+          "我们加一个 有开场技能和收场技能 应该是每个英雄不同的,但都只触发一次. 然后再拆牌库污染在杀戮尖塔里具体怎么制造取舍,逐项翻译成我们的小队系统：行动力、反应力、技能槽、职责冲突、敌阵诱导浪费",
+        tokenCount: 62,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 119,
+        role: "user",
+        content: "可以这么考虑 你总结下目前讨论的.并且给我份讨论的的canvas架构逻辑图",
+        tokenCount: 24,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 134,
+        role: "assistant",
+        content:
+          "已总结，并做了一份 HTML/SVG 逻辑图：Friday-memory/work/game-design-current-architecture-2026-07-11.html。提交并推送：`e2d1b54 Add code name 2 Godot design notes`。",
+        tokenCount: 42,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 190,
+        role: "assistant",
+        content:
+          "已经把 steam-indie-category-research 和 unicorn-overlord 正式归进 Friday-memory/work/代号2-godot 项目里，并更新资料索引和 canvas。已提交并推送：`f6c7321 Move source materials into code name 2 project`。",
+        tokenCount: 48,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 210,
+        role: "assistant",
+        content:
+          "修好了代号2-godot 的 Obsidian Canvas：Friday-memory/work/代号2-godot/代号2-godot.canvas 的 file 节点改成项目内相对路径，补了行动力/反应力、开场/收场、多次交锋、敌人压力等节点，清掉孤儿边。验证：23 个节点、22 条边，没有缺失文件。已提交并推送：`b313653 Fix code name 2 canvas links`。",
+        tokenCount: 72,
+      },
+    ]);
+    for (const [seq, createdAt] of [
+      [65, "2026-07-11 10:07:10"],
+      [67, "2026-07-11 10:09:59"],
+      [69, "2026-07-11 10:35:47"],
+      [105, "2026-07-11 12:06:21"],
+      [119, "2026-07-11 14:06:10"],
+      [134, "2026-07-11 14:06:10"],
+      [190, "2026-07-11 22:13:48"],
+      [210, "2026-07-11 22:25:00"],
+    ] as Array<[number, string]>) {
+      fixture.db
+        .prepare(`UPDATE messages SET created_at = ? WHERE conversation_id = ? AND seq = ?`)
+        .run(createdAt, conversation.conversationId, seq);
+    }
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-design-discussion",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Current State Probe");
+    expect(result.text).toContain("status: detected");
+    expect(result.text).toContain("latest_completed:");
+    expect(result.text).toContain("b313653");
+    expect(result.text).toContain("newest_evidence: b313653");
+    expect(result.text).toContain("newest_evidence: Friday-memory/work/代号2-godot/代号2-godot.canvas");
+    expect(result.text).not.toContain("latest_completed: 已总结，并做了一份 HTML/SVG");
+    expect(result.text).not.toContain("newest_evidence: e2d1b54");
+    expect(result.text).not.toContain("missed_current_state: b313653");
+    expect(result.text).toContain("Candidate 1 - design_focus");
+    expect(result.text).toContain("Candidate 2 - research_direction");
+    expect(result.text).toContain("open_question: message `#65`");
+    expect(result.text).toContain("open_question: message `#67`");
+    expect(result.text).toContain("evidence_only: message `#119`");
+    expect(result.text).not.toContain("- decision");
+    expect(result.text).not.toContain("why candidate: User appears to make or approve a decision.");
+    expect(result.text).not.toContain("promotable: message `#119`");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("buckets duplicate stale and missed-current-state session-memory capture candidates", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);

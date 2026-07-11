@@ -141,6 +141,10 @@ type SessionMemoryCaptureCandidate = {
     | "workline_shift"
     | "constraint_boundary"
     | "decision"
+    | "design_focus"
+    | "research_direction"
+    | "open_question"
+    | "task_request"
     | "next_action"
     | "verified_result"
     | "completed_state"
@@ -159,7 +163,13 @@ type SessionMemoryCaptureCandidate = {
   suggestedDestination: string;
 };
 
-type SessionMemoryCaptureReviewBucket = "promotable" | "evidence_only" | "duplicate" | "local_flow" | "stale_superseded";
+type SessionMemoryCaptureReviewBucket =
+  | "promotable"
+  | "open_question"
+  | "evidence_only"
+  | "duplicate"
+  | "local_flow"
+  | "stale_superseded";
 
 type ReviewedSessionMemoryCaptureCandidate = SessionMemoryCaptureCandidate & {
   reviewBucket: SessionMemoryCaptureReviewBucket;
@@ -2560,7 +2570,39 @@ function looksLikeLocalFlowApproval(value: string): boolean {
   }
   return (
     /^(ok|okay|好|好的|可以|可以吧|继续|继续吧|可以继续|可以继续吧|行|行吧|嗯|收到|go)$/.test(compact) ||
-    /^(ok|okay|好|好的|可以|行|行吧)(先)?(开始|开始修|修|处理|继续)(吧)?$/.test(compact)
+    /^(ok|okay|好|好的|可以|行|行吧)(先)?(开始|开始修|修|处理|继续|继续修)(他|它)?(吧)?$/.test(compact)
+  );
+}
+
+function looksLikeTaskRequest(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["总结", "canvas", "架构图", "检查", "查下", "看下", "修一下", "继续修", "帮我", "给我"]) &&
+    includesAny(normalized, ["你", "我", "给", "帮", "检查", "修", "总结", "canvas", "架构图"])
+  );
+}
+
+function looksLikeOpenQuestion(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["是否", "能否", "能不能", "要不要", "怎么处理", "怎么办", "如何处理", "有没有必要", "是否有必要", "?"]) ||
+    (includesAny(normalized, ["吗", "么"]) && includesAny(normalized, ["必要", "吸收", "处理", "解决", "分析"]))
+  );
+}
+
+function looksLikeResearchDirection(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["分析下", "分析一下", "拆解", "拆一版", "研究", "你先做", "先做", "先跑"]) &&
+    includesAny(normalized, ["杀戮尖塔", "背包乱斗", "策略深度", "深度", "牌库", "机制", "类型", "steam", "评论关键词"])
+  );
+}
+
+function looksLikeDesignFocus(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["情绪焦点", "牌库污染", "开场技能", "收场技能", "行动力", "反应力", "技能槽", "职责冲突"]) &&
+    includesAny(normalized, ["翻译成", "逐项", "拆", "加一个", "应该", "重点", "焦点"])
   );
 }
 
@@ -2599,6 +2641,14 @@ function reviewSessionMemoryCaptureCandidates(
         ...candidate,
         reviewBucket: "local_flow",
         reviewNote: "Short local approval/continuation signal; not durable memory.",
+      };
+    }
+
+    if (candidate.kind === "task_request") {
+      return {
+        ...candidate,
+        reviewBucket: "evidence_only",
+        reviewNote: "Task request is local flow unless a completed result later confirms durable state.",
       };
     }
 
@@ -2641,6 +2691,14 @@ function reviewSessionMemoryCaptureCandidates(
         ...candidate,
         reviewBucket: "stale_superseded",
         reviewNote: "Older next-step/progress claim is superseded by a later completed result in the same workline.",
+      };
+    }
+
+    if (candidate.kind === "open_question") {
+      return {
+        ...candidate,
+        reviewBucket: "open_question",
+        reviewNote: "Open question; keep visible for review but do not treat as a decision.",
       };
     }
 
@@ -2693,6 +2751,7 @@ function compareReviewedSessionMemoryCaptureCandidates(
 ): number {
   const bucketRank: Record<SessionMemoryCaptureReviewBucket, number> = {
     promotable: 400,
+    open_question: 350,
     evidence_only: 300,
     duplicate: 200,
     local_flow: 150,
@@ -2873,6 +2932,12 @@ function scoreCurrentStateCompleted(value: string): number {
   if (includesAny(normalized, ["刷宝", "steam-indie-category-research", "独游", "游戏深拆", "五条精选", "候选"])) {
     score += 40;
   }
+  if (includesAny(normalized, ["代号2-godot", "code name 2", "canvas", "obsidian canvas", "架构图", "项目里", "项目内"])) {
+    score += 80;
+  }
+  if (includesAny(normalized, ["验证", "没有缺失文件", "孤儿边", "节点", "边"])) {
+    score += 40;
+  }
   if (includesAny(normalized, ["深拆报告", "deep-dive report", "deep-dive-report", "detailed report", "证据表", "evidence table"])) {
     score += 60;
   }
@@ -3027,8 +3092,19 @@ function currentStateCompletionTextSupersedes(completedValue: string, candidateV
 function looksLikeFinalWorklineCompletion(value: string): boolean {
   const normalized = value.toLowerCase();
   return (
-    includesAny(normalized, ["完成", "completed", "已按", "commit", "提交", "pushed", "推送"]) &&
-    includesAny(normalized, ["报告", "report", "deep-dive", "deep dive", "证据表", "evidence table"])
+    includesAny(normalized, ["完成", "completed", "已按", "commit", "提交", "pushed", "推送", "修好了", "归进"]) &&
+    includesAny(normalized, [
+      "报告",
+      "report",
+      "deep-dive",
+      "deep dive",
+      "证据表",
+      "evidence table",
+      "代号2-godot",
+      "canvas",
+      "架构图",
+      "项目",
+    ])
   );
 }
 
@@ -3049,6 +3125,13 @@ function looksLikeSupersededProgressOrNextStep(value: string): boolean {
     "subtitle",
     "已建目录",
     "选下一个游戏",
+    "已总结",
+    "架构图",
+    "逻辑图",
+    "canvas",
+    "归进",
+    "代号2-godot",
+    "项目",
   ]);
 }
 
@@ -3058,6 +3141,7 @@ function sharesCurrentWorklineAnchor(leftValue: string, rightValue: string): boo
   const anchorGroups = [
     ["slay-the-spire", "slay the spire", "杀戮尖塔"],
     ["steam-indie-category-research", "steam deep dive", "steam 深拆"],
+    ["代号2-godot", "code name 2", "code name 2 godot"],
   ];
   if (anchorGroups.some((group) => group.some((anchor) => left.includes(anchor)) && group.some((anchor) => right.includes(anchor)))) {
     return true;
@@ -3069,6 +3153,8 @@ function sharesCurrentWorklineAnchor(leftValue: string, rightValue: string): boo
     "steam-indie-category-research",
     "steam deep dive",
     "steam 深拆",
+    "代号2-godot",
+    "code name 2",
   ];
   return anchors.some((anchor) => left.includes(anchor) && right.includes(anchor));
 }
@@ -3107,8 +3193,17 @@ function candidateWorklinePhaseRank(value: string): number {
   if (includesAny(normalized, ["steam-review-keyword-analysis", "review keyword", "评论关键词", "1e56c29"])) {
     return 3;
   }
+  if (includesAny(normalized, ["b313653", "fix code name 2 canvas links", "孤儿边", "没有缺失文件", "相对路径"])) {
+    return 3;
+  }
+  if (includesAny(normalized, ["f6c7321", "move source materials", "正式归进", "steam-indie-category-research 和 unicorn-overlord"])) {
+    return 2;
+  }
   if (includesAny(normalized, ["deep-dive report", "deep-dive-report", "深拆报告", "第一版深拆", "1b29114"])) {
     return 2;
+  }
+  if (includesAny(normalized, ["e2d1b54", "add code name 2 godot design notes", "html/svg", "逻辑图"])) {
+    return 1;
   }
   if (includesAny(normalized, ["subtitle sources", "抓完字幕", "字幕证据表", "497e105"])) {
     return 1;
@@ -3294,12 +3389,9 @@ function classifySessionMemoryCaptureCandidate(params: {
   }
 
   if (userAuthoredSignal) {
-    const looksLikeWorklineShift =
-      includesAny(normalized, ["接下来", "之后", "继续", "切换", "转到", "开始", "新方向", "主线", "工作线", "研究"]) &&
-      includesAny(normalized, ["session memory", "session-memory", "独立游戏", "steam", "品类", "方向", "工作", "研究"]);
-    if (looksLikeWorklineShift) {
+    if (looksLikeLocalFlowApproval(content)) {
       return {
-        kind: "workline_shift",
+        kind: "task_request",
         source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
         sourceKind: params.sourceKind,
         sourceRef: params.sourceRef,
@@ -3307,10 +3399,10 @@ function classifySessionMemoryCaptureCandidate(params: {
         createdAt: params.createdAt,
         claim,
         evidenceSignals,
-        why: "User appears to move or restate the current workline.",
-        confidence: "high",
-        riskIfWrong: "The active seed may stay on the previous workline and miss the new objective.",
-        suggestedDestination: "Friday session-memory candidate",
+        why: "User gives a short local approval or continuation cue.",
+        confidence: "medium",
+        riskIfWrong: "A local approval may be mistaken for a durable decision.",
+        suggestedDestination: "Evidence only; local flow.",
       };
     }
 
@@ -3331,7 +3423,95 @@ function classifySessionMemoryCaptureCandidate(params: {
       };
     }
 
-    if (includesAny(normalized, ["决定", "确认", "同意", "批准", "可以", "修一下", "落盘", "记下"])) {
+    if (looksLikeTaskRequest(content)) {
+      return {
+        kind: "task_request",
+        source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        evidenceSignals,
+        why: "User asks for a local action or artifact, not a durable decision.",
+        confidence: "medium",
+        riskIfWrong: "A task request may be mistaken for a lasting project decision.",
+        suggestedDestination: "Evidence only; track result separately if completed.",
+      };
+    }
+
+    if (looksLikeDesignFocus(content)) {
+      return {
+        kind: "design_focus",
+        source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        evidenceSignals,
+        why: "User states or refines the current design focus.",
+        confidence: "high",
+        riskIfWrong: "The next design handoff may emphasize the wrong system pressure.",
+        suggestedDestination: "Friday session-memory candidate",
+      };
+    }
+
+    if (looksLikeResearchDirection(content)) {
+      return {
+        kind: "research_direction",
+        source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        evidenceSignals,
+        why: "User points the discussion toward an analysis or research direction.",
+        confidence: "medium",
+        riskIfWrong: "A research direction may be preserved as a settled design decision.",
+        suggestedDestination: "Friday review",
+      };
+    }
+
+    if (looksLikeOpenQuestion(content)) {
+      return {
+        kind: "open_question",
+        source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        evidenceSignals,
+        why: "User raises an unresolved question rather than making a decision.",
+        confidence: "medium",
+        riskIfWrong: "An open design question may be incorrectly promoted as a decision.",
+        suggestedDestination: "Friday review as unresolved question",
+      };
+    }
+
+    const looksLikeWorklineShift =
+      includesAny(normalized, ["接下来", "之后", "继续", "切换", "转到", "开始", "新方向", "主线", "工作线", "研究"]) &&
+      includesAny(normalized, ["session memory", "session-memory", "独立游戏", "steam", "品类", "方向", "工作", "研究"]);
+    if (looksLikeWorklineShift) {
+      return {
+        kind: "workline_shift",
+        source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        evidenceSignals,
+        why: "User appears to move or restate the current workline.",
+        confidence: "high",
+        riskIfWrong: "The active seed may stay on the previous workline and miss the new objective.",
+        suggestedDestination: "Friday session-memory candidate",
+      };
+    }
+
+    if (includesAny(normalized, ["决定", "确认", "同意", "批准", "落盘", "记下", "当前采用", "先按这个"])) {
       return {
         kind: "decision",
         source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
@@ -3348,7 +3528,7 @@ function classifySessionMemoryCaptureCandidate(params: {
       };
     }
 
-    if (includesAny(normalized, ["下一步", "先做", "继续做", "开始做"])) {
+    if (includesAny(normalized, ["下一步", "先做", "先跑", "继续做", "开始做", "你先做"])) {
       return {
         kind: "next_action",
         source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
@@ -3405,11 +3585,15 @@ function classifySessionMemoryCaptureCandidate(params: {
 function getSessionMemoryCaptureCandidateRank(candidate: SessionMemoryCaptureCandidate): number {
   const kindRank: Record<SessionMemoryCaptureCandidate["kind"], number> = {
     decision: 500,
+    design_focus: 490,
     constraint_boundary: 480,
     system_boundary: 470,
     workline_shift: 460,
     correction: 455,
+    research_direction: 440,
     next_action: 430,
+    open_question: 260,
+    task_request: 180,
     completed_state: 120,
     verified_result: 120,
   };
@@ -3610,6 +3794,9 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
         .filter((candidate) => candidate.reviewBucket === "promotable")
         .map((candidate) => buildStatLine("promotable", formatSessionMemoryCaptureSource(candidate))),
       ...reviewedCandidates
+        .filter((candidate) => candidate.reviewBucket === "open_question")
+        .map((candidate) => buildStatLine("open_question", formatSessionMemoryCaptureSource(candidate))),
+      ...reviewedCandidates
         .filter((candidate) => candidate.reviewBucket === "evidence_only")
         .map((candidate) => buildStatLine("evidence_only", formatSessionMemoryCaptureSource(candidate))),
       ...reviewedCandidates
@@ -3639,7 +3826,10 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
         buildStatLine("confidence", candidate.confidence),
         buildStatLine("risk if wrong", candidate.riskIfWrong),
         buildStatLine("suggested destination", candidate.suggestedDestination),
-        buildStatLine("review bucket", candidate.reviewBucket === "stale_superseded" ? "stale/superseded" : candidate.reviewBucket),
+        buildStatLine(
+          "review bucket",
+          candidate.reviewBucket === "stale_superseded" ? "stale/superseded" : candidate.reviewBucket,
+        ),
         buildStatLine("review note", candidate.reviewNote),
         buildStatLine("review result", "candidate_only"),
       ]),
