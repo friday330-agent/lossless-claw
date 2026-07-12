@@ -186,6 +186,7 @@ type SessionMemoryCurrentStateProbe = {
 type SessionMemoryCurrentStateProbeCandidate = {
   text: string;
   createdAt: string;
+  sourceKind?: "message" | "summary";
   score: number;
 };
 
@@ -2820,7 +2821,7 @@ function stripLcmExpansionDetails(value: string): string {
   return value.replace(/(?:\n|\s)Expand for details about:.*$/s, "").trim();
 }
 
-function collectCurrentStateProbe(items: Array<{ content: string; createdAt: string }>): SessionMemoryCurrentStateProbe {
+function collectCurrentStateProbe(items: Array<{ content: string; createdAt: string; sourceKind?: "message" | "summary" }>): SessionMemoryCurrentStateProbe {
   const latestCompletedCandidates: SessionMemoryCurrentStateProbeCandidate[] = [];
   const nextActionCandidates: SessionMemoryCurrentStateProbeCandidate[] = [];
   const currentStateEvidenceTexts: string[] = [];
@@ -2843,6 +2844,7 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
       latestCompletedCandidates.push({
         text: compactContent,
         createdAt: item.createdAt,
+        sourceKind: item.sourceKind,
         score: completedScore,
       });
     }
@@ -2851,6 +2853,7 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
       nextActionCandidates.push({
         text: compactContent,
         createdAt: item.createdAt,
+        sourceKind: item.sourceKind,
         score: nextActionScore,
       });
     }
@@ -2886,7 +2889,8 @@ function filterSupersededCurrentStateProbeCandidates(
       !completedCandidates.some(
         (completed) =>
           completed !== candidate &&
-          compareTimestampDesc(completed.createdAt, candidate.createdAt) <= 0 &&
+          (compareTimestampDesc(completed.createdAt, candidate.createdAt) <= 0 ||
+            (candidate.sourceKind === "summary" && currentStateCompletionTextSupersedes(completed.text, candidate.text))) &&
           currentStateCompletionTextSupersedes(completed.text, candidate.text),
       ),
   );
@@ -3181,6 +3185,7 @@ function sharesCurrentWorklineAnchor(leftValue: string, rightValue: string): boo
     ["slay-the-spire", "slay the spire", "杀戮尖塔"],
     ["steam-indie-category-research", "steam deep dive", "steam 深拆"],
     ["代号2-godot", "code name 2", "code name 2 godot"],
+    ["卫兵", "游侠", "重盾兵", "后排法师", "高阶法师", "盗贼", "术士", "盾击", "2v2", "3v2"],
   ];
   if (anchorGroups.some((group) => group.some((anchor) => left.includes(anchor)) && group.some((anchor) => right.includes(anchor)))) {
     return true;
@@ -3734,8 +3739,8 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
     ...summaryRows.map((row) => row.content),
   ];
   const currentStateProbe = collectCurrentStateProbe([
-    ...rows.map((row) => ({ content: row.content, createdAt: row.created_at })),
-    ...summaryRows.map((row) => ({ content: row.content, createdAt: row.created_at })),
+    ...rows.map((row) => ({ content: row.content, createdAt: row.created_at, sourceKind: "message" as const })),
+    ...summaryRows.map((row) => ({ content: row.content, createdAt: row.created_at, sourceKind: "summary" as const })),
   ]);
   const messageCandidates = rows
     .slice()

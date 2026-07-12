@@ -4029,6 +4029,76 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("classifies the latest pushed design simulation as completed state over stale summaries", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-latest-design-complete.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-latest-design-complete";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-latest-design-complete",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 1115,
+        role: "assistant",
+        content:
+          "已按你这版改完并推送。提交：`8db5d5b Revise code name 2 thief and warlock cards`。盗贼改为 40% 闪避、致盲飞刀、匕首乱舞、背刺、割裂、闪避、闪避窃取、进场黑暗。术士旧的沉默/腐蚀草案已从当前卡里清掉。验证：目标 6 个文件 `diff --check` 通过，旧草案关键词扫描无命中，HEAD 已和 `origin/main` 同步。",
+        tokenCount: 84,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 1247,
+        role: "assistant",
+        content:
+          "已重做并推送。这次把 Friday-memory/work/代号2-godot/代号2-godot - 2v2战斗文字模拟 v0.1.md 顶部加了 `2026-07-13 重做版`，按今天的新职业卡重跑：卫兵 + 游侠 vs 精英重盾兵 + 高阶法师。验证：`git diff --check` 通过，Markdown code fence 成对。提交并推送：`e5dbaf2 Rerun code name 2 elite 2v2 simulation`。工作树里还有大量既有迁移/梦境噪音，我没碰。",
+        tokenCount: 96,
+      },
+    ]);
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_guard_choice",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "卫兵职业卡v0.1正式定义：单手武器+盾牌；盾击压制是直接归零还是挂 Debuff 仍是未解决设计点。下一步将技能队列补进数据结构，再决定是否扩3v2加入术士。Files: none",
+      tokenCount: 58,
+      latestAt: new Date("2026-07-12T14:23:23.000Z"),
+    });
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-latest-design-complete",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Current State Probe");
+    expect(result.text).toContain("latest_completed:");
+    expect(result.text).toContain("e5dbaf2");
+    expect(result.text).toContain("Candidate 1 - completed_state");
+    expect(result.text).toContain("source item: message `#1,247`");
+    expect(result.text).not.toContain("next_action: 卫兵职业卡v0.1正式定义");
+    expect(result.text).not.toContain("Candidate 1 - workline_shift");
+    expect(result.text).not.toContain("workline_shift: message `#1,247`");
+    expect(result.text).not.toContain("open_question: summary `sum_old_guard_choice`");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("filters provenance evidence noise and classifies correction and memory boundaries", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
