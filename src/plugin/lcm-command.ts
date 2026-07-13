@@ -2934,8 +2934,7 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
   });
   const filteredNextActionCandidates = filterSupersededCurrentStateProbeCandidates(
     nextActionCandidates.filter((candidate) =>
-      (primaryWorkline === null || candidate.workline === primaryWorkline || candidate.workline === "general") &&
-      !scopedCompletedCandidates.some((completed) => completed.text === candidate.text),
+      primaryWorkline === null || candidate.workline === primaryWorkline || candidate.workline === "general",
     ),
     scopedCompletedCandidates,
   );
@@ -2988,9 +2987,12 @@ function filterSupersededCurrentStateProbeCandidates(
       !completedCandidates.some(
         (completed) =>
           completed !== candidate &&
+          completed.text !== candidate.text &&
           currentStateProbeCandidateCanSupersede(completed, candidate) &&
           (compareTimestampDesc(completed.createdAt, candidate.createdAt) <= 0 ||
-            (candidate.sourceKind === "summary" && currentStateCompletionTextSupersedes(completed.text, candidate.text))) &&
+            (candidate.sourceKind === "summary" &&
+              completedWorklinePhaseRank(completed.text) > candidateWorklinePhaseRank(candidate.text) &&
+              currentStateCompletionTextSupersedes(completed.text, candidate.text))) &&
           currentStateCompletionTextSupersedes(completed.text, candidate.text),
       ),
   );
@@ -3168,7 +3170,11 @@ function looksLikeIncompleteOrBlockedProgress(value: string): boolean {
 
 function scoreCurrentStateNextAction(value: string): number {
   const normalized = value.toLowerCase();
-  if (looksLikeSessionMemoryToolingMeta(value)) {
+  if (
+    looksLikeSessionMemoryToolingMeta(value) ||
+    looksLikeLocalFlowApproval(value) ||
+    looksLikeIncompleteOrBlockedProgress(value)
+  ) {
     return 0;
   }
   let score = 0;
@@ -3453,7 +3459,12 @@ function candidateWorklinePhaseRank(value: string): number {
   if (includesAny(normalized, ["b313653", "fix code name 2 canvas links", "孤儿边", "没有缺失文件", "相对路径"])) {
     return 3;
   }
-  if (includesAny(normalized, ["b6a6926", "record code name 2 demo runtime scenes", "运行场景", "prebattlelineupscreen", "skillprogrammingscreen", "battlescreen", "战前阵容布局"])) {
+  if (
+    includesAny(normalized, ["b6a6926", "record code name 2 demo runtime scenes", "运行场景", "战前阵容布局"]) ||
+    (includesAny(normalized, ["prebattlelineupscreen", "战前阵容"]) &&
+      includesAny(normalized, ["skillprogrammingscreen", "技能编程"]) &&
+      includesAny(normalized, ["battlescreen", "战斗回放"]))
+  ) {
     return 6;
   }
   if (includesAny(normalized, ["1173b49", "record code name 2 default targeting principle", "默认索敌", "最近原则"])) {

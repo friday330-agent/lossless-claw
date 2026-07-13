@@ -4344,6 +4344,15 @@ describe("lcm command", () => {
       latestAt: new Date("2026-07-13T14:26:33.000Z"),
     });
     await fixture.summaryStore.insertSummary({
+      summaryId: "sum_older_battle_programming_canvas",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Canvas created: `代号2-godot - Demo v0.1 战斗逻辑与技能编程.canvas` — 29 nodes, 31 edges, JSON parse valid. Canvas maps data layer → skill programming layer → battle_core → event flow → battle_view, with battle main loop, active/reaction queues, target rules, condition families, unit token state layer, animation key set, Godot scene splits (BattleScreen, BoardGrid, UnitToken, TimelineLog, ProgrammingPanel etc.), and first-phase implementation order. Also updated `README.md`, `CURRENT.md`, `下一步.md`. Git commit `9a778cb`.\nFiles:\n- Created: `Friday-memory/work/代号2-godot/代号2-godot - Demo v0.1 战斗逻辑与技能编程.canvas`\n- Modified: `README.md`, `CURRENT.md`, `下一步.md`",
+      tokenCount: 150,
+      latestAt: new Date("2026-07-13T10:36:28.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
       summaryId: "sum_capture_diagnostic_after_runtime_live",
       conversationId: conversation.conversationId,
       kind: "leaf",
@@ -4401,6 +4410,8 @@ describe("lcm command", () => {
     expect(result.text).not.toMatch(/^  latest_completed: missing$/m);
     expect(result.text).toContain("latest_completed:");
     expect(result.text).toContain("b6a6926");
+    expect(result.text).not.toContain("latest_completed: Canvas created");
+    expect(result.text).not.toContain("next_action: 嗯 下一步优化吧");
     expect(result.text).toContain("newest_evidence: b6a6926");
     expect(result.text).toContain("newest_evidence: Friday-memory/work/代号2-godot/代号2-godot - Demo v0.1 战前阵容布局.canvas");
     expect(result.text).not.toContain("stale/superseded: summary `sum_runtime_scene_files_summary_live`");
