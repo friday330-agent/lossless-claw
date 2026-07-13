@@ -4275,6 +4275,15 @@ describe("lcm command", () => {
       latestAt: new Date("2026-07-13T14:26:33.000Z"),
     });
     await fixture.summaryStore.insertSummary({
+      summaryId: "sum_capture_diagnostic_after_runtime",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "用户确认当前主线：代号2 demo v0.1，三个运行场景（战前双方阵容→技能编程→战斗）已提交 b6a6926，下一步等头儿出UI草稿后整理Godot场景拆分和UI组件清单。当前 capture-candidates 仍有缺陷：latest_completed 正确但 next_action 混入旧内容，newest_evidence missing，missed_current_state 列出历史commit/文件。",
+      tokenCount: 82,
+      latestAt: new Date("2026-07-13T14:28:38.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
       summaryId: "sum_old_default_targeting_next_action",
       conversationId: conversation.conversationId,
       kind: "leaf",

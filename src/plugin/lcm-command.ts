@@ -2833,6 +2833,10 @@ function normalizeCurrentStatePathSignal(value: string): string {
 }
 
 function isUsefulCurrentStatePathSignal(value: string): boolean {
+  const rootMatches = value.match(/\b(?:Friday-memory|memory|self-improving)\//g) ?? [];
+  if (rootMatches.length !== 1 || /^(?:Friday-memory|memory|self-improving)\/$/.test(value)) {
+    return false;
+  }
   if (value.startsWith("memory/")) {
     return false;
   }
@@ -2965,11 +2969,19 @@ function filterSupersededCurrentStateProbeCandidates(
       !completedCandidates.some(
         (completed) =>
           completed !== candidate &&
+          currentStateProbeCandidateCanSupersede(completed, candidate) &&
           (compareTimestampDesc(completed.createdAt, candidate.createdAt) <= 0 ||
             (candidate.sourceKind === "summary" && currentStateCompletionTextSupersedes(completed.text, candidate.text))) &&
           currentStateCompletionTextSupersedes(completed.text, candidate.text),
       ),
   );
+}
+
+function currentStateProbeCandidateCanSupersede(
+  completed: SessionMemoryCurrentStateProbeCandidate,
+  candidate: SessionMemoryCurrentStateProbeCandidate,
+): boolean {
+  return completed.workline === candidate.workline;
 }
 
 function selectCurrentStateProbeTexts(candidates: SessionMemoryCurrentStateProbeCandidate[]): string[] {
