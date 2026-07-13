@@ -3501,7 +3501,7 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
-  it("buckets duplicate stale and missed-current-state session-memory capture candidates", async () => {
+  it("buckets duplicate stale and only reports uncovered missed-current-state signals", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
     dbPaths.add(fixture.dbPath);
@@ -3541,6 +3541,13 @@ describe("lcm command", () => {
         role: "assistant",
         content: "字幕已抓取并提交 497240e Add Unicorn Overlord subtitles，随后写入 Friday-memory/work/unicorn-overlord/combat-mechanics-summary-2026-07-04.md。",
         tokenCount: 32,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 11,
+        role: "assistant",
+        content: "参考材料路径：Friday-memory/work/unicorn-overlord/raw-source-notes-2026-07-04.md。",
+        tokenCount: 12,
       },
     ]);
 
@@ -3603,8 +3610,9 @@ describe("lcm command", () => {
     expect(result.text).toContain("stale/superseded: summary `sum_gate50f_old_dry_run`");
     expect(result.text).toContain("stale/superseded: summary `sum_gate50g_old_preflight`");
     expect(result.text).toContain("evidence_only: summary `sum_process_startup_ok`");
-    expect(result.text).toContain("missed_current_state: 497240e");
-    expect(result.text).toContain("missed_current_state: Friday-memory/work/unicorn-overlord/combat-mechanics-summary-2026-07-04.md");
+    expect(result.text).not.toContain("missed_current_state: 497240e");
+    expect(result.text).not.toContain("missed_current_state: Friday-memory/work/unicorn-overlord/combat-mechanics-summary-2026-07-04.md");
+    expect(result.text).toContain("missed_current_state: Friday-memory/work/unicorn-overlord/raw-source-notes-2026-07-04.md");
     expect(result.text).toContain("writes: none");
     expect(result.text).toContain("accepted memory: none");
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
@@ -4150,6 +4158,21 @@ describe("lcm command", () => {
         content: "可以 这个等我有空了出一版草稿",
         tokenCount: 12,
       },
+      {
+        conversationId: conversation.conversationId,
+        seq: 798,
+        role: "assistant",
+        content:
+          "这次结果还是有问题，但比之前更接近。关键信息：`latest_completed` 是对的：抓到了 `b6a6926 Record code name 2 demo runtime scenes`，也抓到了 3 个运行场景。但 stale next_action 仍没完全修好，至少 live 版还不稳。",
+        tokenCount: 64,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 815,
+        role: "user",
+        content: "嗯 下一步优化吧",
+        tokenCount: 8,
+      },
     ]);
 
     await fixture.summaryStore.insertSummary({
@@ -4183,6 +4206,7 @@ describe("lcm command", () => {
     expect(result.text).toContain("status: detected");
     expect(result.text).toContain("latest_completed:");
     expect(result.text).toContain("b6a6926");
+    expect(result.text).not.toContain("latest_completed: 这次结果还是有问题");
     expect(result.text).toContain("next_action:");
     expect(result.text).toContain("草稿");
     expect(result.text).toContain("newest_evidence: 1173b49");
@@ -4193,7 +4217,11 @@ describe("lcm command", () => {
     expect(result.text).not.toContain("next_action: 站位变体模拟完成");
     expect(result.text).toContain("stale/superseded: summary `sum_old_3v3_warlock_next_action`");
     expect(result.text).toContain("stale/superseded: summary `sum_old_position_variant`");
+    expect(result.text).toContain("local_flow: message `#815`");
+    expect(result.text).not.toContain("promotable: message `#815`");
+    expect(result.text).not.toContain("Candidate 1 - next_action");
     expect(result.text).not.toContain("missed_current_state: b6a6926");
+    expect(result.text).not.toContain("missed_current_state: Friday-memory/work/代号2-godot/代号2-godot - Demo v0.1 战前阵容布局.canvas");
     expect(result.text).toContain("writes: none");
     expect(result.text).toContain("accepted memory: none");
     expect(existsSync(sessionMemoryDbPath)).toBe(false);

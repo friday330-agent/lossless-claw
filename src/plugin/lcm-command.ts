@@ -2567,12 +2567,13 @@ function looksLikeLocalFlowApproval(value: string): boolean {
     .replace(/[`*_~()[\]{}"'“”‘’。，、！？!?:：；;,.]/g, "")
     .replace(/\s+/g, "")
     .trim();
-  if (!compact || compact.length > 20) {
+  if (!compact || compact.length > 24) {
     return false;
   }
   return (
     /^(ok|okay|好|好的|可以|可以吧|继续|继续吧|可以继续|可以继续吧|行|行吧|嗯|收到|go)$/.test(compact) ||
-    /^(ok|okay|好|好的|可以|行|行吧)(先)?(开始|开始修|修|处理|继续|继续修)(他|它)?(吧)?$/.test(compact)
+    /^(ok|okay|好|好的|可以|行|行吧)(先)?(开始|开始修|修|处理|继续|继续修)(他|它)?(吧)?$/.test(compact) ||
+    /^(嗯|好|好的|可以|行|行吧)?(下一步)?(继续)?(优化|修|继续修)(吧)?$/.test(compact)
   );
 }
 
@@ -3337,6 +3338,10 @@ function looksLikeCurrentStateMetaDiscussion(value: string): boolean {
     "candidate-only 现在证明",
     "不是“从摘要里捞候选”",
     "让 `capture-candidates`",
+    "这次结果还是有问题",
+    "还没完全修好",
+    "live 版还不稳",
+    "stale next_action",
   ]);
 }
 
@@ -3838,7 +3843,7 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
     .slice(0, 8);
   const missedCurrentStateSignals = findMissedCurrentStateSignals({
     signals: currentStateProbe.newestEvidence.length > 0 ? currentStateProbe.newestEvidence : collectCurrentStateSignals(scannedContents),
-    emittedCandidates,
+    emittedCandidates: reviewedCandidates,
   });
 
   lines.push(
