@@ -2939,7 +2939,7 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
     scopedCompletedCandidates,
   );
   const latestCompleted = selectCurrentStateProbeTexts(scopedCompletedCandidates);
-  const nextAction = selectCurrentStateProbeTexts(filteredNextActionCandidates);
+  const nextAction = selectCurrentStateProbeTexts(filteredNextActionCandidates, { kind: "next_action" });
   currentStateEvidenceTexts.push(
     ...scopedCompletedCandidates.map((candidate) => candidate.text),
     ...supportingRecentCompletedCandidates.map((candidate) => candidate.text),
@@ -3005,7 +3005,10 @@ function currentStateProbeCandidateCanSupersede(
   return completed.workline === candidate.workline;
 }
 
-function selectCurrentStateProbeTexts(candidates: SessionMemoryCurrentStateProbeCandidate[]): string[] {
+function selectCurrentStateProbeTexts(
+  candidates: SessionMemoryCurrentStateProbeCandidate[],
+  options: { kind?: "latest_completed" | "next_action" } = {},
+): string[] {
   const seen = new Set<string>();
   const selected: string[] = [];
   const latestSteamPhaseRank = Math.max(0, ...candidates.map((candidate) => getSteamScreeningPhaseRank(candidate.text)));
@@ -3014,17 +3017,71 @@ function selectCurrentStateProbeTexts(candidates: SessionMemoryCurrentStateProbe
     if (latestSteamPhaseRank > 0 && steamPhaseRank > 0 && steamPhaseRank < latestSteamPhaseRank) {
       continue;
     }
-    const key = normalizeSessionMemoryCandidateClaim(candidate.text);
+    const displayText =
+      options.kind === "next_action" ? extractCurrentStateNextActionText(candidate.text) : candidate.text;
+    const key = normalizeSessionMemoryCandidateClaim(displayText);
     if (seen.has(key)) {
       continue;
     }
     seen.add(key);
-    selected.push(truncateMiddle(candidate.text, 180));
+    selected.push(truncateMiddle(displayText, 180));
     if (selected.length >= 3) {
       break;
     }
   }
   return selected;
+}
+
+function extractCurrentStateNextActionText(value: string): string {
+  const compact = stripLcmExpansionDetails(value).replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return value;
+  }
+
+  const labeledMarkers = [
+    "下一阶段",
+    "下一步",
+    "活动任务",
+    "当前待处理",
+    "后续",
+    "接下来",
+    "next action",
+  ];
+  for (const marker of labeledMarkers) {
+    const markerIndex = compact.toLowerCase().indexOf(marker.toLowerCase());
+    if (markerIndex < 0) {
+      continue;
+    }
+    const afterMarker = compact.slice(markerIndex + marker.length);
+    const labelMatch = afterMarker.match(/^\s*[:：]\s*/);
+    if (labelMatch) {
+      const body = extractCurrentStateActionSentence(afterMarker.slice(labelMatch[0].length));
+      if (body) {
+        return `${marker}：${body}`;
+      }
+    }
+  }
+
+  const sentences = compact.match(/[^。！？!?]+[。！？!?]?/g) ?? [compact];
+  const sentence = sentences.find((part) => scoreCurrentStateNextAction(part) > 0);
+  if (!sentence) {
+    return compact;
+  }
+  const normalizedSentence = sentence.trim();
+  const nextStepIndex = normalizedSentence.search(/下一步|下一阶段|活动任务|当前待处理|后续|接下来|next action/i);
+  return nextStepIndex >= 0 ? normalizedSentence.slice(nextStepIndex).trim() : normalizedSentence;
+}
+
+function extractCurrentStateActionSentence(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const sentenceEnd = trimmed.search(/[。！？!?](?:\s|$)/);
+  if (sentenceEnd >= 0) {
+    return trimmed.slice(0, sentenceEnd + 1).trim();
+  }
+  return trimmed;
 }
 
 function compareCurrentStateProbeCandidates(

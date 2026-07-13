@@ -4412,6 +4412,9 @@ describe("lcm command", () => {
     expect(result.text).toContain("b6a6926");
     expect(result.text).not.toContain("latest_completed: Canvas created");
     expect(result.text).not.toContain("next_action: 嗯 下一步优化吧");
+    expect(result.text).not.toContain("next_action: Files: created");
+    expect(result.text).toContain("next_action: 下一阶段：等头儿出第一版草稿");
+    expect(result.text).toContain("之后整理Godot场景拆分和UI组件清单");
     expect(result.text).toContain("newest_evidence: b6a6926");
     expect(result.text).toContain("newest_evidence: Friday-memory/work/代号2-godot/代号2-godot - Demo v0.1 战前阵容布局.canvas");
     expect(result.text).not.toContain("stale/superseded: summary `sum_runtime_scene_files_summary_live`");
