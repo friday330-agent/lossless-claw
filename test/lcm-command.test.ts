@@ -4315,6 +4315,102 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("keeps demo runtime completion after repeated capture diagnostics", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-repeated-diagnostics.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-repeated-diagnostics";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-repeated-diagnostics",
+      sessionKey,
+    });
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_runtime_scene_files_summary_live",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Files: created Friday-memory/work/代号2-godot/代号2-godot - Demo v0.1 战前阵容布局.canvas; modified Friday-memory/work/代号2-godot/README.md, 代号2-godot - Demo v0.1 范围与表现规格.md, 代号2-godot - Demo v0.1 编程UI布局.canvas, 代号2-godot - Demo v0.1 战斗画面布局.canvas, 代号2-godot - 下一步.md, Friday-memory/CURRENT.md\n决策：三个运行场景（PreBattleLineupScreen、SkillProgrammingScreen、BattleScreen）已确认并写回规格，提交b6a6926。新增战前阵容布局.canvas。分析出三个场景需要的完整界面区域关系（顶部/中间/右侧/底部/按钮）。下一阶段：等头儿出第一版草稿（战前阵容/技能编程/战斗回放区域关系图），之后整理Godot场景拆分和UI组件清单。\n活动任务：等待草稿，准备后续拆分工作。\nExpand for details about: 界面需求列表中的具体子组件（如LineupGrid、UnitToken等）、校验规则细节、技能编程内条件选择器/目标规则编辑器设计、canvas节点/边计数、git diff统计",
+      tokenCount: 160,
+      latestAt: new Date("2026-07-13T14:26:33.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_capture_diagnostic_after_runtime_live",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "用户确认当前主线：代号2 demo v0.1，三个运行场景（战前双方阵容→技能编程→战斗）已提交 b6a6926，下一步等头儿出UI草稿后整理Godot场景拆分和UI组件清单。当前 capture-candidates 仍有缺陷：latest_completed 正确，但 next_action 混入3v3-A、术士等旧内容，newest_evidence missing，missed_current_state 列出历史commit/文件。用户判断 live 版仍不稳，真实状态应以 CURRENT.md 和最新提交为准。\nFiles: none\nExpand for details about: capture-candidates 候选摘要详细列表（8个候选）、用户对 capture-candidates 的诊断步骤、lossless-claw 参考文件内容",
+      tokenCount: 120,
+      latestAt: new Date("2026-07-13T14:28:38.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_capture_workline_fix_context_live",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "lossless-claw fcdee9e (Scope capture current state by workline) already committed before this segment. Segment consists of source code reads of collectCurrentStateProbe and scoreCurrentStateCompleted. No new file writes or task progress. State: workline separation fix verified committed, no pending actions.\nFiles: none\nExpand for details about: summaries sum_c72c24736b3bb57c and source code line ranges",
+      tokenCount: 80,
+      latestAt: new Date("2026-07-13T17:08:19.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_live_report_still_mixed",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Lossless Claw v0.11.3 session memory candidate capture ran twice in dry_run mode (no writes), each detecting 63 candidates. Current State Probe shows three worklines mixed: 1) 代号2-godot canvas files (战前阵容布局.canvas, skill programming canvas, combat logic canvas, UI layout canvas), 2) default targeting rule committed as 1173b49, 3) old 3v3 combat simulation. No file writes occurred.\nFiles: none",
+      tokenCount: 100,
+      latestAt: new Date("2026-07-13T17:08:19.000Z"),
+    });
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 1338,
+        role: "assistant",
+        content:
+          "这次输出说明 `fcdee9e` 只修了一半。已继续补一刀并推送：`lossless-claw`: `3320b98 Keep capture supersede within workline`。根因：真实窗口里较新的 capture/report 诊断 summary 先把 `sum_c72...` 的代号2 demo runtime completed 干掉了。还要重启/重载 runtime 后再跑 `/lossless session-memory capture-candidates --limit 80`。期望这次 `latest_completed` 回到 `b6a6926 / 战前阵容布局.canvas / runtime scenes`，不再 missing。",
+        tokenCount: 120,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 1412,
+        role: "assistant",
+        content:
+          "这次结果仍然没过。关键不是候选本身，而是 live runtime 还在输出旧行为：`latest_completed: missing`，`sum_c72...` 仍被打成 `stale/superseded`。下一步应该先做 runtime reload 验证，而不是继续改代码。成功标准还是：`latest_completed` 出现 `b6a6926 / 战前阵容布局.canvas / runtime scenes`。",
+        tokenCount: 92,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-repeated-diagnostics",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Current State Probe");
+    expect(result.text).not.toMatch(/^  latest_completed: missing$/m);
+    expect(result.text).toContain("latest_completed:");
+    expect(result.text).toContain("b6a6926");
+    expect(result.text).toContain("newest_evidence: b6a6926");
+    expect(result.text).toContain("newest_evidence: Friday-memory/work/代号2-godot/代号2-godot - Demo v0.1 战前阵容布局.canvas");
+    expect(result.text).not.toContain("stale/superseded: summary `sum_runtime_scene_files_summary_live`");
+    expect(result.text).toContain("stale/superseded: message `#1,338`");
+    expect(result.text).toContain("evidence_only: message `#1,412`");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("filters provenance evidence noise and classifies correction and memory boundaries", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);

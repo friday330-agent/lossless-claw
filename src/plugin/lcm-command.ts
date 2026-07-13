@@ -2646,6 +2646,7 @@ function reviewSessionMemoryCaptureCandidates(
   return candidates.map((candidate) => {
     const claimKey = normalizeSessionMemoryCandidateClaim(candidate.claim);
     const strongest = strongestByClaim.get(claimKey);
+    const supportsCurrentStateProbe = candidateSupportsCurrentStateProbe(candidate, probe);
 
     if (looksLikeLocalFlowApproval(candidate.claim)) {
       return {
@@ -2680,7 +2681,12 @@ function reviewSessionMemoryCaptureCandidates(
       };
     }
 
-    if (probe.latestCompleted.length > 0 && candidate.sourceKind === "summary" && looksLikeSupersededHistoricalPhase(candidate.claim)) {
+    if (
+      !supportsCurrentStateProbe &&
+      probe.latestCompleted.length > 0 &&
+      candidate.sourceKind === "summary" &&
+      looksLikeSupersededHistoricalPhase(candidate.claim)
+    ) {
       return {
         ...candidate,
         reviewBucket: "stale_superseded",
@@ -2697,7 +2703,10 @@ function reviewSessionMemoryCaptureCandidates(
       };
     }
 
-    if (completedCandidates.some((completed) => completed !== candidate && currentStateCompletionSupersedes(completed, candidate))) {
+    if (
+      !supportsCurrentStateProbe &&
+      completedCandidates.some((completed) => completed !== candidate && currentStateCompletionSupersedes(completed, candidate))
+    ) {
       return {
         ...candidate,
         reviewBucket: "stale_superseded",
@@ -2746,6 +2755,16 @@ function reviewSessionMemoryCaptureCandidates(
       reviewNote: "Concise enough for human review; still candidate-only.",
     };
   });
+}
+
+function candidateSupportsCurrentStateProbe(
+  candidate: SessionMemoryCaptureCandidate,
+  probe: SessionMemoryCurrentStateProbe,
+): boolean {
+  const strongProbeSignals = collectCurrentStateSignals(probe.latestCompleted).filter((signal) =>
+    /^[0-9a-f]{7,40}$/i.test(signal) || /\.(?:md|canvas|json|txt|xlsx|csv)$/i.test(signal)
+  );
+  return strongProbeSignals.some((signal) => candidateCoversCurrentStateSignal(candidate, signal));
 }
 
 function looksLikeSupersededHistoricalPhase(value: string): boolean {
