@@ -4099,6 +4099,106 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("keeps demo runtime scene state ahead of stale code name 2 summary next actions", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-demo-runtime-scenes.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-demo-runtime-scenes";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-demo-runtime-scenes",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 754,
+        role: "assistant",
+        content:
+          "对，漏了。第二原则就是 `默认索敌 / 最近原则`：默认打最近可达目标，不是同编号对位。验证：4 张 Canvas JSON 解析通过，目标文件 `diff --check` 通过。提交并推送：`1173b49 Record code name 2 default targeting principle`。",
+        tokenCount: 62,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 786,
+        role: "assistant",
+        content:
+          "对，运行场景应该先按 3 个做：1. 战前双方阵容场景 2. 技能编程场景 3. 战斗场景。我已经写回规格，并新增了一张：[战前阵容布局 Canvas](/Users/shige/.openclaw/workspace/Friday-memory/work/代号2-godot/代号2-godot%20-%20Demo%20v0.1%20战前阵容布局.canvas)。验证通过并推送：`b6a6926 Record code name 2 demo runtime scenes`。",
+        tokenCount: 88,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 787,
+        role: "assistant",
+        content:
+          "3 个场景需要这样拆：战前双方阵容、技能编程、战斗回放。我的判断：第一版先做战前双方阵容场景，因为它是入口，也是后面两个场景的数据来源。",
+        tokenCount: 46,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 788,
+        role: "user",
+        content: "可以 这个等我有空了出一版草稿",
+        tokenCount: 12,
+      },
+    ]);
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_3v3_warlock_next_action",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "术士定位为3v2/3v3解法职业，行动诅咒强度本阶段不调整。3v3-A（卫兵+游侠+术士 vs 精英重盾兵+高阶法师+盗贼）第一轮链条已完成。下一步建议先处理术士，不要急着暴风雪。Files: none",
+      tokenCount: 72,
+      latestAt: new Date("2026-07-13T07:48:07.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_position_variant",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "站位变体模拟完成：盗贼前排+重盾后排+法师后排让玩家方更抗卫兵开链。下一步继续补回避T反制和弓箭手必中技能。Files: none",
+      tokenCount: 48,
+      latestAt: new Date("2026-07-13T09:07:21.000Z"),
+    });
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-demo-runtime-scenes",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Current State Probe");
+    expect(result.text).toContain("status: detected");
+    expect(result.text).toContain("latest_completed:");
+    expect(result.text).toContain("b6a6926");
+    expect(result.text).toContain("next_action:");
+    expect(result.text).toContain("草稿");
+    expect(result.text).toContain("newest_evidence: 1173b49");
+    expect(result.text).toContain("newest_evidence: b6a6926");
+    expect(result.text).toContain("newest_evidence: Friday-memory/work/代号2-godot/代号2-godot - Demo v0.1 战前阵容布局.canvas");
+    expect(result.text).not.toContain("newest_evidence: missing");
+    expect(result.text).not.toContain("next_action: 术士定位");
+    expect(result.text).not.toContain("next_action: 站位变体模拟完成");
+    expect(result.text).toContain("stale/superseded: summary `sum_old_3v3_warlock_next_action`");
+    expect(result.text).toContain("stale/superseded: summary `sum_old_position_variant`");
+    expect(result.text).not.toContain("missed_current_state: b6a6926");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("filters provenance evidence noise and classifies correction and memory boundaries", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);

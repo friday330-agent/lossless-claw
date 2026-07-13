@@ -2781,7 +2781,11 @@ function collectCurrentStateSignals(values: string[]): string[] {
   const signals = new Set<string>();
   for (const value of values) {
     const normalized = stripLcmExpansionDetails(value).replace(/\s+/g, " ");
-    if (!includesAny(normalized.toLowerCase(), ["commit", "提交", "写入", "落盘", "已抓取", "summary", "transcript"])) {
+    if (
+      !includesAny(normalized.toLowerCase(), ["commit", "提交", "写入", "落盘", "已抓取", "summary", "transcript", "canvas"]) &&
+      !/\b[0-9a-f]{7,40}\b/i.test(normalized) &&
+      !/\b(?:Friday-memory|memory|self-improving)\//.test(normalized)
+    ) {
       continue;
     }
     for (const match of normalized.matchAll(/\b[0-9a-f]{7,40}\b/g)) {
@@ -2798,7 +2802,12 @@ function collectCurrentStateSignals(values: string[]): string[] {
 }
 
 function normalizeCurrentStatePathSignal(value: string): string {
-  return value.replace(/[,.，。;；:：]+$/g, "");
+  const trimmed = value.replace(/[,.，。;；:：]+$/g, "");
+  try {
+    return decodeURIComponent(trimmed);
+  } catch {
+    return trimmed;
+  }
 }
 
 function isUsefulCurrentStatePathSignal(value: string): boolean {
@@ -2860,6 +2869,17 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
   }
 
   const filteredCompletedCandidates = filterSupersededCurrentStateProbeCandidates(latestCompletedCandidates);
+  const latestCompletedPhaseRank = Math.max(
+    0,
+    ...filteredCompletedCandidates.map((candidate) => completedWorklinePhaseRank(candidate.text)),
+  );
+  const supportingRecentCompletedCandidates = latestCompletedCandidates.filter((candidate) => {
+    if (candidate.sourceKind !== "message") {
+      return false;
+    }
+    const rank = completedWorklinePhaseRank(candidate.text);
+    return latestCompletedPhaseRank > 0 && rank > 0 && rank >= latestCompletedPhaseRank - 1;
+  });
   const filteredNextActionCandidates = filterSupersededCurrentStateProbeCandidates(
     nextActionCandidates.filter((candidate) =>
       !filteredCompletedCandidates.some((completed) => completed.text === candidate.text),
@@ -2870,6 +2890,7 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
   const nextAction = selectCurrentStateProbeTexts(filteredNextActionCandidates);
   currentStateEvidenceTexts.push(
     ...filteredCompletedCandidates.map((candidate) => candidate.text),
+    ...supportingRecentCompletedCandidates.map((candidate) => candidate.text),
     ...filteredNextActionCandidates.map((candidate) => candidate.text),
   );
 
@@ -2951,6 +2972,12 @@ function scoreCurrentStateCompleted(value: string): number {
   if (includesAny(normalized, ["代号2-godot", "code name 2", "canvas", "obsidian canvas", "架构图", "项目里", "项目内"])) {
     score += 80;
   }
+  if (
+    includesAny(normalized, ["demo", "运行场景", "runtime scene", "战前双方阵容", "战前阵容", "skillprogrammingscreen", "prebattlelineupscreen", "battlescreen"]) &&
+    includesAny(normalized, ["canvas", "提交", "推送", "pushed", "验证", "写回", "新增"])
+  ) {
+    score += 140;
+  }
   if (includesAny(normalized, ["验证", "没有缺失文件", "孤儿边", "节点", "边"])) {
     score += 40;
   }
@@ -3002,6 +3029,18 @@ function scoreCurrentStateNextAction(value: string): number {
     score += 180;
   } else if (includesAny(normalized, ["下一步", "转入"])) {
     score += 100;
+  }
+  if (
+    includesAny(normalized, ["草稿", "ui 草图", "ui草图", "界面草图", "第一屏", "场景 ui", "场景ui"]) &&
+    includesAny(normalized, ["demo", "godot", "场景", "界面", "ui", "有空", "出一版", "整理"])
+  ) {
+    score += 160;
+  }
+  if (
+    includesAny(normalized, ["战前双方阵容", "战前阵容", "技能编程", "战斗回放", "运行场景"]) &&
+    includesAny(normalized, ["下一步", "草稿", "确认", "整理", "组件清单", "godot 场景拆分", "godot场景拆分"])
+  ) {
+    score += 140;
   }
   if (includesAny(normalized, ["游戏", "steam", "刷宝", "精选", "候选", "目录", "独游"])) {
     score += 40;
@@ -3181,11 +3220,19 @@ function looksLikeSupersededProgressOrNextStep(value: string): boolean {
 function sharesCurrentWorklineAnchor(leftValue: string, rightValue: string): boolean {
   const left = leftValue.toLowerCase();
   const right = rightValue.toLowerCase();
+  const codeNameAnchors = ["代号2-godot", "code name 2", "code name 2 godot"];
+  const codeNameRoleAnchors = ["卫兵", "游侠", "重盾兵", "后排法师", "高阶法师", "盗贼", "术士", "盾击", "2v2", "3v2", "3v3", "站位变体"];
+  if (
+    (codeNameAnchors.some((anchor) => left.includes(anchor)) && codeNameRoleAnchors.some((anchor) => right.includes(anchor))) ||
+    (codeNameAnchors.some((anchor) => right.includes(anchor)) && codeNameRoleAnchors.some((anchor) => left.includes(anchor)))
+  ) {
+    return true;
+  }
   const anchorGroups = [
     ["slay-the-spire", "slay the spire", "杀戮尖塔"],
     ["steam-indie-category-research", "steam deep dive", "steam 深拆"],
     ["代号2-godot", "code name 2", "code name 2 godot"],
-    ["卫兵", "游侠", "重盾兵", "后排法师", "高阶法师", "盗贼", "术士", "盾击", "2v2", "3v2"],
+    codeNameRoleAnchors,
   ];
   if (anchorGroups.some((group) => group.some((anchor) => left.includes(anchor)) && group.some((anchor) => right.includes(anchor)))) {
     return true;
@@ -3239,6 +3286,21 @@ function candidateWorklinePhaseRank(value: string): number {
   }
   if (includesAny(normalized, ["b313653", "fix code name 2 canvas links", "孤儿边", "没有缺失文件", "相对路径"])) {
     return 3;
+  }
+  if (includesAny(normalized, ["b6a6926", "record code name 2 demo runtime scenes", "运行场景", "prebattlelineupscreen", "skillprogrammingscreen", "battlescreen", "战前阵容布局"])) {
+    return 6;
+  }
+  if (includesAny(normalized, ["1173b49", "record code name 2 default targeting principle", "默认索敌", "最近原则"])) {
+    return 5;
+  }
+  if (includesAny(normalized, ["60ed1ae", "split code name 2 demo planning canvases", "4 张专门 canvas", "四张专门 canvas"])) {
+    return 4;
+  }
+  if (includesAny(normalized, ["9a778cb", "add code name 2 battle programming canvas", "战斗逻辑与技能编程.canvas"])) {
+    return 3;
+  }
+  if (includesAny(normalized, ["af9a8fc", "add code name 2 demo scope spec", "demo v0.1 范围与表现规格"])) {
+    return 2;
   }
   if (includesAny(normalized, ["f6c7321", "move source materials", "正式归进", "steam-indie-category-research 和 unicorn-overlord"])) {
     return 2;
