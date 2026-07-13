@@ -2798,8 +2798,21 @@ function collectCurrentStateSignals(values: string[]): string[] {
         signals.add(pathSignal);
       }
     }
+    for (const match of normalized.matchAll(/\b(?:Friday-memory|memory|self-improving)\/[^`，。)）;；]+?\.(?:md|canvas|json|txt|xlsx|csv)\b/g)) {
+      const pathSignal = normalizeCurrentStatePathSignal(match[0]!);
+      if (pathSignal && isUsefulCurrentStatePathSignal(pathSignal)) {
+        signals.add(pathSignal);
+      }
+    }
   }
-  return [...signals].sort();
+  const allSignals = [...signals].sort();
+  return allSignals.filter((signal) =>
+    !allSignals.some((other) =>
+      other !== signal &&
+      other.startsWith(signal) &&
+      (signal.startsWith("Friday-memory/") || signal.startsWith("memory/") || signal.startsWith("self-improving/"))
+    )
+  );
 }
 
 function normalizeCurrentStatePathSignal(value: string): string {
@@ -3222,7 +3235,26 @@ function sharesCurrentWorklineAnchor(leftValue: string, rightValue: string): boo
   const left = leftValue.toLowerCase();
   const right = rightValue.toLowerCase();
   const codeNameAnchors = ["代号2-godot", "code name 2", "code name 2 godot"];
-  const codeNameRoleAnchors = ["卫兵", "游侠", "重盾兵", "后排法师", "高阶法师", "盗贼", "术士", "盾击", "2v2", "3v2", "3v3", "站位变体"];
+  const codeNameRoleAnchors = [
+    "卫兵",
+    "游侠",
+    "重盾兵",
+    "后排法师",
+    "高阶法师",
+    "盗贼",
+    "术士",
+    "盾击",
+    "2v2",
+    "3v2",
+    "3v3",
+    "站位变体",
+    "默认索敌",
+    "最近原则",
+    "运行场景",
+    "战前阵容",
+    "技能编程",
+    "战斗回放",
+  ];
   if (
     (codeNameAnchors.some((anchor) => left.includes(anchor)) && codeNameRoleAnchors.some((anchor) => right.includes(anchor))) ||
     (codeNameAnchors.some((anchor) => right.includes(anchor)) && codeNameRoleAnchors.some((anchor) => left.includes(anchor)))
@@ -3339,6 +3371,9 @@ function looksLikeCurrentStateMetaDiscussion(value: string): boolean {
     "不是“从摘要里捞候选”",
     "让 `capture-candidates`",
     "这次结果还是有问题",
+    "修复没覆盖真实后续形态",
+    "已补第二刀",
+    "suppress capture report meta",
     "还没完全修好",
     "live 版还不稳",
     "stale next_action",

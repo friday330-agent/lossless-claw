@@ -4227,6 +4227,76 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("detects demo runtime completion from compressed files summaries", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-demo-runtime-summary.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-demo-runtime-summary";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-demo-runtime-summary",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 1014,
+        role: "assistant",
+        content:
+          "头儿，这次确认是修复没覆盖真实后续形态：上一轮“结果还有问题”的助手纠错消息，被下一次扫描当成了 `latest_completed`。已补第二刀并推送：`acea49a Suppress capture report meta as current state`。",
+        tokenCount: 48,
+      },
+    ]);
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_runtime_scene_files_summary",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Files: created Friday-memory/work/代号2-godot/代号2-godot - Demo v0.1 战前阵容布局.canvas; modified Friday-memory/work/代号2-godot/README.md, 代号2-godot - Demo v0.1 范围与表现规格.md, 代号2-godot - Demo v0.1 编程UI布局.canvas, 代号2-godot - Demo v0.1 战斗画面布局.canvas, 代号2-godot - 下一步.md, Friday-memory/CURRENT.md\n决策：三个运行场景（PreBattleLineupScreen、SkillProgrammingScreen、BattleScreen）已确认并写回规格，提交b6a6926。新增战前阵容布局.canvas。分析出三个场景需要的完整界面区域关系（顶部/中间/右侧/底部/按钮）。下一阶段：等头儿出第一版草稿（战前阵容/技能编程/战斗回放区域关系图），之后整理Godot场景拆分和UI组件清单。\n活动任务：等待草稿，准备后续拆分工作。\nExpand for details about: 界面需求列表中的具体子组件（如LineupGrid、UnitToken等）、校验规则细节、技能编程内条件选择器/目标规则编辑器设计、canvas节点/边计数、git diff统计",
+      tokenCount: 160,
+      latestAt: new Date("2026-07-13T14:26:33.000Z"),
+    });
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_default_targeting_next_action",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "已补回第二原则/默认索敌：解析顺序为技能可达性→前排阻挡→实际距离→小编号优先。之后讨论下一步：不直接写战斗逻辑，先做第0步定第一屏布局。",
+      tokenCount: 52,
+      latestAt: new Date("2026-07-13T13:22:37.000Z"),
+    });
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-demo-runtime-summary",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Current State Probe");
+    expect(result.text).toContain("status: detected");
+    expect(result.text).not.toContain("latest_completed: missing");
+    expect(result.text).toContain("latest_completed:");
+    expect(result.text).toContain("b6a6926");
+    expect(result.text).toContain("newest_evidence: b6a6926");
+    expect(result.text).toContain("newest_evidence: Friday-memory/work/代号2-godot/代号2-godot - Demo v0.1 战前阵容布局.canvas");
+    expect(result.text).not.toContain("next_action: 已补回第二原则");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("filters provenance evidence noise and classifies correction and memory boundaries", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
