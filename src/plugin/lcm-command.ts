@@ -188,7 +188,15 @@ type SessionMemoryCurrentStateProbeCandidate = {
   createdAt: string;
   sourceKind?: "message" | "summary";
   score: number;
+  workline: SessionMemoryCurrentStateWorkline;
 };
+
+type SessionMemoryCurrentStateWorkline =
+  | "code_name_2"
+  | "steam"
+  | "slay"
+  | "tooling"
+  | "general";
 
 type SessionMemoryReplacementPacketLoadResult =
   | {
@@ -2869,6 +2877,7 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
         createdAt: item.createdAt,
         sourceKind: item.sourceKind,
         score: completedScore,
+        workline: getCurrentStateWorkline(compactContent),
       });
     }
     const nextActionScore = scoreCurrentStateNextAction(compactContent);
@@ -2878,17 +2887,23 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
         createdAt: item.createdAt,
         sourceKind: item.sourceKind,
         score: nextActionScore,
+        workline: getCurrentStateWorkline(compactContent),
       });
     }
   }
 
   const filteredCompletedCandidates = filterSupersededCurrentStateProbeCandidates(latestCompletedCandidates);
+  const primaryWorkline = selectCurrentStatePrimaryWorkline(filteredCompletedCandidates, nextActionCandidates);
+  const scopedCompletedCandidates = scopeCurrentStateProbeCandidates(filteredCompletedCandidates, primaryWorkline);
   const latestCompletedPhaseRank = Math.max(
     0,
-    ...filteredCompletedCandidates.map((candidate) => completedWorklinePhaseRank(candidate.text)),
+    ...scopedCompletedCandidates.map((candidate) => completedWorklinePhaseRank(candidate.text)),
   );
   const supportingRecentCompletedCandidates = latestCompletedCandidates.filter((candidate) => {
     if (candidate.sourceKind !== "message") {
+      return false;
+    }
+    if (primaryWorkline !== null && candidate.workline !== primaryWorkline) {
       return false;
     }
     const rank = completedWorklinePhaseRank(candidate.text);
@@ -2896,14 +2911,15 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
   });
   const filteredNextActionCandidates = filterSupersededCurrentStateProbeCandidates(
     nextActionCandidates.filter((candidate) =>
-      !filteredCompletedCandidates.some((completed) => completed.text === candidate.text),
+      (primaryWorkline === null || candidate.workline === primaryWorkline || candidate.workline === "general") &&
+      !scopedCompletedCandidates.some((completed) => completed.text === candidate.text),
     ),
-    filteredCompletedCandidates,
+    scopedCompletedCandidates,
   );
-  const latestCompleted = selectCurrentStateProbeTexts(filteredCompletedCandidates);
+  const latestCompleted = selectCurrentStateProbeTexts(scopedCompletedCandidates);
   const nextAction = selectCurrentStateProbeTexts(filteredNextActionCandidates);
   currentStateEvidenceTexts.push(
-    ...filteredCompletedCandidates.map((candidate) => candidate.text),
+    ...scopedCompletedCandidates.map((candidate) => candidate.text),
     ...supportingRecentCompletedCandidates.map((candidate) => candidate.text),
     ...filteredNextActionCandidates.map((candidate) => candidate.text),
   );
@@ -2913,6 +2929,31 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
     nextAction,
     newestEvidence: collectCurrentStateSignals(currentStateEvidenceTexts).slice(0, 12),
   };
+}
+
+function selectCurrentStatePrimaryWorkline(
+  completedCandidates: SessionMemoryCurrentStateProbeCandidate[],
+  nextActionCandidates: SessionMemoryCurrentStateProbeCandidate[],
+): SessionMemoryCurrentStateWorkline | null {
+  const nonToolingCompleted = completedCandidates.filter((candidate) => candidate.workline !== "tooling");
+  if (nonToolingCompleted.length > 0) {
+    return nonToolingCompleted.slice().sort(compareCurrentStateProbeCandidates)[0]!.workline;
+  }
+  const nonToolingNextAction = nextActionCandidates.filter((candidate) => candidate.workline !== "tooling");
+  if (nonToolingNextAction.length > 0) {
+    return nonToolingNextAction.slice().sort(compareCurrentStateProbeCandidates)[0]!.workline;
+  }
+  return completedCandidates.length > 0 || nextActionCandidates.length > 0 ? "tooling" : null;
+}
+
+function scopeCurrentStateProbeCandidates(
+  candidates: SessionMemoryCurrentStateProbeCandidate[],
+  workline: SessionMemoryCurrentStateWorkline | null,
+): SessionMemoryCurrentStateProbeCandidate[] {
+  if (workline === null) {
+    return candidates;
+  }
+  return candidates.filter((candidate) => candidate.workline === workline);
 }
 
 function filterSupersededCurrentStateProbeCandidates(
@@ -2962,6 +3003,67 @@ function compareCurrentStateProbeCandidates(
     return scoreDelta;
   }
   return compareTimestampDesc(left.createdAt, right.createdAt);
+}
+
+function getCurrentStateWorkline(value: string): SessionMemoryCurrentStateWorkline {
+  const normalized = value.toLowerCase();
+  if (
+    looksLikeSessionMemoryToolingMeta(value) ||
+    includesAny(normalized, [
+      "lossless-claw",
+      "capture-candidates",
+      "session-memory",
+      "current state probe",
+      "missed_current_state",
+      "latest_completed",
+      "newest_evidence",
+      "reviewedcandidates",
+      "emittedcandidates",
+      "lcm-command.ts",
+      "lcm-command.test.ts",
+      "report-layer source fix",
+    ])
+  ) {
+    return "tooling";
+  }
+  if (
+    includesAny(normalized, [
+      "代号2-godot",
+      "code name 2",
+      "code name 2 godot",
+      "b6a6926",
+      "1173b49",
+      "60ed1ae",
+      "9a778cb",
+      "af9a8fc",
+      "prebattlelineupscreen",
+      "skillprogrammingscreen",
+      "battlescreen",
+      "战前阵容",
+      "技能编程",
+      "战斗回放",
+      "运行场景",
+      "默认索敌",
+      "最近原则",
+      "卫兵",
+      "游侠",
+      "重盾兵",
+      "高阶法师",
+      "盗贼",
+      "术士",
+      "3v3",
+      "2v2",
+    ])
+  ) {
+    return "code_name_2";
+  }
+  if (includesAny(normalized, ["steam-indie-category-research", "steam deep dive", "steam 深拆", "刷宝", "独游"])) {
+    return "steam";
+  }
+  if (includesAny(normalized, ["slay-the-spire", "slay the spire", "杀戮尖塔"])) {
+    return "slay";
+  }
+  return "general";
 }
 
 function scoreCurrentStateCompleted(value: string): number {

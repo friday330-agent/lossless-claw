@@ -4255,6 +4255,14 @@ describe("lcm command", () => {
           "头儿，这次确认是修复没覆盖真实后续形态：上一轮“结果还有问题”的助手纠错消息，被下一次扫描当成了 `latest_completed`。已补第二刀并推送：`acea49a Suppress capture report meta as current state`。",
         tokenCount: 48,
       },
+      {
+        conversationId: conversation.conversationId,
+        seq: 1015,
+        role: "assistant",
+        content:
+          "Fixed missed_current_state logic and completed the report-layer source fix: used reviewedCandidates instead of emittedCandidates, so signals already covered by promotable/evidence-only candidates are not flagged as missed. Expanded looksLikeLocalFlowApproval length limit. Updated test assertions. All tests pass and build succeeds. Files: modified src/plugin/lcm-command.ts, test/lcm-command.test.ts (both committed and pushed).",
+        tokenCount: 72,
+      },
     ]);
 
     await fixture.summaryStore.insertSummary({
@@ -4289,6 +4297,7 @@ describe("lcm command", () => {
     expect(result.text).not.toContain("latest_completed: missing");
     expect(result.text).toContain("latest_completed:");
     expect(result.text).toContain("b6a6926");
+    expect(result.text).not.toContain("latest_completed: Fixed missed_current_state logic");
     expect(result.text).toContain("newest_evidence: b6a6926");
     expect(result.text).toContain("newest_evidence: Friday-memory/work/代号2-godot/代号2-godot - Demo v0.1 战前阵容布局.canvas");
     expect(result.text).not.toContain("next_action: 已补回第二原则");
