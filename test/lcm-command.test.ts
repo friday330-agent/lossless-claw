@@ -3944,8 +3944,8 @@ describe("lcm command", () => {
     expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/steam-official-snapshot-2026-07-05.md");
     expect(result.text).not.toContain("missed_current_state: Friday-memory/work/steam-indie-category-research/slay-the-spire/subtitle-evidence-table-2026-07-05.md");
     expect(result.text).toContain("promotable: message `#317`");
-    expect(result.text).toContain("promotable: message `#436`");
-    expect(result.text).toContain("promotable: message `#844`");
+    expect(result.text).toContain("stale/superseded: message `#436`");
+    expect(result.text).toContain("evidence_only: message `#844`");
     expect(result.text).toContain("stale/superseded: message `#316`");
     expect(result.text).toContain("stale/superseded: message `#761`");
     expect(result.text).toContain("stale/superseded: message `#785`");
@@ -4032,6 +4032,130 @@ describe("lcm command", () => {
     expect(result.text).not.toContain("open_question: message `#8`");
     expect(result.text).not.toContain("open_question: message `#12`");
     expect(result.text).toContain("resolved by later completed_state");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
+  it("reduces a revised skill programming discussion to its final committed state", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-skill-programming.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-skill-programming";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-skill-programming",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 647,
+        role: "user",
+        content:
+          "拖拽插入不需要插入线，下方技能顺序让位。主动技能不能丢进反应队列，无效区域显示禁止标记。完整预案先绑定具体角色。",
+        tokenCount: 38,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 648,
+        role: "assistant",
+        content:
+          "当前是一条混合技能栏。下一步需要决定：8 格已经放满时，从技能库插入新技能怎么办。",
+        tokenCount: 28,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 649,
+        role: "user",
+        content:
+          "主动技能和反应技能自由混排，但主动在上反应在下。技能发动条件要两个。预案1到5点击切换；草稿没保存时提示。8格满时禁止挤掉最后一项。",
+        tokenCount: 44,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 650,
+        role: "assistant",
+        content:
+          "单栏双分区，共用 8 格。下一步是确认未保存草稿切换预案时保存到哪里。",
+        tokenCount: 24,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 651,
+        role: "user",
+        content:
+          "不需要分割线，用颜色区分。跨区拖拽自动吸附回自身分区。8格已满时区域标红显示编程栏已满。删除条件1时条件2不能上移。",
+        tokenCount: 42,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 653,
+        role: "user",
+        content:
+          "保存到新预案再切换时，如果预案栏满了怎么办？可以改成默认草稿自动保存，加4个可命名保存预案格，这个方案怎么样？",
+        tokenCount: 38,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 655,
+        role: "user",
+        content: "可以，把刚才聊的落盘吧",
+        tokenCount: 10,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 734,
+        role: "assistant",
+        content:
+          "已落盘并推送，提交：`042852b Lock skill programming drag and plan UX`。技能编程交互已锁定为共享8格、双条件槽、默认自动保存加4个可命名保存预案。仍未锁定：保存预案已修改时返回战前是否提示；未保存修改能否用于本场 BattleSetupSnapshot。Canvas与Markdown验证均通过。",
+        tokenCount: 72,
+      },
+    ]);
+
+    await fixture.summaryStore.insertSummary({
+      summaryId: "sum_old_demo_scope_before_skill_programming",
+      conversationId: conversation.conversationId,
+      kind: "leaf",
+      content:
+        "Confirmed Demo v0.1 design decisions and pushed e8fbef8. 下一步准备战前阵容第一屏和技能编程旧草稿。Files: modified Friday-memory/CURRENT.md and Demo v0.1 canvases.",
+      tokenCount: 46,
+      latestAt: new Date("2026-07-15T16:00:00.000Z"),
+    });
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-skill-programming",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("Current State Probe");
+    expect(result.text).toContain("latest_completed:");
+    expect(result.text).toContain("042852b");
+    expect(result.text).not.toContain("latest_completed: Confirmed Demo v0.1 design decisions");
+    expect(result.text.match(/latest_completed:/g)).toHaveLength(1);
+    expect(result.text).toContain("next_action:");
+    expect(result.text).toContain("返回战前");
+    expect(result.text).toContain("BattleSetupSnapshot");
+    expect(result.text).not.toContain("next_action: 8 格已经放满");
+    expect(result.text).not.toContain("next_action: 确认未保存草稿切换预案时保存到哪里");
+    expect(result.text).toContain("stale/superseded: message `#647`");
+    expect(result.text).toContain("promotable: message `#651`");
+    expect(result.text).toContain("resolved_question: message `#653`");
+    expect(result.text).toContain("local_flow: message `#655`");
+    expect(result.text).not.toContain("promotable: message `#655`");
+    expect(result.text).toContain("evidence_only: message `#734`");
     expect(result.text).toContain("writes: none");
     expect(result.text).toContain("accepted memory: none");
     expect(existsSync(sessionMemoryDbPath)).toBe(false);

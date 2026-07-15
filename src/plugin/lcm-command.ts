@@ -156,6 +156,7 @@ type SessionMemoryCaptureCandidate = {
   role: string;
   createdAt: string;
   claim: string;
+  analysisText?: string;
   evidenceSignals?: string[];
   why: string;
   confidence: "high" | "medium";
@@ -2581,6 +2582,7 @@ function looksLikeLocalFlowApproval(value: string): boolean {
   return (
     /^(ok|okay|好|好的|可以|可以吧|继续|继续吧|可以继续|可以继续吧|行|行吧|嗯|收到|go)$/.test(compact) ||
     /^(ok|okay|好|好的|可以|行|行吧)(先)?(开始|开始修|修|处理|继续|继续修)(他|它)?(吧)?$/.test(compact) ||
+    /^(ok|okay|好|好的|可以|行|行吧)(把)?(刚才|这些|这个|上面)?(聊的|说的)?(内容)?(落盘|记下|写下|保存)(吧)?$/.test(compact) ||
     /^(嗯|好|好的|可以|行|行吧)?(下一步)?(继续)?(优化|修|继续修)(吧)?$/.test(compact)
   );
 }
@@ -2628,9 +2630,7 @@ function reviewSessionMemoryCaptureCandidates(
   const strongestByClaim = new Map<string, SessionMemoryCaptureCandidate>();
   const maxGateOrdinalByGate = new Map<string, number>();
   const latestSteamPhaseRank = Math.max(0, ...probe.latestCompleted.map((signal) => getSteamScreeningPhaseRank(signal)));
-  const completedCandidates = candidates.filter((candidate) =>
-    candidate.kind === "verified_result" || candidate.kind === "completed_state"
-  );
+  const completedCandidates = candidates.filter(isSessionMemoryCompletionEvidence);
 
   for (const candidate of candidates) {
     const claimKey = normalizeSessionMemoryCandidateClaim(candidate.claim);
@@ -2648,7 +2648,9 @@ function reviewSessionMemoryCaptureCandidates(
     const strongest = strongestByClaim.get(claimKey);
     const supportsCurrentStateProbe = candidateSupportsCurrentStateProbe(candidate, probe);
 
-    if (looksLikeLocalFlowApproval(candidate.claim)) {
+    const analysisText = getSessionMemoryCaptureAnalysisText(candidate);
+
+    if (looksLikeLocalFlowApproval(analysisText)) {
       return {
         ...candidate,
         reviewBucket: "local_flow",
@@ -2669,6 +2671,20 @@ function reviewSessionMemoryCaptureCandidates(
         ...candidate,
         reviewBucket: "duplicate",
         reviewNote: `Duplicate of stronger ${formatSessionMemoryCaptureSource(strongest)}.`,
+      };
+    }
+
+    const revisingConstraint = candidate.kind === "constraint_boundary"
+      ? candidates.find((other) =>
+          other !== candidate &&
+          laterConstraintSupersedesEarlierConstraint(other, candidate)
+        )
+      : undefined;
+    if (revisingConstraint) {
+      return {
+        ...candidate,
+        reviewBucket: "stale_superseded",
+        reviewNote: `Earlier mixed constraint is revised by later ${formatSessionMemoryCaptureSource(revisingConstraint)}.`,
       };
     }
 
@@ -2733,7 +2749,7 @@ function reviewSessionMemoryCaptureCandidates(
       };
     }
 
-    if (looksLikeProcessContext(candidate.claim) || looksLikeSessionMemoryToolingMeta(candidate.claim)) {
+    if (looksLikeProcessContext(analysisText) || looksLikeSessionMemoryToolingMeta(analysisText)) {
       return {
         ...candidate,
         reviewBucket: "evidence_only",
@@ -2741,7 +2757,17 @@ function reviewSessionMemoryCaptureCandidates(
       };
     }
 
-    if (candidate.sourceKind === "summary" && candidate.claim.length > 160) {
+    if (candidate.kind === "completed_state" || candidate.kind === "verified_result") {
+      return {
+        ...candidate,
+        reviewBucket: "evidence_only",
+        reviewNote: supportsCurrentStateProbe
+          ? "Completed-state report supports the Current State Probe; keep as evidence rather than durable semantic memory."
+          : "Assistant or command completion report is evidence, not durable semantic memory.",
+      };
+    }
+
+    if (candidate.sourceKind === "summary" && analysisText.length > 160) {
       return {
         ...candidate,
         reviewBucket: "evidence_only",
@@ -2755,6 +2781,94 @@ function reviewSessionMemoryCaptureCandidates(
       reviewNote: "Concise enough for human review; still candidate-only.",
     };
   });
+}
+
+function getSessionMemoryCaptureAnalysisText(candidate: SessionMemoryCaptureCandidate): string {
+  return candidate.analysisText ?? candidate.claim;
+}
+
+function isSessionMemoryCompletionEvidence(candidate: SessionMemoryCaptureCandidate): boolean {
+  if (candidate.kind === "completed_state" || candidate.kind === "verified_result") {
+    return true;
+  }
+  if (candidate.kind !== "system_boundary" && candidate.kind !== "correction") {
+    return false;
+  }
+  const normalized = getSessionMemoryCaptureAnalysisText(candidate).toLowerCase();
+  return (
+    includesAny(normalized, ["已完成", "已修复", "已实现", "修好了", "实现完成", "fixed", "implemented", "已落盘"]) &&
+    (
+      includesAny(normalized, ["提交并推送", "已推送", "pushed"]) ||
+      /(?:commit|提交)[^\n。]{0,120}\b[0-9a-f]{7,40}\b/i.test(normalized)
+    )
+  );
+}
+
+function laterConstraintSupersedesEarlierConstraint(
+  later: SessionMemoryCaptureCandidate,
+  earlier: SessionMemoryCaptureCandidate,
+): boolean {
+  if (
+    later.kind !== "constraint_boundary" ||
+    later.source !== "user_decision" ||
+    !isSameTimeOrLaterCandidate(later, earlier) ||
+    normalizeSessionMemoryCandidateClaim(later.claim) === normalizeSessionMemoryCandidateClaim(earlier.claim)
+  ) {
+    return false;
+  }
+  const normalizedLater = later.claim.toLowerCase();
+  if (!includesAny(normalizedLater, ["不需要", "不是", "改成", "改为", "自动吸附", "不能", "不要"])) {
+    return false;
+  }
+  return hasMeaningfulTextOverlap(
+    getSessionMemoryCaptureAnalysisText(later),
+    getSessionMemoryCaptureAnalysisText(earlier),
+    { minBigrams: 5, minTrigrams: 1 },
+  );
+}
+
+function hasMeaningfulTextOverlap(
+  leftValue: string,
+  rightValue: string,
+  thresholds: { minBigrams: number; minTrigrams: number },
+): boolean {
+  const left = normalizeTextForNgrams(leftValue);
+  const right = normalizeTextForNgrams(rightValue);
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    countSharedNgrams(left, right, 2) >= thresholds.minBigrams &&
+    countSharedNgrams(left, right, 3) >= thresholds.minTrigrams
+  );
+}
+
+function normalizeTextForNgrams(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[\s`*_~()[\]{}"'“”‘’。，、！？!?:：；;,.<>/\\|-]/g, "")
+    .trim();
+}
+
+function countSharedNgrams(left: string, right: string, size: number): number {
+  if (left.length < size || right.length < size) {
+    return 0;
+  }
+  const leftGrams = new Set<string>();
+  for (let index = 0; index <= left.length - size; index += 1) {
+    leftGrams.add(left.slice(index, index + size));
+  }
+  const rightGrams = new Set<string>();
+  for (let index = 0; index <= right.length - size; index += 1) {
+    rightGrams.add(right.slice(index, index + size));
+  }
+  let shared = 0;
+  for (const gram of leftGrams) {
+    if (rightGrams.has(gram)) {
+      shared += 1;
+    }
+  }
+  return shared;
 }
 
 function candidateSupportsCurrentStateProbe(
@@ -2932,14 +3046,22 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
     const rank = completedWorklinePhaseRank(candidate.text);
     return latestCompletedPhaseRank > 0 && rank > 0 && rank >= latestCompletedPhaseRank - 1;
   });
+  const primaryCompletedCandidate = scopedCompletedCandidates.slice().sort(compareCurrentStateProbeCandidates)[0];
   const filteredNextActionCandidates = filterSupersededCurrentStateProbeCandidates(
     nextActionCandidates.filter((candidate) =>
-      primaryWorkline === null || candidate.workline === primaryWorkline || candidate.workline === "general",
+      (primaryWorkline === null || candidate.workline === primaryWorkline || candidate.workline === "general") &&
+      (primaryCompletedCandidate === undefined ||
+        compareTimestampDesc(candidate.createdAt, primaryCompletedCandidate.createdAt) <= 0),
     ),
     scopedCompletedCandidates,
   );
   const latestCompleted = selectCurrentStateProbeTexts(scopedCompletedCandidates);
-  const nextAction = selectCurrentStateProbeTexts(filteredNextActionCandidates, { kind: "next_action" });
+  const completionFollowUp = primaryCompletedCandidate === undefined
+    ? ""
+    : extractCurrentStateCompletionFollowUp(primaryCompletedCandidate.text);
+  const nextAction = completionFollowUp
+    ? [completionFollowUp]
+    : selectCurrentStateProbeTexts(filteredNextActionCandidates, { kind: "next_action" });
   currentStateEvidenceTexts.push(
     ...scopedCompletedCandidates.map((candidate) => candidate.text),
     ...supportingRecentCompletedCandidates.map((candidate) => candidate.text),
@@ -3025,11 +3147,28 @@ function selectCurrentStateProbeTexts(
     }
     seen.add(key);
     selected.push(truncateMiddle(displayText, 180));
-    if (selected.length >= 3) {
+    if (selected.length >= 1) {
       break;
     }
   }
   return selected;
+}
+
+function extractCurrentStateCompletionFollowUp(value: string): string {
+  const compact = stripLcmExpansionDetails(value).replace(/\s+/g, " ").trim();
+  const markers = ["仍未锁定", "尚未锁定", "仍需确认", "待确认", "未锁定"];
+  for (const marker of markers) {
+    const markerIndex = compact.indexOf(marker);
+    if (markerIndex < 0) {
+      continue;
+    }
+    const afterMarker = compact.slice(markerIndex + marker.length).replace(/^\s*[:：]\s*/, "");
+    const body = extractCurrentStateActionSentence(afterMarker);
+    if (body) {
+      return `待确认：${body}`;
+    }
+  }
+  return "";
 }
 
 function extractCurrentStateNextActionText(value: string): string {
@@ -3338,7 +3477,10 @@ function currentStateCompletionSupersedes(
 ): boolean {
   return (
     isSameTimeOrLaterCandidate(completed, candidate) &&
-    currentStateCompletionTextSupersedes(completed.claim, candidate.claim)
+    currentStateCompletionTextSupersedes(
+      getSessionMemoryCaptureAnalysisText(completed),
+      getSessionMemoryCaptureAnalysisText(candidate),
+    )
   );
 }
 
@@ -3348,8 +3490,11 @@ function currentStateCompletionResolvesQuestion(
 ): boolean {
   return (
     isSameTimeOrLaterCandidate(completed, question) &&
-    looksLikeFinalWorklineCompletion(completed.claim) &&
-    sharesResolvedQuestionAnchor(completed.claim, question.claim)
+    looksLikeFinalWorklineCompletion(getSessionMemoryCaptureAnalysisText(completed)) &&
+    sharesResolvedQuestionAnchor(
+      getSessionMemoryCaptureAnalysisText(completed),
+      getSessionMemoryCaptureAnalysisText(question),
+    )
   );
 }
 
@@ -3378,7 +3523,10 @@ function sharesResolvedQuestionAnchor(completedValue: string, questionValue: str
   const sharedGroups = anchorGroups.filter(
     (group) => group.some((anchor) => completed.includes(anchor)) && group.some((anchor) => question.includes(anchor)),
   );
-  return sharedGroups.length >= 2;
+  return (
+    sharedGroups.length >= 2 ||
+    hasMeaningfulTextOverlap(completedValue, questionValue, { minBigrams: 8, minTrigrams: 3 })
+  );
 }
 
 function looksLikeFinalWorklineCompletion(value: string): boolean {
@@ -3628,6 +3776,11 @@ function looksLikeSessionMemoryToolingMeta(value: string): boolean {
     "accepted memory",
     "不能自动写入",
     "不该自动",
+    "候选整理",
+    "时间线去重",
+    "过期判断",
+    "理想输出",
+    "污染记忆",
     "修正",
     "验证",
   ]);
@@ -3653,7 +3806,10 @@ function findMissedCurrentStateSignals(params: {
 }
 
 function candidateCoversCurrentStateSignal(candidate: SessionMemoryCaptureCandidate, signal: string): boolean {
-  return candidate.claim.includes(signal) || (candidate.evidenceSignals ?? []).includes(signal);
+  return (
+    getSessionMemoryCaptureAnalysisText(candidate).includes(signal) ||
+    (candidate.evidenceSignals ?? []).includes(signal)
+  );
 }
 
 function isUsefulCurrentStateSignal(signal: string): boolean {
@@ -4048,28 +4204,30 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
   const messageCandidates = rows
     .slice()
     .reverse()
-    .map((row) =>
-      classifySessionMemoryCaptureCandidate({
+    .map((row) => {
+      const candidate = classifySessionMemoryCaptureCandidate({
         sourceKind: "message",
         sourceRef: `#${formatNumber(row.seq)}`,
         role: row.role,
         content: row.content,
         createdAt: row.created_at,
-      }),
-    )
+      });
+      return candidate ? { ...candidate, analysisText: stripPastedSessionMemoryCandidateReport(row.content).trim() } : null;
+    })
     .filter((candidate): candidate is SessionMemoryCaptureCandidate => candidate !== null);
   const summaryCandidates = summaryRows
     .slice()
     .reverse()
-    .map((row) =>
-      classifySessionMemoryCaptureCandidate({
+    .map((row) => {
+      const candidate = classifySessionMemoryCaptureCandidate({
         sourceKind: "summary",
         sourceRef: row.summary_id,
         role: row.kind,
         content: row.content,
         createdAt: row.created_at,
-      }),
-    )
+      });
+      return candidate ? { ...candidate, analysisText: stripPastedSessionMemoryCandidateReport(row.content).trim() } : null;
+    })
     .filter((candidate): candidate is SessionMemoryCaptureCandidate => candidate !== null);
   const candidates = [...messageCandidates, ...summaryCandidates].sort(compareSessionMemoryCaptureCandidates);
   const reviewedCandidates = reviewSessionMemoryCaptureCandidates(candidates, currentStateProbe);
