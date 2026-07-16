@@ -2619,6 +2619,14 @@ function looksLikeDesignFocus(value: string): boolean {
   );
 }
 
+function looksLikeVisualPresentationDirection(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["2d", "二维"]) &&
+    includesAny(normalized, ["3d", "blender", "序列帧", "hd2d", "demo", "美术", "舞台"])
+  );
+}
+
 function formatSessionMemoryCaptureSource(candidate: SessionMemoryCaptureCandidate): string {
   return `${candidate.sourceKind} ${formatCommand(candidate.sourceRef)}`;
 }
@@ -2808,21 +2816,31 @@ function laterConstraintSupersedesEarlierConstraint(
   later: SessionMemoryCaptureCandidate,
   earlier: SessionMemoryCaptureCandidate,
 ): boolean {
+  const laterText = getSessionMemoryCaptureAnalysisText(later);
+  const earlierText = getSessionMemoryCaptureAnalysisText(earlier);
+  const normalizedLater = laterText.toLowerCase();
+  const laterIsConstraintRevision =
+    later.kind === "constraint_boundary" &&
+    includesAny(normalizedLater, ["不需要", "不是", "改成", "改为", "自动吸附", "不能", "不要"]);
+  const laterIsFinalVisualDirection =
+    later.kind === "decision" &&
+    looksLikeVisualPresentationDirection(laterText) &&
+    looksLikeVisualPresentationDirection(earlierText) &&
+    includesAny(normalizedLater, ["我打算", "我倾向", "最终结果", "最终采用", "还是用"]);
   if (
-    later.kind !== "constraint_boundary" ||
+    (!laterIsConstraintRevision && !laterIsFinalVisualDirection) ||
     later.source !== "user_decision" ||
     !isSameTimeOrLaterCandidate(later, earlier) ||
     normalizeSessionMemoryCandidateClaim(later.claim) === normalizeSessionMemoryCandidateClaim(earlier.claim)
   ) {
     return false;
   }
-  const normalizedLater = later.claim.toLowerCase();
-  if (!includesAny(normalizedLater, ["不需要", "不是", "改成", "改为", "自动吸附", "不能", "不要"])) {
-    return false;
+  if (laterIsFinalVisualDirection) {
+    return true;
   }
   return hasMeaningfulTextOverlap(
-    getSessionMemoryCaptureAnalysisText(later),
-    getSessionMemoryCaptureAnalysisText(earlier),
+    laterText,
+    earlierText,
     { minBigrams: 5, minTrigrams: 1 },
   );
 }
@@ -3754,6 +3772,7 @@ function looksLikeSessionMemoryToolingMeta(value: string): boolean {
   }
   return includesAny(normalized, [
     "dry_run_report",
+    "dry_run",
     "vitest",
     "focused tests",
     "focused vitest",
@@ -3783,6 +3802,7 @@ function looksLikeSessionMemoryToolingMeta(value: string): boolean {
     "污染记忆",
     "修正",
     "验证",
+    "复验",
   ]);
 }
 
@@ -4014,7 +4034,13 @@ function classifySessionMemoryCaptureCandidate(params: {
       };
     }
 
-    if (includesAny(normalized, ["决定", "确认", "同意", "批准", "落盘", "记下", "当前采用", "先按这个"])) {
+    const explicitVisualDirection =
+      looksLikeVisualPresentationDirection(content) &&
+      includesAny(normalized, ["我打算", "我倾向", "最终结果", "最终采用", "还是用"]);
+    if (
+      explicitVisualDirection ||
+      includesAny(normalized, ["决定", "确认", "同意", "批准", "落盘", "记下", "当前采用", "先按这个"])
+    ) {
       return {
         kind: "decision",
         source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",

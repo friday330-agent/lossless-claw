@@ -4161,6 +4161,87 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("keeps the final visual direction over earlier deliberation and capture diagnostics", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-visual-direction.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-visual-direction";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-visual-direction",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 155,
+        role: "user",
+        content:
+          "我们来讨论下圣兽之王,我想做的就是类似2d美术但是有很强的3d感.虽然知道战斗demo其实2d就已经满足,但是我想知道2d和3d有什么难度上的区别",
+        tokenCount: 43,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 161,
+        role: "user",
+        content:
+          "我是打算用blender制作3d角色出动作,但是输出是2d序列帧,表现形式我倾向hd2d马赛克.",
+        tokenCount: 27,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 163,
+        role: "user",
+        content: "最终结果应该是这样.但是demo我们还是用2d吧",
+        tokenCount: 15,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 164,
+        role: "assistant",
+        content:
+          "对，定成两阶段：Demo纯2D；最终表现由Blender制作3D动画，输出像素序列帧，再用于2D角色加3D舞台。battle_core保持维度无关。",
+        tokenCount: 39,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 172,
+        role: "assistant",
+        content:
+          "现在先做一次干净复验。当前是 dry_run，没有写入错误记忆。重新执行 `/lossless session-memory capture-candidates --limit 80`，验证最终混合表现、Demo纯2D是否进入 promotable。",
+        tokenCount: 45,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-visual-direction",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("promotable: message `#161`");
+    expect(result.text).toContain("promotable: message `#163`");
+    expect(result.text).toContain("stale/superseded: message `#155`");
+    expect(result.text).not.toContain("promotable: message `#164`");
+    expect(result.text).toContain("evidence_only: message `#172`");
+    expect(result.text).not.toContain("promotable: message `#155`");
+    expect(result.text).not.toContain("promotable: message `#172`");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("classifies the latest pushed design simulation as completed state over stale summaries", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
