@@ -2562,6 +2562,11 @@ function looksLikeCorrectionOrDowngrade(value: string): boolean {
   );
 }
 
+function looksLikePrimaryCorrectionOrDowngrade(value: string): boolean {
+  const opening = value.split(/\n|[。！？!?]/, 1)[0] ?? value;
+  return looksLikeCorrectionOrDowngrade(opening);
+}
+
 function looksLikeSystemBoundaryCheck(value: string): boolean {
   const normalized = value.toLowerCase();
   return (
@@ -2804,7 +2809,7 @@ function isSessionMemoryCompletionEvidence(candidate: SessionMemoryCaptureCandid
   }
   const normalized = getSessionMemoryCaptureAnalysisText(candidate).toLowerCase();
   return (
-    includesAny(normalized, ["已完成", "已修复", "已实现", "修好了", "实现完成", "fixed", "implemented", "已落盘"]) &&
+    includesAny(normalized, ["已完成", "已修复", "已实现", "修完", "修好了", "实现完成", "fixed", "implemented", "已落盘"]) &&
     (
       includesAny(normalized, ["提交并推送", "已推送", "pushed"]) ||
       /(?:commit|提交)[^\n。]{0,120}\b[0-9a-f]{7,40}\b/i.test(normalized)
@@ -3537,6 +3542,8 @@ function sharesResolvedQuestionAnchor(completedValue: string, questionValue: str
     ["条件", "满足", "条件命中"],
     ["号位", "前排", "后排", "2号位", "3号位", "6号位", "456"],
     ["代号2-godot", "code name 2", "职业大分类"],
+    ["lossless", "capture-candidates", "session-memory", "session memory"],
+    ["修", "修复", "修完", "修好了"],
   ];
   const sharedGroups = anchorGroups.filter(
     (group) => group.some((anchor) => completed.includes(anchor)) && group.some((anchor) => question.includes(anchor)),
@@ -3562,6 +3569,8 @@ function looksLikeFinalWorklineCompletion(value: string): boolean {
       "canvas",
       "架构图",
       "项目",
+      "lossless",
+      "capture-candidates",
     ])
   );
 }
@@ -3859,7 +3868,7 @@ function classifySessionMemoryCaptureCandidate(params: {
       includesAny(normalized, ["user ", "user confirmed", "user directed", "user requested", "用户", "头儿"]));
 
   if (params.role === "assistant" || params.sourceKind === "summary") {
-    if (looksLikeCorrectionOrDowngrade(content)) {
+    if (looksLikePrimaryCorrectionOrDowngrade(content)) {
       return {
         kind: "correction",
         source: params.sourceKind === "summary" ? "lcm_summary" : "friday_review",

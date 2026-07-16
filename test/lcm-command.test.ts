@@ -4242,6 +4242,104 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("keeps an artifact completion report with an incidental downgrade as evidence only", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-artifact-report.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-artifact-report";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-artifact-report",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 154,
+        role: "assistant",
+        content:
+          "已规整并推送，提交：`d69cfc4`。唯一项目资料目录确定为代号2-godot，补全了资料索引。没有大规模移动旧文档。2D 已从确定方案降级为历史候选；当前正式口径是 2D/3D 待定。首批数据包复验通过：0 error、3/3 tests passed。",
+        tokenCount: 65,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-artifact-report",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("evidence_only: message `#154`");
+    expect(result.text).not.toContain("promotable: message `#154`");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
+  it("resolves a lossless repair timing question after the repair is completed", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-lossless-repair.db");
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-lossless-repair";
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-lossless-repair",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 169,
+        role: "user",
+        content: "继续做点其他的再修lossless?还是现在就修?",
+        tokenCount: 14,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 272,
+        role: "assistant",
+        content:
+          "修完并推送了。Lossless commit：`319c031 Capture final visual direction decisions`。lcm-command 70/70、全量测试 1015/1015、build通过。conversation 3498只读复验通过，没有写DB、accepted memory或overlay。重启后再运行 `/lossless session-memory capture-candidates --limit 80` 做最终 live 验证。",
+        tokenCount: 55,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-lossless-repair",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("resolved_question: message `#169`");
+    expect(result.text).not.toContain("open_question: message `#169`");
+    expect(result.text).toContain("evidence_only: message `#272`");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("classifies the latest pushed design simulation as completed state over stale summaries", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
