@@ -3101,6 +3101,121 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("links a verified local task completion without treating a later assessment as completed state", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-local-completion.db");
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-local-completion";
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-local-completion",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 8,
+        role: "user",
+        content: "ok 剩下这点token把代号2的代码帮我注释一下.我好学习",
+        tokenCount: 20,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 33,
+        role: "assistant",
+        content:
+          "已给《代号2》7 个核心 GDScript 加上中文教学注释，未修改任何行为。文件包括 /Users/shige/代号2godot/no-2/scenes/ui/team_formation_page.gd、/Users/shige/代号2godot/no-2/scenes/ui/right_loadout_tabs.gd 和 /private/tmp/secret-plugin.gd。剥离注释后与备份一致，Godot 4.7.1 解析通过，10 项队伍测试全部通过。备份在 /Users/shige/代号2godot/backups/no-2-before-learning-comments-20260727-0410/。未提交、未推送。",
+        tokenCount: 92,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 49,
+        role: "assistant",
+        content:
+          "结论：Godot AI 有帮助，但只适合受控试用，不建议现在装进《代号2》主工程。上游 CI 持续通过。等当前 UI 阶段完成后，再测试一次可撤销节点修改。这轮没有安装，也没有修改《代号2》或 Codex 配置。",
+        tokenCount: 58,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-local-completion",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("status: detected");
+    expect(result.text).toContain("latest_completed: 已给《代号2》7 个核心 GDScript");
+    expect(result.text).not.toContain("latest_completed: 结论：Godot AI 有帮助");
+    expect(result.text).toContain("next_action: completed");
+    expect(result.text).toContain("newest_evidence: scenes/ui/team_formation_page.gd");
+    expect(result.text).toContain("newest_evidence: Godot 4.7.1 parse passed");
+    expect(result.text).not.toContain("newest_evidence: /private/tmp/secret-plugin.gd");
+    expect(result.text).toContain("resolved_task: message `#8`");
+    expect(result.text).toContain("assessment: message `#49`");
+    expect(result.text).not.toContain("completed_state: message `#49`");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
+  it("captures a user-confirmed sequenced integration plan as the next action", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-sequenced-plan.db");
+    const sessionKey = "agent:main:webchat:session-memory-capture-candidates-sequenced-plan";
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-sequenced-plan",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 50,
+        role: "user",
+        content: "godot-ai可以等我们先把目前阶段的ui搞定 然后再接入试试.",
+        tokenCount: 22,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-sequenced-plan",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("status: detected");
+    expect(result.text).toContain("next_action: godot-ai可以等我们先把目前阶段的ui搞定 然后再接入试试.");
+    expect(result.text).toContain("promotable: message `#50`");
+    expect(result.text).toContain("Candidate 1 - next_action");
+    expect(result.text).not.toContain("Candidate 1 - task_request");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("reports session-memory capture candidates from summaries when raw messages are stale", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);

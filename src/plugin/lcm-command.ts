@@ -148,6 +148,7 @@ type SessionMemoryCaptureCandidate = {
     | "next_action"
     | "verified_result"
     | "completed_state"
+    | "assessment"
     | "correction"
     | "system_boundary";
   source: "user_decision" | "friday_review" | "command_result" | "lcm_summary";
@@ -168,6 +169,7 @@ type SessionMemoryCaptureReviewBucket =
   | "promotable"
   | "open_question"
   | "resolved_question"
+  | "resolved_task"
   | "evidence_only"
   | "duplicate"
   | "local_flow"
@@ -2600,6 +2602,23 @@ function looksLikeTaskRequest(value: string): boolean {
   );
 }
 
+function looksLikeSequencedPlan(value: string): boolean {
+  const normalized = value.toLowerCase();
+  const hasFirstGate = includesAny(normalized, ["先", "等"]);
+  const hasLaterStep = includesAny(normalized, ["然后", "再", "之后"]);
+  const hasConcreteAction = includesAny(normalized, [
+    "完成",
+    "搞定",
+    "接入",
+    "试试",
+    "开始",
+    "继续",
+    "安装",
+    "启用",
+  ]);
+  return hasFirstGate && hasLaterStep && hasConcreteAction;
+}
+
 function looksLikeOpenQuestion(value: string): boolean {
   const normalized = value.toLowerCase();
   return (
@@ -2672,6 +2691,16 @@ function reviewSessionMemoryCaptureCandidates(
     }
 
     if (candidate.kind === "task_request") {
+      const resolvingCompleted = completedCandidates.find((completed) =>
+        completed !== candidate && currentStateCompletionResolvesTask(completed, candidate)
+      );
+      if (resolvingCompleted) {
+        return {
+          ...candidate,
+          reviewBucket: "resolved_task",
+          reviewNote: `Task request completed by later completed_state ${formatSessionMemoryCaptureSource(resolvingCompleted)}.`,
+        };
+      }
       return {
         ...candidate,
         reviewBucket: "evidence_only",
@@ -2767,6 +2796,14 @@ function reviewSessionMemoryCaptureCandidates(
         ...candidate,
         reviewBucket: "evidence_only",
         reviewNote: "Process/tooling context is evidence, not a durable session-memory candidate.",
+      };
+    }
+
+    if (candidate.kind === "assessment") {
+      return {
+        ...candidate,
+        reviewBucket: "evidence_only",
+        reviewNote: "Technical assessment is evidence until the user confirms a decision or execution occurs.",
       };
     }
 
@@ -2899,7 +2936,7 @@ function candidateSupportsCurrentStateProbe(
   probe: SessionMemoryCurrentStateProbe,
 ): boolean {
   const strongProbeSignals = collectCurrentStateSignals(probe.latestCompleted).filter((signal) =>
-    /^[0-9a-f]{7,40}$/i.test(signal) || /\.(?:md|canvas|json|txt|xlsx|csv)$/i.test(signal)
+    /^[0-9a-f]{7,40}$/i.test(signal) || /\.(?:md|canvas|json|txt|xlsx|csv|gd|tscn|tres)$/i.test(signal)
   );
   return strongProbeSignals.some((signal) => candidateCoversCurrentStateSignal(candidate, signal));
 }
@@ -2930,6 +2967,8 @@ function compareReviewedSessionMemoryCaptureCandidates(
   const bucketRank: Record<SessionMemoryCaptureReviewBucket, number> = {
     promotable: 400,
     open_question: 350,
+    resolved_question: 330,
+    resolved_task: 325,
     evidence_only: 300,
     duplicate: 200,
     local_flow: 150,
@@ -2949,12 +2988,16 @@ function collectCurrentStateSignals(values: string[]): string[] {
     if (
       !includesAny(normalized.toLowerCase(), ["commit", "提交", "写入", "落盘", "已抓取", "summary", "transcript", "canvas"]) &&
       !/\b[0-9a-f]{7,40}\b/i.test(normalized) &&
-      !/\b(?:Friday-memory|memory|self-improving)\//.test(normalized)
+      !/\b(?:Friday-memory|memory|self-improving)\//.test(normalized) &&
+      !/\.(?:gd|tscn|tres)\b/i.test(normalized) &&
+      !includesAny(normalized.toLowerCase(), ["解析通过", "parse passed", "测试全部通过", "tests passed"])
     ) {
       continue;
     }
     for (const match of normalized.matchAll(/\b[0-9a-f]{7,40}\b/g)) {
-      signals.add(match[0]!);
+      if (!/^\d+$/.test(match[0]!)) {
+        signals.add(match[0]!);
+      }
     }
     for (const match of normalized.matchAll(/\b(?:Friday-memory|memory|self-improving)\/[^\s`，。)）]+/g)) {
       const pathSignal = normalizeCurrentStatePathSignal(match[0]!);
@@ -2968,6 +3011,20 @@ function collectCurrentStateSignals(values: string[]): string[] {
         signals.add(pathSignal);
       }
     }
+    for (const match of normalized.matchAll(/(?:res:\/\/|\/)[^\s`，。)）;；]+?\.(?:gd|tscn|tres)\b/g)) {
+      const pathSignal = normalizeProjectArtifactPathSignal(match[0]!);
+      if (pathSignal) {
+        signals.add(pathSignal);
+      }
+    }
+    const godotParseMatch = normalized.match(/Godot\s+([0-9]+(?:\.[0-9]+){1,2})\s+(?:解析|parse)\s*(?:通过|passed)/i);
+    if (godotParseMatch) {
+      signals.add(`Godot ${godotParseMatch[1]} parse passed`);
+    }
+    const testPassMatch = normalized.match(/([0-9]+)\s*项[^，。;；]{0,24}测试(?:全部)?通过/i);
+    if (testPassMatch) {
+      signals.add(`${testPassMatch[1]} tests passed`);
+    }
   }
   const allSignals = [...signals].sort();
   return allSignals.filter((signal) =>
@@ -2977,6 +3034,21 @@ function collectCurrentStateSignals(values: string[]): string[] {
       (signal.startsWith("Friday-memory/") || signal.startsWith("memory/") || signal.startsWith("self-improving/"))
     )
   );
+}
+
+function normalizeProjectArtifactPathSignal(value: string): string {
+  const normalized = normalizeCurrentStatePathSignal(value);
+  if (normalized.startsWith("res://")) {
+    return normalized.slice("res://".length);
+  }
+  const projectSegments = ["/scenes/", "/scripts/", "/tests/", "/data/", "/assets/"];
+  for (const segment of projectSegments) {
+    const index = normalized.indexOf(segment);
+    if (index >= 0) {
+      return normalized.slice(index + 1);
+    }
+  }
+  return normalized.startsWith("/") ? "" : normalized;
 }
 
 function normalizeCurrentStatePathSignal(value: string): string {
@@ -3012,7 +3084,12 @@ function stripLcmExpansionDetails(value: string): string {
   return value.replace(/(?:\n|\s)Expand for details about:.*$/s, "").trim();
 }
 
-function collectCurrentStateProbe(items: Array<{ content: string; createdAt: string; sourceKind?: "message" | "summary" }>): SessionMemoryCurrentStateProbe {
+function collectCurrentStateProbe(items: Array<{
+  content: string;
+  createdAt: string;
+  role?: string;
+  sourceKind?: "message" | "summary";
+}>): SessionMemoryCurrentStateProbe {
   const latestCompletedCandidates: SessionMemoryCurrentStateProbeCandidate[] = [];
   const nextActionCandidates: SessionMemoryCurrentStateProbeCandidate[] = [];
   const currentStateEvidenceTexts: string[] = [];
@@ -3027,7 +3104,10 @@ function collectCurrentStateProbe(items: Array<{ content: string; createdAt: str
       continue;
     }
     const normalized = compactContent.toLowerCase();
-    if (looksLikeCurrentStateMetaDiscussion(compactContent)) {
+    if (
+      looksLikeCurrentStateMetaDiscussion(compactContent) ||
+      (item.role !== "user" && looksLikeAssistantAssessment(compactContent))
+    ) {
       continue;
     }
     const completedScore = scoreCurrentStateCompleted(compactContent);
@@ -3281,6 +3361,8 @@ function getCurrentStateWorkline(value: string): SessionMemoryCurrentStateWorkli
   if (
     includesAny(normalized, [
       "代号2-godot",
+      "《代号2》",
+      "代号2",
       "code name 2",
       "code name 2 godot",
       "b6a6926",
@@ -3324,6 +3406,9 @@ function scoreCurrentStateCompleted(value: string): number {
     return 0;
   }
   let score = 0;
+  if (looksLikeVerifiedLocalCompletion(value)) {
+    score += 240;
+  }
   score += scoreSteamScreeningPhase(value);
   if (includesAny(normalized, ["抓完", "已继续抓", "已完成", "completed"])) {
     score += 80;
@@ -3367,6 +3452,33 @@ function scoreCurrentStateCompleted(value: string): number {
   return score >= 100 ? score : 0;
 }
 
+function looksLikeVerifiedLocalCompletion(value: string): boolean {
+  const normalized = value.toLowerCase();
+  const reportsOwnCompletion = includesAny(normalized, [
+    "已给",
+    "已加",
+    "已完成",
+    "已修好",
+    "已修复",
+    "已实现",
+    "已更新",
+    "已写入",
+    "已落盘",
+  ]);
+  const hasConcreteProof =
+    /\.(?:gd|tscn|tres)\b/i.test(value) ||
+    includesAny(normalized, [
+      "解析通过",
+      "parse passed",
+      "测试全部通过",
+      "tests passed",
+      "验证结果",
+      "备份在",
+      "文件包括",
+    ]);
+  return reportsOwnCompletion && hasConcreteProof && !looksLikeAssistantAssessment(value);
+}
+
 function looksLikeIncompleteOrBlockedProgress(value: string): boolean {
   const normalized = value.toLowerCase();
   return includesAny(normalized, [
@@ -3397,6 +3509,9 @@ function scoreCurrentStateNextAction(value: string): number {
     return 0;
   }
   let score = 0;
+  if (looksLikeSequencedPlan(value)) {
+    score += 220;
+  }
   if (includesAny(normalized, ["下一步适合", "next action", "转入深拆", "开始深拆", "适合开始深拆"])) {
     score += 180;
   } else if (includesAny(normalized, ["下一步", "转入"])) {
@@ -3519,6 +3634,39 @@ function currentStateCompletionResolvesQuestion(
       getSessionMemoryCaptureAnalysisText(question),
     )
   );
+}
+
+function currentStateCompletionResolvesTask(
+  completed: SessionMemoryCaptureCandidate,
+  task: SessionMemoryCaptureCandidate,
+): boolean {
+  if (!isSessionMemoryCompletionEvidence(completed) || task.kind !== "task_request") {
+    return false;
+  }
+  if (!isSameTimeOrLaterCandidate(completed, task)) {
+    return false;
+  }
+  if (
+    getCurrentStateWorkline(getSessionMemoryCaptureAnalysisText(completed)) !==
+    getCurrentStateWorkline(getSessionMemoryCaptureAnalysisText(task))
+  ) {
+    return false;
+  }
+  const completedText = getSessionMemoryCaptureAnalysisText(completed).toLowerCase();
+  const taskText = getSessionMemoryCaptureAnalysisText(task).toLowerCase();
+  const sharedTaskAnchors = [
+    ["代号2", "code name 2"],
+    ["代码", "gdscript", ".gd"],
+    ["注释", "comment"],
+  ].filter(
+    (group) =>
+      group.some((anchor) => completedText.includes(anchor)) &&
+      group.some((anchor) => taskText.includes(anchor)),
+  ).length;
+  return sharedTaskAnchors >= 2 || hasMeaningfulTextOverlap(completedText, taskText, {
+    minBigrams: 6,
+    minTrigrams: 2,
+  });
 }
 
 function currentStateCompletionTextSupersedes(completedValue: string, candidateValue: string): boolean {
@@ -3848,6 +3996,14 @@ function isUsefulCurrentStateSignal(signal: string): boolean {
   return !/[,.，。;；:"”)]$/.test(signal);
 }
 
+function looksLikeAssistantAssessment(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["结论：", "结论:", "我的判断", "评估结论"]) &&
+    includesAny(normalized, ["有帮助", "适合", "不建议", "建议", "试用", "风险"])
+  );
+}
+
 function classifySessionMemoryCaptureCandidate(params: {
   sourceKind: "message" | "summary";
   sourceRef: string;
@@ -3901,6 +4057,23 @@ function classifySessionMemoryCaptureCandidate(params: {
         suggestedDestination: "Friday review",
       };
     }
+
+    if (looksLikeAssistantAssessment(content)) {
+      return {
+        kind: "assessment",
+        source: params.sourceKind === "summary" ? "lcm_summary" : "friday_review",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        evidenceSignals,
+        why: "Assistant reports an evaluation or conditional recommendation, not an executed completion.",
+        confidence: "medium",
+        riskIfWrong: "A recommendation may be mistaken for completed implementation.",
+        suggestedDestination: "Evidence only; wait for user confirmation or execution evidence.",
+      };
+    }
   }
 
   if (looksLikeProcessContext(content)) {
@@ -3935,6 +4108,23 @@ function classifySessionMemoryCaptureCandidate(params: {
         confidence: "medium",
         riskIfWrong: "A local approval may be mistaken for a durable decision.",
         suggestedDestination: "Evidence only; local flow.",
+      };
+    }
+
+    if (looksLikeSequencedPlan(content)) {
+      return {
+        kind: "next_action",
+        source: params.sourceKind === "summary" ? "lcm_summary" : "user_decision",
+        sourceKind: params.sourceKind,
+        sourceRef: params.sourceRef,
+        role: params.role,
+        createdAt: params.createdAt,
+        claim,
+        evidenceSignals,
+        why: "User sets an ordered plan with a prerequisite before a later action.",
+        confidence: "high",
+        riskIfWrong: "A later integration may start before its prerequisite is complete.",
+        suggestedDestination: "Friday session-memory candidate or CURRENT.md",
       };
     }
 
@@ -4132,6 +4322,7 @@ function getSessionMemoryCaptureCandidateRank(candidate: SessionMemoryCaptureCan
     next_action: 430,
     open_question: 260,
     task_request: 180,
+    assessment: 140,
     completed_state: 120,
     verified_result: 120,
   };
@@ -4233,7 +4424,12 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
     ...summaryRows.map((row) => row.content),
   ];
   const currentStateProbe = collectCurrentStateProbe([
-    ...rows.map((row) => ({ content: row.content, createdAt: row.created_at, sourceKind: "message" as const })),
+    ...rows.map((row) => ({
+      content: row.content,
+      createdAt: row.created_at,
+      role: row.role,
+      sourceKind: "message" as const,
+    })),
     ...summaryRows.map((row) => ({ content: row.content, createdAt: row.created_at, sourceKind: "summary" as const })),
   ]);
   const messageCandidates = rows
@@ -4339,6 +4535,12 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
       ...reviewedCandidates
         .filter((candidate) => candidate.reviewBucket === "resolved_question")
         .map((candidate) => buildStatLine("resolved_question", formatSessionMemoryCaptureSource(candidate))),
+      ...reviewedCandidates
+        .filter((candidate) => candidate.reviewBucket === "resolved_task")
+        .map((candidate) => buildStatLine("resolved_task", formatSessionMemoryCaptureSource(candidate))),
+      ...reviewedCandidates
+        .filter((candidate) => candidate.kind === "assessment")
+        .map((candidate) => buildStatLine("assessment", formatSessionMemoryCaptureSource(candidate))),
       ...reviewedCandidates
         .filter((candidate) => candidate.reviewBucket === "evidence_only")
         .map((candidate) => buildStatLine("evidence_only", formatSessionMemoryCaptureSource(candidate))),
