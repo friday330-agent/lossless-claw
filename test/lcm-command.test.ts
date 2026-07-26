@@ -3216,6 +3216,79 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("closes a generic repair approval from a verified tooling completion in the live report shape", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-tooling-completion.db");
+    const sessionKey = "agent:main:dashboard:6f1b-b7b8-762c950642fe";
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-tooling-completion",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 49,
+        role: "assistant",
+        content: "结论：Godot AI 有帮助，但只适合受控试用，不建议现在装进主工程。",
+        tokenCount: 24,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 54,
+        role: "user",
+        content: "godot-ai可以等我们先把目前阶段的ui搞定 然后再接入试试. 关于session-memory 你打算怎么修?",
+        tokenCount: 30,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 72,
+        role: "user",
+        content: "可以 你修一下吧",
+        tokenCount: 8,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 185,
+        role: "assistant",
+        content:
+          "修好了，已提交并推送：`11d6e91`。现在 `capture-candidates` 会正确归并完成态。验证结果：构建通过，50 个测试文件、1019 项测试全部通过。当前运行中的 OpenClaw 仍是旧代码；session key `agent:main:dashboard:6f1b-b7b8-762c950642fe`。",
+        tokenCount: 68,
+      },
+    ]);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-tooling-completion",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("latest_completed: 修好了，已提交并推送：`11d6e91`");
+    expect(result.text).toContain("newest_evidence: 11d6e91");
+    expect(result.text).toContain("resolved_task: message `#72`");
+    expect(result.text).toContain("next_action: godot-ai可以等我们先把目前阶段的ui搞定 然后再接入试试.");
+    expect(result.text).not.toContain("关于session-memory 你打算怎么修?");
+    expect(result.text.match(/assessment: message `#49`/g)).toHaveLength(1);
+    expect(result.text).not.toContain("evidence_only: message `#49`");
+    expect(result.text).not.toContain("newest_evidence: 762c950642fe");
+    expect(result.text).not.toContain("missed_current_state: 762c950642fe");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("reports session-memory capture candidates from summaries when raw messages are stale", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);

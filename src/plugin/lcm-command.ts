@@ -2987,14 +2987,14 @@ function collectCurrentStateSignals(values: string[]): string[] {
     const normalized = stripLcmExpansionDetails(value).replace(/\s+/g, " ");
     if (
       !includesAny(normalized.toLowerCase(), ["commit", "提交", "写入", "落盘", "已抓取", "summary", "transcript", "canvas"]) &&
-      !/\b[0-9a-f]{7,40}\b/i.test(normalized) &&
+      !/(?<![0-9a-f-])[0-9a-f]{7,40}(?![0-9a-f-])/i.test(normalized) &&
       !/\b(?:Friday-memory|memory|self-improving)\//.test(normalized) &&
       !/\.(?:gd|tscn|tres)\b/i.test(normalized) &&
       !includesAny(normalized.toLowerCase(), ["解析通过", "parse passed", "测试全部通过", "tests passed"])
     ) {
       continue;
     }
-    for (const match of normalized.matchAll(/\b[0-9a-f]{7,40}\b/g)) {
+    for (const match of normalized.matchAll(/(?<![0-9a-f-])[0-9a-f]{7,40}(?![0-9a-f-])/g)) {
       if (!/^\d+$/.test(match[0]!)) {
         signals.add(match[0]!);
       }
@@ -3105,7 +3105,8 @@ function collectCurrentStateProbe(items: Array<{
     }
     const normalized = compactContent.toLowerCase();
     if (
-      looksLikeCurrentStateMetaDiscussion(compactContent) ||
+      (looksLikeCurrentStateMetaDiscussion(compactContent) &&
+        !looksLikeVerifiedToolingCompletion(compactContent)) ||
       (item.role !== "user" && looksLikeAssistantAssessment(compactContent))
     ) {
       continue;
@@ -3304,7 +3305,7 @@ function extractCurrentStateNextActionText(value: string): string {
     }
   }
 
-  const sentences = compact.match(/[^。！？!?]+[。！？!?]?/g) ?? [compact];
+  const sentences = compact.match(/.*?(?:[。！？!?]|\.(?=\s|$)|$)/g)?.filter((part) => part.trim()) ?? [compact];
   const sentence = sentences.find((part) => scoreCurrentStateNextAction(part) > 0);
   if (!sentence) {
     return compact;
@@ -3319,7 +3320,7 @@ function extractCurrentStateActionSentence(value: string): string {
   if (!trimmed) {
     return "";
   }
-  const sentenceEnd = trimmed.search(/[。！？!?](?:\s|$)/);
+  const sentenceEnd = trimmed.search(/[。！？!?](?:\s|$)|\.(?=\s|$)/);
   if (sentenceEnd >= 0) {
     return trimmed.slice(0, sentenceEnd + 1).trim();
   }
@@ -3402,10 +3403,17 @@ function getCurrentStateWorkline(value: string): SessionMemoryCurrentStateWorkli
 
 function scoreCurrentStateCompleted(value: string): number {
   const normalized = value.toLowerCase();
-  if (looksLikeSessionMemoryToolingMeta(value) || looksLikeIncompleteOrBlockedProgress(value)) {
+  const verifiedToolingCompletion = looksLikeVerifiedToolingCompletion(value);
+  if (
+    (looksLikeSessionMemoryToolingMeta(value) && !verifiedToolingCompletion) ||
+    looksLikeIncompleteOrBlockedProgress(value)
+  ) {
     return 0;
   }
   let score = 0;
+  if (verifiedToolingCompletion) {
+    score += 240;
+  }
   if (looksLikeVerifiedLocalCompletion(value)) {
     score += 240;
   }
@@ -3477,6 +3485,16 @@ function looksLikeVerifiedLocalCompletion(value: string): boolean {
       "文件包括",
     ]);
   return reportsOwnCompletion && hasConcreteProof && !looksLikeAssistantAssessment(value);
+}
+
+function looksLikeVerifiedToolingCompletion(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    looksLikeSessionMemoryToolingMeta(value) &&
+    includesAny(normalized, ["修好了", "已修好", "已修复", "已提交并推送", "提交并推送"]) &&
+    /(?<![0-9a-f-])[0-9a-f]{7,40}(?![0-9a-f-])/i.test(normalized) &&
+    includesAny(normalized, ["验证结果", "测试通过", "tests passed", "构建通过", "build passed"])
+  );
 }
 
 function looksLikeIncompleteOrBlockedProgress(value: string): boolean {
@@ -3648,7 +3666,8 @@ function currentStateCompletionResolvesTask(
   }
   if (
     getCurrentStateWorkline(getSessionMemoryCaptureAnalysisText(completed)) !==
-    getCurrentStateWorkline(getSessionMemoryCaptureAnalysisText(task))
+      getCurrentStateWorkline(getSessionMemoryCaptureAnalysisText(task)) &&
+    !sharesGenericRepairCompletionAnchor(completed, task)
   ) {
     return false;
   }
@@ -3666,7 +3685,20 @@ function currentStateCompletionResolvesTask(
   return sharedTaskAnchors >= 2 || hasMeaningfulTextOverlap(completedText, taskText, {
     minBigrams: 6,
     minTrigrams: 2,
-  });
+  }) || sharesGenericRepairCompletionAnchor(completed, task);
+}
+
+function sharesGenericRepairCompletionAnchor(
+  completed: SessionMemoryCaptureCandidate,
+  task: SessionMemoryCaptureCandidate,
+): boolean {
+  const completedText = getSessionMemoryCaptureAnalysisText(completed).toLowerCase();
+  const taskText = getSessionMemoryCaptureAnalysisText(task).toLowerCase();
+  return (
+    taskText.replace(/\s+/g, "").length <= 24 &&
+    includesAny(taskText, ["修一下", "继续修", "帮我修", "处理一下"]) &&
+    includesAny(completedText, ["修好了", "已修好", "已修复", "修复完成"])
+  );
 }
 
 function currentStateCompletionTextSupersedes(completedValue: string, candidateValue: string): boolean {
@@ -4119,7 +4151,7 @@ function classifySessionMemoryCaptureCandidate(params: {
         sourceRef: params.sourceRef,
         role: params.role,
         createdAt: params.createdAt,
-        claim,
+        claim: truncateMiddle(extractCurrentStateNextActionText(content), 220),
         evidenceSignals,
         why: "User sets an ordered plan with a prerequisite before a later action.",
         confidence: "high",
@@ -4542,7 +4574,7 @@ async function buildSessionMemoryCaptureCandidatesText(params: {
         .filter((candidate) => candidate.kind === "assessment")
         .map((candidate) => buildStatLine("assessment", formatSessionMemoryCaptureSource(candidate))),
       ...reviewedCandidates
-        .filter((candidate) => candidate.reviewBucket === "evidence_only")
+        .filter((candidate) => candidate.reviewBucket === "evidence_only" && candidate.kind !== "assessment")
         .map((candidate) => buildStatLine("evidence_only", formatSessionMemoryCaptureSource(candidate))),
       ...reviewedCandidates
         .filter((candidate) => candidate.reviewBucket === "duplicate")
