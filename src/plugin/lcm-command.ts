@@ -3331,11 +3331,30 @@ function compareCurrentStateProbeCandidates(
   left: SessionMemoryCurrentStateProbeCandidate,
   right: SessionMemoryCurrentStateProbeCandidate,
 ): number {
+  if (
+    left.workline === right.workline &&
+    looksLikeVerifiedCompletionReport(left.text) &&
+    looksLikeVerifiedCompletionReport(right.text)
+  ) {
+    const timestampDelta = compareTimestampDesc(left.createdAt, right.createdAt);
+    if (timestampDelta !== 0) {
+      return timestampDelta;
+    }
+  }
   const scoreDelta = right.score - left.score;
   if (scoreDelta !== 0) {
     return scoreDelta;
   }
   return compareTimestampDesc(left.createdAt, right.createdAt);
+}
+
+function looksLikeVerifiedCompletionReport(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    includesAny(normalized, ["修好了", "已修好", "已修复", "已完成", "已提交并推送", "提交并推送"]) &&
+    /(?<![0-9a-f-])[0-9a-f]{7,40}(?![0-9a-f-])/i.test(normalized) &&
+    includesAny(normalized, ["验证", "测试通过", "tests passed", "构建通过", "build passed"])
+  );
 }
 
 function getCurrentStateWorkline(value: string): SessionMemoryCurrentStateWorkline {

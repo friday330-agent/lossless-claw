@@ -3289,6 +3289,70 @@ describe("lcm command", () => {
     expect(existsSync(sessionMemoryDbPath)).toBe(false);
   });
 
+  it("prefers the newest verified tooling completion and consumes its reload expectation", async () => {
+    const fixture = createCommandFixture();
+    tempDirs.add(fixture.tempDir);
+    dbPaths.add(fixture.dbPath);
+
+    const sessionMemoryDbPath = join(fixture.tempDir, "session-memory-capture-candidates-latest-tooling.db");
+    const sessionKey = "agent:main:dashboard:latest-tooling";
+    const config = resolveLcmConfig({}, {
+      dbPath: fixture.dbPath,
+      sessionMemoryOverlay: {
+        dbPath: sessionMemoryDbPath,
+      },
+    });
+    const command = createLcmCommand({ db: fixture.db, config });
+    const conversation = await fixture.conversationStore.createConversation({
+      sessionId: "session-memory-capture-candidates-latest-tooling",
+      sessionKey,
+    });
+
+    await fixture.conversationStore.createMessagesBulk([
+      {
+        conversationId: conversation.conversationId,
+        seq: 185,
+        role: "assistant",
+        content:
+          "修好了，已提交并推送：`11d6e91`。现在 `capture-candidates` 会正确归并完成态。验证结果：构建通过，50 个测试文件、1019 项测试全部通过。等合适时机重载后，再用同一条命令做实机验证。",
+        tokenCount: 58,
+      },
+      {
+        conversationId: conversation.conversationId,
+        seq: 245,
+        role: "assistant",
+        content:
+          "这次实机报告暴露的第二层问题也修好了，已推送：`a70aac5`。下次重载后，预期输出会变成：`latest_completed` 识别最新修复，`newest_evidence` 包含提交和测试结果，不再误报 `missed_current_state`。验证：构建通过，50 个测试文件、1020 项全部通过。仍未写数据库、未改 overlay、未重启 OpenClaw。",
+        tokenCount: 62,
+      },
+    ]);
+    fixture.db.prepare(
+      `UPDATE messages
+       SET created_at = CASE seq
+         WHEN 185 THEN '2026-07-26 20:44:36'
+         WHEN 245 THEN '2026-07-26 20:52:20'
+       END
+       WHERE conversation_id = ? AND seq IN (185, 245)`,
+    ).run(conversation.conversationId);
+
+    const result = await command.handler!(createCommandContext(
+      "session-memory capture-candidates --limit 80",
+      {
+        sessionId: "session-memory-capture-candidates-latest-tooling",
+        sessionKey,
+      },
+    )) as { text: string };
+
+    expect(result.text).toContain("latest_completed: 这次实机报告暴露的第二层问题也修好了，已推送：`a70aac5`");
+    expect(result.text).not.toContain("latest_completed: 修好了，已提交并推送：`11d6e91`");
+    expect(result.text).toContain("next_action: completed");
+    expect(result.text).not.toContain("next_action: 下次重载后");
+    expect(result.text).toContain("newest_evidence: a70aac5");
+    expect(result.text).toContain("writes: none");
+    expect(result.text).toContain("accepted memory: none");
+    expect(existsSync(sessionMemoryDbPath)).toBe(false);
+  });
+
   it("reports session-memory capture candidates from summaries when raw messages are stale", async () => {
     const fixture = createCommandFixture();
     tempDirs.add(fixture.tempDir);
